@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/main.ts",
+    "dev": "tsx watch --ignore 'src/**/__tests__/**' --ignore 'dist/**' src/main.ts",
     "start": "tsx src/main.ts",
     "build": "tsc",
     "test": "vitest run"

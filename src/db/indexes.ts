@@ -13,4 +13,9 @@ export async function ensureIndexes(db: Db): Promise<void> {
     { key: { dag_run_id: 1, task_id: 1 }, unique: true },
     { key: { dag_id: 1, state: 1 } },
   ])
+
+  // xcoms: lookup by run + source task + key
+  await db.collection('xcoms').createIndexes([
+    { key: { dag_run_id: 1, task_id: 1, key: 1 }, unique: true },
+  ])
 }

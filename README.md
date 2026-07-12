@@ -2,107 +2,191 @@
 
 A lightweight reimplementation of Apache Airflow's core concepts in Node.js + Fastify + MongoDB.
 
-> **Status:** Work in progress — Phase 1 complete (DB + indexes).
-
 ---
 
 ## Prerequisites
 
-| Tool | Version | Install |
-|------|---------|---------|
-| Node.js | v22+ | [nodejs.org](https://nodejs.org) or `nvm install 22` |
-| npm | v10+ | Comes with Node.js |
-| Docker Desktop | v24+ | [docker.com](https://www.docker.com/products/docker-desktop/) |
+- **Node.js** v22+ — [nodejs.org](https://nodejs.org) or `nvm install 22`
+- **npm** v10+ — comes with Node.js
+- **Docker Desktop** — [docker.com](https://www.docker.com/products/docker-desktop/)
 
-> **Note:** MongoDB runs inside Docker — no local MongoDB install needed.
+MongoDB and Redis run inside Docker — no local installs needed.
 
 ---
 
 ## Quick Start
 
-### 1. Clone and install dependencies
-
 ```bash
 git clone <repo-url>
 cd airflow-nodejs
 npm install
+docker-compose up -d     # starts MongoDB + Redis
+npm run dev              # starts scheduler + API + local task executor
 ```
 
-### 2. Start MongoDB
+Open **http://localhost:3000** for the web UI.
+
+---
+
+## Running Modes
+
+### Local mode (default — no Redis needed)
+
+Tasks execute in child processes on the same machine.
 
 ```bash
-docker-compose up -d
+npm run dev
 ```
 
-MongoDB will be available at `mongodb://localhost:27017/airflow`.
+### Distributed mode (BullMQ via Redis)
 
-### 3. Verify Phase 1 (DB connection + indexes)
+Tasks are queued in Redis and picked up by worker processes — can run on separate machines.
 
 ```bash
-npx tsx src/db/verify.ts
+npm run dev:bullmq
 ```
 
-Expected output:
+### Standalone worker (separate machine)
+
+Run additional workers anywhere with access to Redis + MongoDB:
+
+```bash
+REDIS_URL=redis://<host>:6379 \
+MONGO_URL=mongodb://<host>:27017 \
+npm run worker
 ```
-✅ MongoDB connected to: airflow
-✅ Indexes created
-Collections: [ 'task_instances', 'dag_runs' ]
-✅ Phase 1 complete
+
+Scale concurrency per worker (default: 4):
+
+```bash
+WORKER_CONCURRENCY=8 REDIS_URL=redis://localhost:6379 npm run worker
 ```
 
 ---
 
-## Project Structure
+## API
 
 ```
-airflow-nodejs/
-├── docker-compose.yml       # MongoDB 7 container
-├── package.json
-├── tsconfig.json
-└── src/
-    └── db/
-        ├── client.ts        # MongoDB connect/close/getDb helpers
-        ├── indexes.ts       # Collection index definitions
-        └── verify.ts        # Phase 1 verification script
+GET  /health                              server status + worker pool stats
+GET  /dags                                list all loaded Dags
+GET  /dags/:dagId                         Dag detail + task graph
+POST /dags/:dagId/trigger                 manually trigger a run
+GET  /dags/:dagId/runs                    recent runs for a Dag
+GET  /dag-runs/:runId                     run state + all task states
+GET  /dag-runs/:runId/tasks/:taskId/logs  task stdout/stderr log lines
 ```
+
+---
+
+## Writing a Dag
+
+Create a `.ts` file in `dags/`:
+
+```typescript
+import { dag } from '../src/dag/types.js'
+
+export default dag({
+  id: 'my_pipeline',
+  schedule: '0 * * * *',  // cron — or null for manual-only
+  tasks: {
+    extract: {
+      retries: 2,
+      retryDelay: 5000,   // ms between retries
+      run: async (ctx) => {
+        const result = { rows: 42 }
+        await ctx.xcom.push('result', result)
+      }
+    },
+    transform: {
+      dependsOn: ['extract'],
+      run: async (ctx) => {
+        const data = await ctx.xcom.pull('extract', 'result')
+        // data === { rows: 42 }
+      }
+    },
+    load: {
+      dependsOn: ['transform'],
+      run: async (ctx) => {
+        console.log('loading...')
+      }
+    }
+  }
+})
+```
+
+Dags are hot-reloaded every 5 seconds — no restart needed.
 
 ---
 
 ## Architecture
 
-This project reimplements Airflow's core scheduling loop using:
+```
+Scheduler (poll loop)
+  ├── Dag loader          scans dags/ every 5s, registers in memory
+  ├── Cron scheduler      fires runs on schedule via node-cron
+  ├── Claim               findOneAndUpdate (atomic, like FOR UPDATE SKIP LOCKED)
+  └── Executor
+        ├── local mode    fork child_process per task
+        └── BullMQ mode   enqueue to Redis → worker picks up
 
-- **MongoDB** — metadata store (dags, dag_runs, task_instances)
-- **Fastify** — REST API (trigger runs, inspect state)
-- **node:child_process** — local task executor (one process per task)
-- **Atomic claim** — `findOneAndUpdate` replaces PostgreSQL's `FOR UPDATE SKIP LOCKED`
+Worker (local or remote)
+  ├── Runs task function in isolated child process
+  ├── XCom               push/pull via MongoDB (direct connection)
+  └── Logs               stdout/stderr captured → task_logs collection
 
-### Collections
-
-- `dags` — registered Dag definitions (upserted on load)
-- `dag_runs` — each execution of a Dag (`queued → running → success/failed`)
-- `task_instances` — each task within a run, with dependency tracking
-
----
-
-## Build Phases
-
-- [x] **Phase 1** — Docker Compose + MongoDB client + indexes
-- [ ] **Phase 2** — Dag loader + in-memory registry
-- [ ] **Phase 3** — Scheduler loop + dag_run/task_instance creation
-- [ ] **Phase 4** — Atomic task claim + child_process executor
-- [ ] **Phase 5** — Fastify API (trigger, inspect runs/tasks)
+MongoDB collections:
+  dag_runs          each Dag execution (queued → running → success/failed)
+  task_instances    each task within a run + dependency tracking
+  xcoms             cross-task data (push/pull by key)
+  task_logs         stdout/stderr lines per task
+```
 
 ---
 
-## Stopping MongoDB
+## Environment Variables
 
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MONGO_URL` | `mongodb://localhost:27017` | MongoDB connection URL |
+| `DB_NAME` | `airflow` | MongoDB database name |
+| `REDIS_URL` | _(unset)_ | Redis URL — enables BullMQ distributed mode |
+| `WORKER_CONCURRENCY` | `4` | Concurrent tasks per BullMQ worker |
+| `MAX_WORKERS` | `8` | Max concurrent tasks in local fork mode |
+| `PORT` | `3000` | API + UI port |
+
+---
+
+## Scripts
+
+```bash
+npm run dev          # local mode with file watching
+npm run dev:bullmq   # BullMQ mode with file watching
+npm run worker       # standalone BullMQ worker
+npm test             # run all tests
+npm start            # production start (no watch)
+```
+
+---
+
+## Docker
+
+Start all services:
+```bash
+docker-compose up -d
+```
+
+Stop without deleting data:
 ```bash
 docker-compose down
 ```
 
-To also delete all data:
-
+Stop and delete all data:
 ```bash
 docker-compose down -v
+```
+
+Check Redis:
+```bash
+docker exec airflow-nodejs-redis-1 redis-cli ping
+# PONG
 ```

@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify'
+import { ObjectId } from 'mongodb'
 import { listDags, getDag } from '../../dag/registry.js'
 import { createRun } from '../../scheduler/runs.js'
+import { advanceRun } from '../../scheduler/index.js'
 
 export async function dagsRoutes(app: FastifyInstance): Promise<void> {
   // GET /dags — list all registered dags
@@ -36,6 +38,15 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
     const db = app.mongo
     const runId = await createRun(db, dag)
 
-    return reply.status(201).send({ run_id: runId, dag_id: dag.id, state: 'queued' })
+    // Execute immediately — don't wait for the next scheduler tick
+    await advanceRun(db, runId)
+
+    // Return actual state from DB (will be success/failed if tasks are fast)
+    const run = await db.collection('dag_runs').findOne({ _id: new ObjectId(runId) })
+    return reply.status(201).send({
+      run_id: runId,
+      dag_id: dag.id,
+      state: run?.state ?? 'queued',
+    })
   })
 }

@@ -2,6 +2,7 @@ import { connectDb, closeDb } from './db/client.js'
 import { ensureIndexes } from './db/indexes.js'
 import { loadDags } from './dag/loader.js'
 import { startScheduler, stopScheduler } from './scheduler/index.js'
+import { recoverOrphanedRuns } from './scheduler/recovery.js'
 import { buildServer } from './api/server.js'
 
 const PORT = Number(process.env.PORT ?? 3000)
@@ -10,6 +11,7 @@ const HOST = process.env.HOST ?? '0.0.0.0'
 async function main(): Promise<void> {
   const db = await connectDb()
   await ensureIndexes(db)
+  await recoverOrphanedRuns(db)
   await loadDags()
 
   startScheduler(db)

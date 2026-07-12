@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Airflow Node</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+    header { background: #1a1d27; border-bottom: 1px solid #2d3748; padding: 14px 24px; display: flex; align-items: center; gap: 12px; }
+    header h1 { font-size: 18px; font-weight: 600; color: #63b3ed; }
+    .workers-badge { font-size: 12px; background: #2d3748; padding: 3px 10px; border-radius: 12px; color: #a0aec0; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+    .section-title { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: #718096; margin-bottom: 12px; }
+    .dag-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin-bottom: 32px; }
+    .dag-card { background: #1a1d27; border: 1px solid #2d3748; border-radius: 8px; padding: 16px; }
+    .dag-card h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+    .dag-meta { font-size: 12px; color: #718096; margin-bottom: 12px; }
+    .tasks-list { font-size: 12px; color: #a0aec0; margin-bottom: 12px; }
+    .tasks-list span { background: #2d3748; padding: 2px 7px; border-radius: 4px; margin-right: 4px; display: inline-block; margin-bottom: 4px; }
+    .btn { padding: 7px 14px; border-radius: 6px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; transition: opacity .15s; }
+    .btn:hover { opacity: .85; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .btn-primary { background: #3182ce; color: #fff; }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
+    .runs-table { width: 100%; border-collapse: collapse; }
+    .runs-table th { text-align: left; font-size: 12px; color: #718096; font-weight: 500; padding: 8px 12px; border-bottom: 1px solid #2d3748; }
+    .runs-table td { padding: 10px 12px; border-bottom: 1px solid #1e2130; font-size: 13px; }
+    .runs-table tr:hover td { background: #1e2130; }
+    .badge { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+    .badge-success { background: #1c4532; color: #68d391; }
+    .badge-failed  { background: #4a1515; color: #fc8181; }
+    .badge-running { background: #1a365d; color: #63b3ed; }
+    .badge-queued  { background: #2d3748; color: #a0aec0; }
+    .run-detail { margin-top: 24px; background: #1a1d27; border: 1px solid #2d3748; border-radius: 8px; padding: 20px; }
+    .run-detail h3 { font-size: 14px; margin-bottom: 16px; }
+    .task-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid #1e2130; }
+    .task-row:last-child { border-bottom: none; }
+    .task-name { font-size: 13px; min-width: 140px; font-family: monospace; }
+    .task-deps { font-size: 11px; color: #718096; flex: 1; }
+    .duration { font-size: 11px; color: #718096; min-width: 60px; text-align: right; }
+    .error-msg { font-size: 11px; color: #fc8181; margin-top: 4px; font-family: monospace; }
+    .refresh-btn { background: none; border: 1px solid #2d3748; color: #718096; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+    .refresh-btn:hover { border-color: #4a5568; color: #a0aec0; }
+    .empty { color: #4a5568; font-size: 13px; padding: 24px 0; text-align: center; }
+    .dag-filter { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+    .filter-btn { background: #2d3748; border: 1px solid #4a5568; color: #a0aec0; padding: 4px 12px; border-radius: 14px; cursor: pointer; font-size: 12px; }
+    .filter-btn.active { background: #3182ce; border-color: #3182ce; color: #fff; }
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 700px) { .split { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+
+const BASE = '';
+
+const statusBadge = (state) => <span className={`badge badge-${state}`}>{state}</span>;
+
+const duration = (start, end) => {
+  if (!start) return '-';
+  const ms = new Date(end ?? Date.now()) - new Date(start);
+  return ms < 1000 ? `${ms}ms` : `${(ms/1000).toFixed(1)}s`;
+};
+
+function useInterval(fn, ms) {
+  useEffect(() => {
+    fn();
+    const id = setInterval(fn, ms);
+    return () => clearInterval(id);
+  }, [fn, ms]);
+}
+
+// ── Health ────────────────────────────────────────────────────────────
+function Health() {
+  const [info, setInfo] = useState(null);
+  const fetch_ = useCallback(() =>
+    fetch(`${BASE}/health`).then(r => r.json()).then(setInfo).catch(()=>{}), []);
+  useInterval(fetch_, 3000);
+  if (!info) return null;
+  return (
+    <span className="workers-badge">
+      workers: {info.workers?.active ?? 0} active · {info.workers?.queued ?? 0} waiting
+    </span>
+  );
+}
+
+// ── Dag Cards ─────────────────────────────────────────────────────────
+function DagCard({ dag, onTrigger, onSelect, selected }) {
+  const [triggering, setTriggering] = useState(false);
+  const trigger = async () => {
+    setTriggering(true);
+    await fetch(`${BASE}/dags/${dag.id}/trigger`, { method: 'POST' });
+    setTriggering(false);
+    onTrigger();
+  };
+  return (
+    <div className="dag-card" style={{ borderColor: selected ? '#3182ce' : undefined }}>
+      <h3>{dag.id}</h3>
+      <div className="dag-meta">
+        {dag.schedule ? `⏰ ${dag.schedule}` : '● manual only'}
+      </div>
+      <div className="tasks-list">
+        {dag.tasks.map(t => <span key={t}>{t}</span>)}
+      </div>
+      <div style={{ display:'flex', gap:8 }}>
+        <button className="btn btn-primary btn-sm" onClick={trigger} disabled={triggering}>
+          {triggering ? '…' : '▶ Trigger'}
+        </button>
+        <button className="btn btn-sm" style={{background:'#2d3748',color:'#a0aec0'}}
+          onClick={() => onSelect(dag.id)}>
+          {selected ? 'Hide runs' : 'View runs'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Run Detail ────────────────────────────────────────────────────────
+function RunDetail({ runId, onClose }) {
+  const [run, setRun] = useState(null);
+  const fetch_ = useCallback(() =>
+    fetch(`${BASE}/dag-runs/${runId}`).then(r=>r.json()).then(setRun).catch(()=>{}), [runId]);
+  useInterval(fetch_, 2000);
+  if (!run) return <div className="run-detail"><div className="empty">Loading…</div></div>;
+  return (
+    <div className="run-detail">
+      <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:16}}>
+        <h3 style={{flex:1}}>Run: <code style={{fontSize:12}}>{runId.slice(-8)}</code></h3>
+        {statusBadge(run.state)}
+        <button className="refresh-btn" onClick={fetch_}>↻</button>
+        <button className="refresh-btn" onClick={onClose}>✕</button>
+      </div>
+      {run.tasks.map(t => (
+        <div key={t.task_id} className="task-row">
+          <span className="task-name">{t.task_id}</span>
+          {statusBadge(t.state)}
+          {t.depends_on?.length > 0 &&
+            <span className="task-deps">← {t.depends_on.join(', ')}</span>}
+          <span className="duration">{duration(t.started_at, t.ended_at)}</span>
+          {t.error && <div className="error-msg">{t.error}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Runs Table ────────────────────────────────────────────────────────
+function RunsTable({ dagId, onSelectRun }) {
+  const [runs, setRuns] = useState([]);
+  const fetch_ = useCallback(() =>
+    fetch(`${BASE}/dags/${dagId}/runs`).then(r=>r.json()).then(setRuns).catch(()=>{}), [dagId]);
+  useInterval(fetch_, 3000);
+  if (!runs.length) return <div className="empty">No runs yet</div>;
+  return (
+    <table className="runs-table">
+      <thead><tr>
+        <th>Run ID</th><th>State</th><th>Created</th><th></th>
+      </tr></thead>
+      <tbody>
+        {runs.map(r => (
+          <tr key={r.run_id}>
+            <td><code style={{fontSize:12}}>{r.run_id.slice(-8)}</code></td>
+            <td>{statusBadge(r.state)}</td>
+            <td style={{color:'#718096'}}>{new Date(r.created_at).toLocaleTimeString()}</td>
+            <td><button className="refresh-btn" onClick={() => onSelectRun(r.run_id)}>detail →</button></td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────
+function App() {
+  const [dags, setDags] = useState([]);
+  const [selectedDag, setSelectedDag] = useState(null);
+  const [selectedRun, setSelectedRun] = useState(null);
+
+  const fetchDags = useCallback(() =>
+    fetch(`${BASE}/dags`).then(r=>r.json()).then(setDags).catch(()=>{}), []);
+
+  useInterval(fetchDags, 5000);
+
+  const handleTrigger = () => {
+    if (selectedDag) fetchDags();
+  };
+
+  const selectDag = (id) => {
+    setSelectedDag(prev => prev === id ? null : id);
+    setSelectedRun(null);
+  };
+
+  return (
+    <>
+      <header>
+        <h1>✈ Airflow Node</h1>
+        <Health />
+      </header>
+      <div className="container">
+        <div className="section-title">Dags ({dags.length})</div>
+        <div className="dag-grid">
+          {dags.map(d => (
+            <DagCard key={d.id} dag={d}
+              selected={selectedDag === d.id}
+              onTrigger={handleTrigger}
+              onSelect={selectDag} />
+          ))}
+          {!dags.length && <div className="empty">No Dags loaded</div>}
+        </div>
+
+        {selectedDag && (
+          <div className="split">
+            <div>
+              <div className="section-title" style={{marginBottom:8}}>
+                Runs — {selectedDag}
+              </div>
+              <RunsTable dagId={selectedDag} onSelectRun={setSelectedRun} />
+            </div>
+            {selectedRun && (
+              <RunDetail runId={selectedRun} onClose={() => setSelectedRun(null)} />
+            )}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { ObjectId } from 'mongodb'
+import { getTaskLogs } from '../../logs/index.js'
 
 export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
   // GET /dag-runs/:runId — get a single run + task summary
@@ -32,6 +33,21 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
       })),
     })
   })
+
+  // GET /dag-runs/:runId/tasks/:taskId/logs — task log lines
+  app.get<{ Params: { runId: string; taskId: string } }>(
+    '/dag-runs/:runId/tasks/:taskId/logs',
+    async (req, reply) => {
+      const { runId, taskId } = req.params
+      if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
+      const logs = await getTaskLogs(app.mongo, runId, taskId)
+      return reply.send(logs.map(l => ({
+        ts: l.ts,
+        stream: l.stream,
+        line: l.line,
+      })))
+    }
+  )
 
   // GET /dags/:dagId/runs — list recent runs for a dag
   app.get<{ Params: { dagId: string } }>('/dags/:dagId/runs', async (req, reply) => {

@@ -1,10 +1,12 @@
 import { fork } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { resolve as pathResolve, dirname } from 'node:path'
+import { createInterface } from 'node:readline'
 import type { Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
 import { getDag } from '../dag/registry.js'
 import { acquire, release } from './pool.js'
+import { appendLog } from '../logs/index.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WORKER_SCRIPT = pathResolve(__dirname, 'worker.ts')
@@ -14,7 +16,7 @@ type WorkerMsg = { type: 'done'; success: boolean; error?: string }
 
 /**
  * Execute a claimed task in a child process.
- * Worker handles XCom directly via its own MongoDB connection — no IPC for data.
+ * stdout/stderr are captured line-by-line and stored in task_logs.
  */
 export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
   const dag = getDag(ti.dag_id)
@@ -29,13 +31,28 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     return
   }
 
-  await acquire()  // wait for a free worker slot
+  await acquire()
   console.log(`[executor] running ${ti.dag_id}.${ti.task_id} (run: ${ti.dag_run_id})`)
 
   return new Promise((done) => {
     const child = fork(WORKER_SCRIPT, [], {
       execPath: TSX_BIN,
       env: { ...process.env },
+      silent: true,  // capture stdout/stderr as streams
+    })
+
+    // Pipe stdout lines → logs collection + mirror to parent stdout
+    const rl_out = createInterface({ input: child.stdout! })
+    rl_out.on('line', (line) => {
+      process.stdout.write(`${line}\n`)
+      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line)
+    })
+
+    // Pipe stderr lines → logs collection + mirror to parent stderr
+    const rl_err = createInterface({ input: child.stderr! })
+    rl_err.on('line', (line) => {
+      process.stderr.write(`${line}\n`)
+      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line)
     })
 
     child.send({

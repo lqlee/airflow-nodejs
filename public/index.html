@@ -51,6 +51,16 @@
     .filter-btn.active { background: #3182ce; border-color: #3182ce; color: #fff; }
     .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     @media (max-width: 700px) { .split { grid-template-columns: 1fr; } }
+    .log-panel { margin-top: 16px; background: #0d1117; border: 1px solid #2d3748; border-radius: 6px; }
+    .log-panel-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #2d3748; font-size: 12px; color: #718096; }
+    .log-panel-header strong { color: #a0aec0; font-family: monospace; }
+    .log-lines { padding: 10px 12px; max-height: 280px; overflow-y: auto; font-family: monospace; font-size: 12px; line-height: 1.6; }
+    .log-line { display: flex; gap: 12px; }
+    .log-ts { color: #4a5568; white-space: nowrap; flex-shrink: 0; }
+    .log-stdout { color: #e2e8f0; }
+    .log-stderr { color: #fbb6ce; }
+    .log-btn { background: none; border: 1px solid #2d3748; color: #718096; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+    .log-btn:hover { border-color: #4a5568; color: #a0aec0; }
   </style>
 </head>
 <body>
@@ -121,9 +131,39 @@ function DagCard({ dag, onTrigger, onSelect, selected }) {
   );
 }
 
+// ── Log Panel ─────────────────────────────────────────────────────────
+function LogPanel({ runId, taskId, onClose }) {
+  const [lines, setLines] = useState([]);
+  const fetch_ = useCallback(() =>
+    fetch(`${BASE}/dag-runs/${runId}/tasks/${taskId}/logs`)
+      .then(r => r.json()).then(setLines).catch(() => {}), [runId, taskId]);
+  useInterval(fetch_, 2000);
+  const fmt = ts => new Date(ts).toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return (
+    <div className="log-panel">
+      <div className="log-panel-header">
+        <strong>{taskId}</strong> logs
+        <span style={{flex:1}} />
+        <button className="log-btn" onClick={fetch_}>↻</button>
+        <button className="log-btn" onClick={onClose}>✕</button>
+      </div>
+      <div className="log-lines">
+        {lines.length === 0 && <span style={{color:'#4a5568'}}>No logs yet</span>}
+        {lines.map((l, i) => (
+          <div key={i} className="log-line">
+            <span className="log-ts">{fmt(l.ts)}</span>
+            <span className={l.stream === 'stderr' ? 'log-stderr' : 'log-stdout'}>{l.line}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── Run Detail ────────────────────────────────────────────────────────
 function RunDetail({ runId, onClose }) {
   const [run, setRun] = useState(null);
+  const [logTask, setLogTask] = useState(null);
   const fetch_ = useCallback(() =>
     fetch(`${BASE}/dag-runs/${runId}`).then(r=>r.json()).then(setRun).catch(()=>{}), [runId]);
   useInterval(fetch_, 2000);
@@ -137,13 +177,21 @@ function RunDetail({ runId, onClose }) {
         <button className="refresh-btn" onClick={onClose}>✕</button>
       </div>
       {run.tasks.map(t => (
-        <div key={t.task_id} className="task-row">
-          <span className="task-name">{t.task_id}</span>
-          {statusBadge(t.state)}
-          {t.depends_on?.length > 0 &&
-            <span className="task-deps">← {t.depends_on.join(', ')}</span>}
-          <span className="duration">{duration(t.started_at, t.ended_at)}</span>
-          {t.error && <div className="error-msg">{t.error}</div>}
+        <div key={t.task_id}>
+          <div className="task-row">
+            <span className="task-name">{t.task_id}</span>
+            {statusBadge(t.state)}
+            {t.depends_on?.length > 0 &&
+              <span className="task-deps">← {t.depends_on.join(', ')}</span>}
+            <span className="duration">{duration(t.started_at, t.ended_at)}</span>
+            <button className="log-btn"
+              onClick={() => setLogTask(prev => prev === t.task_id ? null : t.task_id)}>
+              {logTask === t.task_id ? 'hide logs' : 'logs'}
+            </button>
+          </div>
+          {t.error && <div className="error-msg" style={{padding:'4px 0 4px 140px'}}>{t.error}</div>}
+          {logTask === t.task_id &&
+            <LogPanel runId={runId} taskId={t.task_id} onClose={() => setLogTask(null)} />}
         </div>
       ))}
     </div>

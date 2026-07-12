@@ -18,4 +18,9 @@ export async function ensureIndexes(db: Db): Promise<void> {
   await db.collection('xcoms').createIndexes([
     { key: { dag_run_id: 1, task_id: 1, key: 1 }, unique: true },
   ])
+
+  // task_logs: fetch logs for a task ordered by time
+  await db.collection('task_logs').createIndexes([
+    { key: { dag_run_id: 1, task_id: 1, ts: 1 } },
+  ])
 }

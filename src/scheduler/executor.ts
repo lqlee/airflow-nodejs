@@ -4,6 +4,7 @@ import { resolve as pathResolve, dirname } from 'node:path'
 import type { Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
 import { getDag } from '../dag/registry.js'
+import { acquire, release } from './pool.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WORKER_SCRIPT = pathResolve(__dirname, 'worker.ts')
@@ -28,6 +29,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     return
   }
 
+  await acquire()  // wait for a free worker slot
   console.log(`[executor] running ${ti.dag_id}.${ti.task_id} (run: ${ti.dag_run_id})`)
 
   return new Promise((done) => {
@@ -44,6 +46,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
 
     child.on('message', async (msg: WorkerMsg) => {
       if (msg.type !== 'done') return
+      release()
       if (msg.success) {
         await markSuccess(db, ti)
         console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id}`)
@@ -61,6 +64,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     })
 
     child.on('error', async (err) => {
+      release()
       await markFailed(db, ti, err.message)
       done()
     })

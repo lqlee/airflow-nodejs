@@ -2,7 +2,7 @@ import { ObjectId, type Db } from 'mongodb'
 import { loadDags } from '../dag/loader.js'
 import { listDags } from '../dag/registry.js'
 import { createRun } from './runs.js'
-import { claimNextTask } from './claim.js'
+import { claimReadyTasks } from './claim.js'
 import { executeTask } from './executor.js'
 import { syncCronJobs, stopAllCronJobs } from './cron.js'
 
@@ -59,11 +59,12 @@ export async function advanceRun(db: Db, dagRunId: string): Promise<void> {
     { $set: { state: 'running' } }
   )
 
-  // Keep claiming + executing until no more ready tasks
-  let claimed = await claimNextTask(db, dagRunId)
-  while (claimed) {
-    await executeTask(db, claimed)
-    claimed = await claimNextTask(db, dagRunId)
+  // Claim all currently-ready tasks and execute them in parallel
+  // Loop because completing one task may unblock downstream tasks
+  let claimed = await claimReadyTasks(db, dagRunId)
+  while (claimed.length > 0) {
+    await Promise.all(claimed.map(ti => executeTask(db, ti)))
+    claimed = await claimReadyTasks(db, dagRunId)
   }
 
   // Check overall run completion

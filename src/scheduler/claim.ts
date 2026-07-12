@@ -2,14 +2,11 @@ import type { Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
 
 /**
- * Atomically claim the next queued task whose upstream deps are all done.
- * Uses findOneAndUpdate — MongoDB's atomic document-level equivalent of
- * PostgreSQL's SELECT ... FOR UPDATE SKIP LOCKED.
- *
- * Returns the claimed task, or null if nothing is available.
+ * Atomically claim ALL currently-ready queued tasks for a run.
+ * Each findOneAndUpdate is atomic — safe for concurrent schedulers.
+ * Returns an array of claimed tasks (may be empty).
  */
-export async function claimNextTask(db: Db, dagRunId: string): Promise<TaskInstance | null> {
-  // Find task_ids that are already successful in this run
+export async function claimReadyTasks(db: Db, dagRunId: string): Promise<TaskInstance[]> {
   const doneTasks = await db
     .collection<TaskInstance>('task_instances')
     .find({ dag_run_id: dagRunId, state: 'success' })
@@ -17,20 +14,33 @@ export async function claimNextTask(db: Db, dagRunId: string): Promise<TaskInsta
     .toArray()
   const doneIds = doneTasks.map(t => t.task_id)
 
-  // Atomically claim a queued task whose every dep is in doneIds
-  const claimed = await db.collection<TaskInstance>('task_instances').findOneAndUpdate(
-    {
-      dag_run_id: dagRunId,
-      state: 'queued',
-      // All upstream deps must be in the done set (or no deps at all)
-      $or: [
-        { depends_on: { $size: 0 } },
-        { depends_on: { $not: { $elemMatch: { $nin: doneIds } } } },
-      ],
-    },
-    { $set: { state: 'running', started_at: new Date() } },
-    { sort: { created_at: 1 }, returnDocument: 'after' }
-  )
+  const filter = {
+    dag_run_id: dagRunId,
+    state: 'queued',
+    $or: [
+      { depends_on: { $size: 0 } },
+      { depends_on: { $not: { $elemMatch: { $nin: doneIds } } } },
+    ],
+  }
 
-  return claimed ?? null
+  // Drain all claimable tasks — each claim is atomic
+  const claimed: TaskInstance[] = []
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const task = await db.collection<TaskInstance>('task_instances').findOneAndUpdate(
+      filter,
+      { $set: { state: 'running', started_at: new Date() } },
+      { sort: { created_at: 1 }, returnDocument: 'after' }
+    )
+    if (!task) break
+    claimed.push(task)
+  }
+
+  return claimed
+}
+
+// Keep old single-claim export for backward compatibility with tests
+export async function claimNextTask(db: Db, dagRunId: string): Promise<TaskInstance | null> {
+  const results = await claimReadyTasks(db, dagRunId)
+  return results[0] ?? null
 }

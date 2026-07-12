@@ -4,13 +4,17 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch --ignore 'src/**/__tests__/**' --ignore 'dist/**' src/main.ts",
+    "dev:bullmq": "REDIS_URL=redis://localhost:6379 tsx watch --ignore 'src/**/__tests__/**' --ignore 'dist/**' src/main.ts",
     "start": "tsx src/main.ts",
+    "worker": "tsx src/queue/consumer.ts",
     "build": "tsc",
     "test": "vitest run"
   },
   "dependencies": {
     "@fastify/static": "^10.1.0",
+    "bullmq": "^5.80.2",
     "fastify": "^5.4.0",
+    "ioredis": "^5.11.1",
     "mongodb": "^6.16.0",
     "node-cron": "^3.0.3",
     "pino": "^9.7.0"

@@ -7,30 +7,33 @@ import type { TaskInstance } from './runs.js'
 import { getDag } from '../dag/registry.js'
 import { acquire, release } from './pool.js'
 import { appendLog } from '../logs/index.js'
+import { enqueueTask } from '../queue/producer.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WORKER_SCRIPT = pathResolve(__dirname, 'worker.ts')
 const TSX_BIN = pathResolve(__dirname, '../../node_modules/.bin/tsx')
 
+// When REDIS_URL is set, use BullMQ (distributed). Otherwise use local fork.
+const USE_BULLMQ = Boolean(process.env.REDIS_URL)
+
 type WorkerMsg = { type: 'done'; success: boolean; error?: string }
 
-/**
- * Execute a claimed task in a child process.
- * stdout/stderr are captured line-by-line and stored in task_logs.
- */
 export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
   const dag = getDag(ti.dag_id)
-  if (!dag) {
-    await markFailed(db, ti, `Dag '${ti.dag_id}' not found in registry`)
-    return
-  }
+  if (!dag) { await markFailed(db, ti, `Dag '${ti.dag_id}' not found in registry`); return }
 
   const taskDef = dag.tasks[ti.task_id]
-  if (!taskDef) {
-    await markFailed(db, ti, `Task '${ti.task_id}' not found in dag '${ti.dag_id}'`)
+  if (!taskDef) { await markFailed(db, ti, `Task '${ti.task_id}' not found in dag '${ti.dag_id}'`); return }
+
+  if (USE_BULLMQ) {
+    // Distributed: enqueue to Redis — BullMQ worker picks it up
+    await enqueueTask(ti, taskDef.run.toString())
+    console.log(`[executor] enqueued ${ti.dag_id}.${ti.task_id} → BullMQ`)
+    // Don't wait — advanceRun will check completion on next tick
     return
   }
 
+  // Local: fork directly (original behaviour)
   await acquire()
   console.log(`[executor] running ${ti.dag_id}.${ti.task_id} (run: ${ti.dag_run_id})`)
 
@@ -38,17 +41,15 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     const child = fork(WORKER_SCRIPT, [], {
       execPath: TSX_BIN,
       env: { ...process.env },
-      silent: true,  // capture stdout/stderr as streams
+      silent: true,
     })
 
-    // Pipe stdout lines → logs collection + mirror to parent stdout
     const rl_out = createInterface({ input: child.stdout! })
     rl_out.on('line', (line) => {
       process.stdout.write(`${line}\n`)
       void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line)
     })
 
-    // Pipe stderr lines → logs collection + mirror to parent stderr
     const rl_err = createInterface({ input: child.stderr! })
     rl_err.on('line', (line) => {
       process.stderr.write(`${line}\n`)
@@ -71,7 +72,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
         const error = msg.error ?? 'unknown error'
         if (ti.try_number < ti.max_retries) {
           await scheduleRetry(db, ti, error)
-          console.warn(`[executor] ↩ ${ti.dag_id}.${ti.task_id} failed (try ${ti.try_number + 1}/${ti.max_retries + 1}) — retrying in ${ti.retry_delay}ms: ${error}`)
+          console.warn(`[executor] ↩ ${ti.dag_id}.${ti.task_id} retrying (${ti.try_number + 1}/${ti.max_retries + 1})`)
         } else {
           await markFailed(db, ti, error)
           console.error(`[executor] ✗ ${ti.dag_id}.${ti.task_id} (try ${ti.try_number + 1}/${ti.max_retries + 1}): ${error}`)
@@ -98,17 +99,10 @@ async function scheduleRetry(db: Db, ti: TaskInstance, error: string): Promise<v
   const requeue = async () => {
     await db.collection('task_instances').updateOne(
       { dag_run_id: ti.dag_run_id, task_id: ti.task_id },
-      {
-        $set: { state: 'queued', started_at: null, ended_at: null, error },
-        $inc: { try_number: 1 },
-      }
+      { $set: { state: 'queued', started_at: null, ended_at: null, error }, $inc: { try_number: 1 } }
     )
   }
-  if (ti.retry_delay > 0) {
-    setTimeout(() => void requeue(), ti.retry_delay)
-  } else {
-    await requeue()
-  }
+  ti.retry_delay > 0 ? setTimeout(() => void requeue(), ti.retry_delay) : await requeue()
 }
 
 async function markSuccess(db: Db, ti: TaskInstance): Promise<void> {

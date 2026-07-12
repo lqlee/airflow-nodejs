@@ -4,20 +4,16 @@ import { resolve as pathResolve, dirname } from 'node:path'
 import type { Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
 import { getDag } from '../dag/registry.js'
-import { xcomPush, xcomPull } from '../xcom/index.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WORKER_SCRIPT = pathResolve(__dirname, 'worker.ts')
 const TSX_BIN = pathResolve(__dirname, '../../node_modules/.bin/tsx')
 
-type WorkerMsg =
-  | { type: 'done'; success: boolean; error?: string }
-  | { type: 'xcom:push'; key: string; value: unknown }
-  | { type: 'xcom:pull'; fromTaskId: string; key: string; id: number }
+type WorkerMsg = { type: 'done'; success: boolean; error?: string }
 
 /**
  * Execute a claimed task in a child process.
- * Handles XCom IPC between worker and parent, then writes final state to DB.
+ * Worker handles XCom directly via its own MongoDB connection — no IPC for data.
  */
 export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
   const dag = getDag(ti.dag_id)
@@ -40,7 +36,6 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
       env: { ...process.env },
     })
 
-    // Send task fn + context to worker
     child.send({
       type: 'run',
       fn: taskDef.run.toString(),
@@ -48,29 +43,15 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     })
 
     child.on('message', async (msg: WorkerMsg) => {
-      if (msg.type === 'xcom:push') {
-        // Worker is pushing a value — write to DB, no reply needed
-        await xcomPush(db, ti.dag_run_id, ti.dag_id, ti.task_id, msg.key, msg.value)
-        return
+      if (msg.type !== 'done') return
+      if (msg.success) {
+        await markSuccess(db, ti)
+        console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id}`)
+      } else {
+        await markFailed(db, ti, msg.error ?? 'unknown error')
+        console.error(`[executor] ✗ ${ti.dag_id}.${ti.task_id}: ${msg.error}`)
       }
-
-      if (msg.type === 'xcom:pull') {
-        // Worker is requesting a value from an upstream task — read and reply
-        const value = await xcomPull(db, ti.dag_run_id, msg.fromTaskId, msg.key)
-        child.send({ type: 'xcom:pull:result', value })
-        return
-      }
-
-      if (msg.type === 'done') {
-        if (msg.success) {
-          await markSuccess(db, ti)
-          console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id}`)
-        } else {
-          await markFailed(db, ti, msg.error ?? 'unknown error')
-          console.error(`[executor] ✗ ${ti.dag_id}.${ti.task_id}: ${msg.error}`)
-        }
-        done()
-      }
+      done()
     })
 
     child.on('error', async (err) => {

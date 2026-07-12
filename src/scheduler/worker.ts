@@ -1,57 +1,48 @@
 /**
  * Worker process — runs a single task function in isolation.
+ * Connects directly to MongoDB for XCom — no IPC round-trips for data access.
  *
- * IPC protocol with parent:
- *   parent → worker:  { type: 'run', fn: string, ctx: { dagId, runId, taskId } }
- *   worker → parent:  { type: 'xcom:push', key, value }     (XCom write)
- *   parent → worker:  { type: 'xcom:pull:result', value }   (XCom read response)
- *   worker → parent:  { type: 'xcom:pull', fromTaskId, key } (XCom read request)
- *   worker → parent:  { type: 'done', success, error? }     (task finished)
+ * IPC protocol (simplified):
+ *   parent → worker:  { type: 'run', fn, ctx }
+ *   worker → parent:  { type: 'done', success, error? }
  */
+import { MongoClient } from 'mongodb'
+import { xcomPush, xcomPull } from '../xcom/index.js'
+
+const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
+const DB_NAME = process.env.DB_NAME ?? 'airflow'
 
 type RunMsg = { type: 'run'; fn: string; ctx: { dagId: string; runId: string; taskId: string } }
-type XComPullResult = { type: 'xcom:pull:result'; value: unknown }
-type IncomingMsg = RunMsg | XComPullResult
 
-// Pending pull resolvers — keyed by a simple counter
-const pendingPulls = new Map<number, (value: unknown) => void>()
-let pullCounter = 0
+process.on('message', async (msg: RunMsg) => {
+  if (msg.type !== 'run') return
 
-process.on('message', async (msg: IncomingMsg) => {
-  if (msg.type === 'xcom:pull:result') {
-    // Parent responded to our pull request — resolve the waiting promise
-    const resolve = pendingPulls.get(pullCounter)
-    if (resolve) resolve(msg.value)
-    return
-  }
+  const { fn, ctx } = msg
+  const client = new MongoClient(MONGO_URL)
 
-  if (msg.type === 'run') {
-    const { fn, ctx } = msg
+  try {
+    await client.connect()
+    const db = client.db(DB_NAME)
 
-    // Build XCom helpers that communicate back to parent via IPC
+    // Build XCom helpers backed directly by MongoDB — zero IPC round-trips
     const xcom = {
-      push: async (key: string, value: unknown): Promise<void> => {
-        process.send!({ type: 'xcom:push', key, value })
-      },
-      pull: (fromTaskId: string, key: string): Promise<unknown> => {
-        return new Promise((resolve) => {
-          const id = ++pullCounter
-          pendingPulls.set(id, resolve)
-          process.send!({ type: 'xcom:pull', fromTaskId, key, id })
-        })
-      },
+      push: (key: string, value: unknown) =>
+        xcomPush(db, ctx.runId, ctx.dagId, ctx.taskId, key, value),
+
+      pull: (fromTaskId: string, key: string) =>
+        xcomPull(db, ctx.runId, fromTaskId, key),
     }
 
-    try {
-      // eslint-disable-next-line no-new-func
-      const taskFn = new Function(`return (${fn})`)() as (ctx: typeof ctx & { xcom: typeof xcom }) => Promise<unknown>
-      await taskFn({ ...ctx, xcom })
-      process.send!({ type: 'done', success: true })
-    } catch (err: unknown) {
-      const error = err instanceof Error ? err.message : String(err)
-      process.send!({ type: 'done', success: false, error })
-    } finally {
-      process.exit(0)
-    }
+    // eslint-disable-next-line no-new-func
+    const taskFn = new Function(`return (${fn})`)() as (ctx: typeof ctx & { xcom: typeof xcom }) => Promise<unknown>
+    await taskFn({ ...ctx, xcom })
+
+    process.send!({ type: 'done', success: true })
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err)
+    process.send!({ type: 'done', success: false, error })
+  } finally {
+    await client.close()
+    process.exit(0)
   }
 })

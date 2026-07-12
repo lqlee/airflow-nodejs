@@ -4,6 +4,7 @@ import { listDags } from '../dag/registry.js'
 import { createRun } from './runs.js'
 import { claimNextTask } from './claim.js'
 import { executeTask } from './executor.js'
+import { syncCronJobs, stopAllCronJobs } from './cron.js'
 
 const POLL_INTERVAL_MS = 5_000
 
@@ -20,8 +21,9 @@ export function stopScheduler(): void {
   if (timer) {
     clearInterval(timer)
     timer = null
-    console.log('[scheduler] stopped')
   }
+  stopAllCronJobs()
+  console.log('[scheduler] stopped')
 }
 
 async function tick(db: Db): Promise<void> {
@@ -29,12 +31,10 @@ async function tick(db: Db): Promise<void> {
     await loadDags()
     const dags = listDags()
 
-    for (const dag of dags) {
-      if (!dag.schedule) continue
-      await maybeCreateRun(db, dag.id)
-    }
+    // Sync cron jobs whenever dags reload (picks up schedule changes)
+    syncCronJobs(db, dags)
 
-    // Advance all running dag_runs — claim + execute ready tasks
+    // Advance any active runs (manually triggered or from cron)
     const activeRuns = await db
       .collection('dag_runs')
       .find({ state: { $in: ['queued', 'running'] } })
@@ -81,14 +81,3 @@ export async function advanceRun(db: Db, dagRunId: string): Promise<void> {
   }
 }
 
-async function maybeCreateRun(db: Db, dagId: string): Promise<void> {
-  const active = await db.collection('dag_runs').findOne({
-    dag_id: dagId,
-    state: { $in: ['queued', 'running'] },
-  })
-  if (active) return
-
-  const dag = listDags().find(d => d.id === dagId)
-  if (!dag) return
-  await createRun(db, dag)
-}

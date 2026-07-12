@@ -2,7 +2,7 @@ import { dag } from '../src/dag/types.js'
 
 export default dag({
   id: 'hello_world',
-  schedule: null,  // manual trigger only
+  schedule: '* * * * *',  // every minute
   tasks: {
     extract: {
       run: async (ctx) => {

@@ -14,6 +14,8 @@ export interface TaskContext {
 
 export interface TaskDefinition {
   dependsOn?: string[]
+  retries?: number        // max retry attempts (default: 0 = no retries)
+  retryDelay?: number     // ms to wait before requeuing (default: 0)
   run: (ctx: TaskContext) => Promise<unknown>
 }
 

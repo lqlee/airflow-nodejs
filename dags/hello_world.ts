@@ -5,11 +5,12 @@ export default dag({
   schedule: '* * * * *',  // every minute
   tasks: {
     extract: {
+      retries: 2,
+      retryDelay: 1000,  // 1s between retries
       run: async (ctx) => {
         console.log(`[${ctx.taskId}] extracting data...`)
         await new Promise(r => setTimeout(r, 500))
         const result = { rows: 42, source: 'warehouse' }
-        // Push result to XCom so downstream tasks can read it
         await ctx.xcom.push('result', result)
         console.log(`[${ctx.taskId}] pushed xcom:`, result)
       }

@@ -48,8 +48,14 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
         await markSuccess(db, ti)
         console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id}`)
       } else {
-        await markFailed(db, ti, msg.error ?? 'unknown error')
-        console.error(`[executor] ✗ ${ti.dag_id}.${ti.task_id}: ${msg.error}`)
+        const error = msg.error ?? 'unknown error'
+        if (ti.try_number < ti.max_retries) {
+          await scheduleRetry(db, ti, error)
+          console.warn(`[executor] ↩ ${ti.dag_id}.${ti.task_id} failed (try ${ti.try_number + 1}/${ti.max_retries + 1}) — retrying in ${ti.retry_delay}ms: ${error}`)
+        } else {
+          await markFailed(db, ti, error)
+          console.error(`[executor] ✗ ${ti.dag_id}.${ti.task_id} (try ${ti.try_number + 1}/${ti.max_retries + 1}): ${error}`)
+        }
       }
       done()
     })
@@ -65,6 +71,23 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
       }
     })
   })
+}
+
+async function scheduleRetry(db: Db, ti: TaskInstance, error: string): Promise<void> {
+  const requeue = async () => {
+    await db.collection('task_instances').updateOne(
+      { dag_run_id: ti.dag_run_id, task_id: ti.task_id },
+      {
+        $set: { state: 'queued', started_at: null, ended_at: null, error },
+        $inc: { try_number: 1 },
+      }
+    )
+  }
+  if (ti.retry_delay > 0) {
+    setTimeout(() => void requeue(), ti.retry_delay)
+  } else {
+    await requeue()
+  }
 }
 
 async function markSuccess(db: Db, ti: TaskInstance): Promise<void> {

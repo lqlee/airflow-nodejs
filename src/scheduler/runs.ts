@@ -14,6 +14,8 @@ export interface TaskInstance {
   state: 'queued' | 'running' | 'success' | 'failed'
   depends_on: string[]
   try_number: number
+  max_retries: number       // max allowed retries (0 = no retries)
+  retry_delay: number       // ms to wait before requeue
   started_at: Date | null
   ended_at: Date | null
   error: string | null
@@ -43,6 +45,8 @@ export async function createRun(db: Db, dag: DagDefinition): Promise<string> {
     state: 'queued',
     depends_on: task.dependsOn ?? [],
     try_number: 0,
+    max_retries: task.retries ?? 0,
+    retry_delay: task.retryDelay ?? 0,
     started_at: null,
     ended_at: null,
     error: null,

@@ -65,10 +65,68 @@
 </head>
 <body>
 <div id="root"></div>
+<style>
+  .login-wrap { display:flex; align-items:center; justify-content:center; min-height:100vh; }
+  .login-box { background:#1a1d27; border:1px solid #2d3748; border-radius:10px; padding:36px 32px; width:360px; }
+  .login-box h2 { color:#63b3ed; margin-bottom:6px; font-size:20px; }
+  .login-box p { color:#718096; font-size:13px; margin-bottom:24px; }
+  .login-box input { width:100%; background:#0f1117; border:1px solid #4a5568; border-radius:6px; padding:10px 12px; color:#e2e8f0; font-size:13px; font-family:monospace; outline:none; }
+  .login-box input:focus { border-color:#3182ce; }
+  .login-box button { width:100%; margin-top:12px; }
+  .login-error { color:#fc8181; font-size:12px; margin-top:8px; }
+</style>
 <script type="text/babel">
 const { useState, useEffect, useCallback } = React;
 
 const BASE = '';
+const LS_KEY = 'airflow_api_key';
+
+// ── Auth-aware fetch ──────────────────────────────────────────────────
+function apiFetch(url, options = {}) {
+  const key = localStorage.getItem(LS_KEY) ?? '';
+  return fetch(url, {
+    ...options,
+    headers: { ...(options.headers ?? {}), ...(key ? { Authorization: `Bearer ${key}` } : {}) },
+  });
+}
+
+// ── Login screen ──────────────────────────────────────────────────────
+function LoginScreen({ onLogin }) {
+  const [key, setKey] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!key.trim()) return;
+    setLoading(true);
+    setError('');
+    const res = await fetch(`${BASE}/dags`, {
+      headers: { Authorization: `Bearer ${key.trim()}` }
+    });
+    setLoading(false);
+    if (res.status === 401) { setError('Invalid API key'); return; }
+    localStorage.setItem(LS_KEY, key.trim());
+    onLogin();
+  };
+
+  return (
+    <div className="login-wrap">
+      <div className="login-box">
+        <h2>✈ Airflow Node</h2>
+        <p>Enter your API key to continue</p>
+        <form onSubmit={submit}>
+          <input type="password" placeholder="API key" value={key}
+            onChange={e => setKey(e.target.value)} autoFocus />
+          {error && <div className="login-error">{error}</div>}
+          <button className="btn btn-primary" disabled={loading} style={{marginTop:12,width:'100%'}}>
+            {loading ? 'Checking…' : 'Sign in'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
 
 const statusBadge = (state) => <span className={`badge badge-${state}`}>{state}</span>;
 
@@ -90,7 +148,7 @@ function useInterval(fn, ms) {
 function Health() {
   const [info, setInfo] = useState(null);
   const fetch_ = useCallback(() =>
-    fetch(`${BASE}/health`).then(r => r.json()).then(setInfo).catch(()=>{}), []);
+    apiFetch(`${BASE}/health`).then(r => r.json()).then(setInfo).catch(()=>{}), []);
   useInterval(fetch_, 3000);
   if (!info) return null;
   return (
@@ -105,7 +163,7 @@ function DagCard({ dag, onTrigger, onSelect, selected }) {
   const [triggering, setTriggering] = useState(false);
   const trigger = async () => {
     setTriggering(true);
-    await fetch(`${BASE}/dags/${dag.id}/trigger`, { method: 'POST' });
+    await apiFetch(`${BASE}/dags/${dag.id}/trigger`, { method: 'POST' });
     setTriggering(false);
     onTrigger();
   };
@@ -135,7 +193,7 @@ function DagCard({ dag, onTrigger, onSelect, selected }) {
 function LogPanel({ runId, taskId, onClose }) {
   const [lines, setLines] = useState([]);
   const fetch_ = useCallback(() =>
-    fetch(`${BASE}/dag-runs/${runId}/tasks/${taskId}/logs`)
+    apiFetch(`${BASE}/dag-runs/${runId}/tasks/${taskId}/logs`)
       .then(r => r.json()).then(setLines).catch(() => {}), [runId, taskId]);
   useInterval(fetch_, 2000);
   const fmt = ts => new Date(ts).toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -165,7 +223,7 @@ function RunDetail({ runId, onClose }) {
   const [run, setRun] = useState(null);
   const [logTask, setLogTask] = useState(null);
   const fetch_ = useCallback(() =>
-    fetch(`${BASE}/dag-runs/${runId}`).then(r=>r.json()).then(setRun).catch(()=>{}), [runId]);
+    apiFetch(`${BASE}/dag-runs/${runId}`).then(r=>r.json()).then(setRun).catch(()=>{}), [runId]);
   useInterval(fetch_, 2000);
   if (!run) return <div className="run-detail"><div className="empty">Loading…</div></div>;
   return (
@@ -202,7 +260,7 @@ function RunDetail({ runId, onClose }) {
 function RunsTable({ dagId, onSelectRun }) {
   const [runs, setRuns] = useState([]);
   const fetch_ = useCallback(() =>
-    fetch(`${BASE}/dags/${dagId}/runs`).then(r=>r.json()).then(setRuns).catch(()=>{}), [dagId]);
+    apiFetch(`${BASE}/dags/${dagId}/runs`).then(r=>r.json()).then(setRuns).catch(()=>{}), [dagId]);
   useInterval(fetch_, 3000);
   if (!runs.length) return <div className="empty">No runs yet</div>;
   return (
@@ -229,26 +287,43 @@ function App() {
   const [dags, setDags] = useState([]);
   const [selectedDag, setSelectedDag] = useState(null);
   const [selectedRun, setSelectedRun] = useState(null);
+  // null = not checked yet, true = authenticated, false = needs login
+  const [authed, setAuthed] = useState(null);
+
+  // On mount: check if auth is required and whether we have a valid key
+  useEffect(() => {
+    apiFetch(`${BASE}/health`).then(r => r.json()).then(info => {
+      if (!info.auth) { setAuthed(true); return; }  // auth disabled — open access
+      // Auth enabled — verify stored key works
+      const key = localStorage.getItem(LS_KEY);
+      if (!key) { setAuthed(false); return; }
+      apiFetch(`${BASE}/dags`).then(r => {
+        setAuthed(r.status !== 401);
+      }).catch(() => setAuthed(false));
+    }).catch(() => setAuthed(true));  // if health fails, try anyway
+  }, []);
+
+  const handleLogin = () => setAuthed(true);
+  const handleLogout = () => { localStorage.removeItem(LS_KEY); setAuthed(false); };
 
   const fetchDags = useCallback(() =>
-    fetch(`${BASE}/dags`).then(r=>r.json()).then(setDags).catch(()=>{}), []);
+    apiFetch(`${BASE}/dags`).then(r=>r.json()).then(setDags).catch(()=>{}), []);
 
   useInterval(fetchDags, 5000);
 
-  const handleTrigger = () => {
-    if (selectedDag) fetchDags();
-  };
+  const handleTrigger = () => { if (selectedDag) fetchDags(); };
+  const selectDag = (id) => { setSelectedDag(prev => prev === id ? null : id); setSelectedRun(null); };
 
-  const selectDag = (id) => {
-    setSelectedDag(prev => prev === id ? null : id);
-    setSelectedRun(null);
-  };
+  if (authed === null) return null;  // loading
+  if (authed === false) return <LoginScreen onLogin={handleLogin} />;
 
   return (
     <>
       <header>
         <h1>✈ Airflow Node</h1>
         <Health />
+        <button className="refresh-btn" style={{marginLeft:'auto'}} onClick={handleLogout}
+          title="Sign out">⏻</button>
       </header>
       <div className="container">
         <div className="section-title">Dags ({dags.length})</div>

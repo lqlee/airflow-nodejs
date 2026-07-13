@@ -64,10 +64,34 @@ WORKER_CONCURRENCY=8 REDIS_URL=redis://localhost:6379 npm run worker
 
 ---
 
+## Authentication
+
+Auth is **disabled by default** (open access). Enable it by setting `API_KEYS`:
+
+```bash
+API_KEYS=your-secret-key npm run dev
+# Multiple keys (e.g. per team/service):
+API_KEYS=key1,key2,key3 npm run dev
+```
+
+Protected endpoints require `Authorization: Bearer <key>`:
+
+```bash
+curl -H "Authorization: Bearer your-secret-key" http://localhost:3000/dags
+```
+
+Public endpoints (no auth required): `GET /health`, `GET /` (UI).
+
+The web UI shows a login screen when auth is enabled. The key is stored in `localStorage` and sent automatically with every request. Click ⏻ to sign out.
+
+---
+
 ## API
 
+All endpoints except `/health` and `/` require auth when `API_KEYS` is set.
+
 ```
-GET  /health                              server status + worker pool stats
+GET  /health                              server status + auth flag + worker pool stats
 GET  /dags                                list all loaded Dags
 GET  /dags/:dagId                         Dag detail + task graph
 POST /dags/:dagId/trigger                 manually trigger a run

@@ -122,8 +122,8 @@ describe('GET /dags/:dagId/runs', () => {
     const res = await app.inject({ method: 'GET', url: '/dags/api_test_dag/runs' })
     expect(res.statusCode).toBe(200)
     const body = res.json()
-    expect(body.length).toBeGreaterThanOrEqual(2)
-    expect(body[0].dag_id).toBe('api_test_dag')
+    expect(body.items.length).toBeGreaterThanOrEqual(2)
+    expect(body.items[0].dag_id).toBe('api_test_dag')
   })
 })
 

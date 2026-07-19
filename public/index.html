@@ -658,26 +658,53 @@ function RunDetail({ runId, onClose }) {
 // ── Runs Table ────────────────────────────────────────────────────────
 function RunsTable({ dagId, onSelectRun }) {
   const [runs, setRuns] = useState([]);
-  const fetch_ = useCallback(() =>
-    apiFetch(`${BASE}/dags/${dagId}/runs`).then(r=>r.json()).then(setRuns).catch(()=>{}), [dagId]);
-  useInterval(fetch_, 3000);
+  const [nextCursor, setNextCursor] = useState(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  const fetchPage = useCallback((cursor = null, replace = true) => {
+    const url = `${BASE}/dags/${dagId}/runs?limit=20${cursor ? `&cursor=${cursor}` : ''}`;
+    return apiFetch(url).then(r => r.json()).then(data => {
+      setRuns(prev => replace ? (data.items ?? []) : [...prev, ...(data.items ?? [])]);
+      setNextCursor(data.next_cursor ?? null);
+    }).catch(() => {});
+  }, [dagId]);
+
+  // Poll first page every 3s (replaces current view to show new runs)
+  useInterval(() => fetchPage(null, true), 3000);
+
+  const loadMore = async () => {
+    if (!nextCursor) return;
+    setLoadingMore(true);
+    await fetchPage(nextCursor, false);
+    setLoadingMore(false);
+  };
+
   if (!runs.length) return <div className="empty">No runs yet</div>;
   return (
-    <table className="runs-table">
-      <thead><tr>
-        <th>Run ID</th><th>State</th><th>Created</th><th></th>
-      </tr></thead>
-      <tbody>
-        {runs.map(r => (
-          <tr key={r.run_id}>
-            <td><code style={{fontSize:12}}>{r.run_id.slice(-8)}</code></td>
-            <td>{statusBadge(r.state)}</td>
-            <td style={{color:'#718096'}}>{new Date(r.created_at).toLocaleTimeString()}</td>
-            <td><button className="refresh-btn" onClick={() => onSelectRun(r.run_id)}>detail →</button></td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <>
+      <table className="runs-table">
+        <thead><tr>
+          <th>Run ID</th><th>State</th><th>Created</th><th></th>
+        </tr></thead>
+        <tbody>
+          {runs.map(r => (
+            <tr key={r.run_id}>
+              <td><code style={{fontSize:12}}>{r.run_id.slice(-8)}</code></td>
+              <td>{statusBadge(r.state)}</td>
+              <td style={{color:'#718096'}}>{new Date(r.created_at).toLocaleTimeString()}</td>
+              <td><button className="refresh-btn" onClick={() => onSelectRun(r.run_id)}>detail →</button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {nextCursor && (
+        <div style={{textAlign:'center', marginTop:8}}>
+          <button className="refresh-btn" onClick={loadMore} disabled={loadingMore}>
+            {loadingMore ? '…' : 'Load more ↓'}
+          </button>
+        </div>
+      )}
+    </>
   );
 }
 

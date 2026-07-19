@@ -83,22 +83,44 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
   )
 
   // GET /dags/:dagId/runs — list recent runs for a dag
-  app.get<{ Params: { dagId: string } }>('/dags/:dagId/runs', async (req, reply) => {
+  app.get<{
+    Params: { dagId: string }
+    Querystring: { limit?: string; cursor?: string }
+  }>('/dags/:dagId/runs', async (req, reply) => {
     const db = app.mongo
+    const rawLimit = parseInt(req.query.limit ?? '20', 10)
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 20
+    const cursor = req.query.cursor // ObjectId hex string of the last seen run
+
+    const filter: Record<string, unknown> = { dag_id: req.params.dagId }
+    if (cursor) {
+      if (!ObjectId.isValid(cursor))
+        return reply.status(400).send({ error: 'Invalid cursor' })
+      // Runs are sorted created_at desc; cursor points to the last returned run's _id.
+      // We want runs whose created_at is strictly before that run's created_at.
+      const pivot = await db.collection('dag_runs').findOne({ _id: new ObjectId(cursor) })
+      if (pivot) {
+        filter['created_at'] = { $lt: pivot.created_at }
+      }
+    }
+
     const runs = await db
       .collection('dag_runs')
-      .find({ dag_id: req.params.dagId })
+      .find(filter)
       .sort({ created_at: -1 })
-      .limit(20)
+      .limit(limit)
       .toArray()
 
-    return reply.send(
-      runs.map(r => ({
+    const nextCursor = runs.length === limit ? runs[runs.length - 1]._id.toString() : null
+
+    return reply.send({
+      items: runs.map(r => ({
         run_id: r._id.toString(),
         dag_id: r.dag_id,
         state: r.state,
         created_at: r.created_at,
-      }))
-    )
+      })),
+      next_cursor: nextCursor,
+    })
   })
 }

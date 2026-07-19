@@ -8,9 +8,12 @@ export async function apiKeysRoutes(app: FastifyInstance): Promise<void> {
     return reply.send(keys)
   })
 
-  // POST /api-keys — create a new key
+  // POST /api-keys — create a new key (stricter rate limit — key creation is rare)
   // Body: { name: string }
-  app.post<{ Body: { name?: string } }>('/api-keys', async (req, reply) => {
+  app.post<{ Body: { name?: string } }>(
+    '/api-keys',
+    { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } },
+    async (req, reply) => {
     const name = req.body?.name?.trim()
     if (!name) return reply.status(400).send({ error: '"name" is required' })
 
@@ -21,7 +24,8 @@ export async function apiKeysRoutes(app: FastifyInstance): Promise<void> {
       key: raw,  // shown ONCE — store it now
       note: 'Save this key — it will not be shown again.',
     })
-  })
+  },
+  )
 
   // DELETE /api-keys/:keyId — revoke a key
   app.delete<{ Params: { keyId: string } }>('/api-keys/:keyId', async (req, reply) => {

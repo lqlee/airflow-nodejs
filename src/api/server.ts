@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import fastifyStatic from '@fastify/static'
+import fastifyRateLimit from '@fastify/rate-limit'
 import { fileURLToPath } from 'node:url'
 import { resolve, dirname } from 'node:path'
 import type { Db } from 'mongodb'
@@ -19,7 +20,18 @@ declare module 'fastify' {
   }
 }
 
-export function buildServer(db: Db): FastifyInstance {
+export interface ServerOptions {
+  /** Global API rate limit — requests per minute per IP. Default: 120. */
+  rateLimitMax?: number
+  /** Stricter limit for unauthenticated endpoints (/health). Default: 10. */
+  rateLimitAuthMax?: number
+}
+
+export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
+  const rateLimitMax = opts.rateLimitMax ?? parseInt(process.env.RATE_LIMIT_MAX ?? '120', 10)
+  const rateLimitAuthMax =
+    opts.rateLimitAuthMax ?? parseInt(process.env.RATE_LIMIT_AUTH_MAX ?? '10', 10)
+
   const app = Fastify({ logger: false })
 
   app.decorate('mongo', db)
@@ -27,23 +39,50 @@ export function buildServer(db: Db): FastifyInstance {
   // Wire DB into auth so DB-backed keys are validated
   setDb(db)
 
-  // Auth hook — runs before every request
+  // Global rate limit: 120 req/min per IP by default (env: RATE_LIMIT_MAX).
+  // Routes must be registered AFTER this plugin initialises (inside after() cb).
+  app.register(fastifyRateLimit, {
+    global: true,
+    max: rateLimitMax,
+    timeWindow: '1 minute',
+    keyGenerator: (req) => req.ip,
+    errorResponseBuilder: (_req, context) => ({
+      statusCode: 429,
+      error: 'Too Many Requests',
+      message: `Rate limit exceeded. Retry after ${context.after}.`,
+      retryAfter: context.after,
+    }),
+  })
+
+  // Auth hook — runs before every API request
   app.addHook('preHandler', authHook)
 
   // Serve web UI from public/
   app.register(fastifyStatic, { root: PUBLIC_DIR, prefix: '/' })
 
-  // Health check (public)
-  app.get('/health', async () => ({
-    status: 'ok',
-    auth: AUTH_ENABLED,
-    workers: { active: activeWorkers(), queued: queueDepth() },
-  }))
+  // All routes are registered inside after() so the rate-limit plugin
+  // decorators are present when per-route config is evaluated.
+  app.after(() => {
+    // Health check — stricter per-route limit (unauthenticated endpoint)
+    app.get(
+      '/health',
+      {
+        config: {
+          rateLimit: { max: rateLimitAuthMax, timeWindow: '1 minute' },
+        },
+      },
+      async () => ({
+        status: 'ok',
+        auth: AUTH_ENABLED,
+        workers: { active: activeWorkers(), queued: queueDepth() },
+      }),
+    )
 
-  app.register(dagsRoutes)
-  app.register(dagRunsRoutes)
-  app.register(slaRoutes)
-  app.register(apiKeysRoutes)
+    app.register(dagsRoutes)
+    app.register(dagRunsRoutes)
+    app.register(slaRoutes)
+    app.register(apiKeysRoutes)
+  })
 
   return app
 }

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { ObjectId } from 'mongodb'
 import { getTaskLogs } from '../../logs/index.js'
-import { cancelRun } from '../../scheduler/index.js'
+import { cancelRun, clearTaskInstance, advanceRun } from '../../scheduler/index.js'
 
 export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
   // GET /dag-runs/:runId — get a single run + task summary
@@ -148,6 +148,150 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
       next_cursor: nextCursor,
     })
   })
+
+  // GET /dag-runs/:runId/tasks/:taskId — single task instance (all map_index instances if mapped)
+  app.get<{ Params: { runId: string; taskId: string }; Querystring: { map_index?: string } }>(
+    '/dag-runs/:runId/tasks/:taskId',
+    async (req, reply) => {
+      const { runId, taskId } = req.params
+      if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
+
+      const filter: Record<string, unknown> = { dag_run_id: runId, task_id: taskId }
+      const rawMapIndex = req.query.map_index
+      if (rawMapIndex !== undefined) {
+        const mi = parseInt(rawMapIndex, 10)
+        if (!Number.isFinite(mi) || mi < 0) {
+          return reply.status(400).send({ error: '"map_index" must be a non-negative integer' })
+        }
+        filter['map_index'] = mi
+      }
+
+      const instances = await app.mongo
+        .collection('task_instances')
+        .find(filter)
+        .sort({ map_index: 1 })
+        .toArray()
+
+      if (instances.length === 0) {
+        return reply.status(404).send({ error: `Task '${taskId}' not found in run '${runId}'` })
+      }
+
+      const format = (t: Record<string, unknown>) => ({
+        run_id: runId,
+        dag_id: t.dag_id,
+        task_id: t.task_id,
+        group_id: t.group_id ?? null,
+        map_index: t.map_index ?? null,
+        map_value: t.map_value ?? null,
+        state: t.state,
+        depends_on: t.depends_on,
+        try_number: t.try_number ?? 0,
+        max_retries: t.max_retries ?? 0,
+        retry_delay_ms: t.retry_delay ?? 0,
+        timeout_ms: t.timeout_ms ?? 0,
+        started_at: t.started_at ?? null,
+        ended_at: t.ended_at ?? null,
+        error: t.error ?? null,
+        is_sensor: t.is_sensor ?? false,
+        poke_count: t.poke_count ?? 0,
+        poke_interval_ms: t.poke_interval_ms ?? null,
+        sensor_timeout_ms: t.sensor_timeout_ms ?? null,
+        next_poke_at: t.next_poke_at ?? null,
+        first_poked_at: t.first_poked_at ?? null,
+        created_at: t.created_at,
+      })
+
+      // If map_index filter was given → return single object; otherwise array
+      return reply.send(rawMapIndex !== undefined ? format(instances[0]) : instances.map(format))
+    },
+  )
+
+  // GET /dag-runs/:runId/tasks — list all task instances for a run (with optional state filter)
+  app.get<{ Params: { runId: string }; Querystring: { state?: string } }>(
+    '/dag-runs/:runId/tasks',
+    async (req, reply) => {
+      const { runId } = req.params
+      if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
+
+      const VALID_STATES = new Set(['queued', 'running', 'success', 'failed', 'cancelled'])
+      const filter: Record<string, unknown> = { dag_run_id: runId }
+      if (req.query.state) {
+        if (!VALID_STATES.has(req.query.state)) {
+          return reply.status(400).send({ error: `"state" must be one of: ${[...VALID_STATES].join(', ')}` })
+        }
+        filter['state'] = req.query.state
+      }
+
+      const instances = await app.mongo
+        .collection('task_instances')
+        .find(filter)
+        .sort({ task_id: 1, map_index: 1 })
+        .toArray()
+
+      return reply.send(instances.map(t => ({
+        run_id: runId,
+        dag_id: t.dag_id,
+        task_id: t.task_id,
+        group_id: t.group_id ?? null,
+        map_index: t.map_index ?? null,
+        state: t.state,
+        try_number: t.try_number ?? 0,
+        started_at: t.started_at ?? null,
+        ended_at: t.ended_at ?? null,
+        error: t.error ?? null,
+        is_sensor: t.is_sensor ?? false,
+      })))
+    },
+  )
+
+  // POST /dag-runs/:runId/tasks/:taskId/clear — reset a terminal task instance back to queued
+  // Query param: ?map_index=N to target a specific mapped instance; omit to clear all instances.
+  // Only clears instances in {success, failed, cancelled} — returns 409 for running instances.
+  // Also resets the parent run to 'queued' so the scheduler re-advances it.
+  app.post<{
+    Params: { runId: string; taskId: string }
+    Querystring: { map_index?: string }
+  }>(
+    '/dag-runs/:runId/tasks/:taskId/clear',
+    async (req, reply) => {
+      const { runId, taskId } = req.params
+      if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
+
+      let mapIndex: number | undefined
+      if (req.query.map_index !== undefined) {
+        const mi = parseInt(req.query.map_index, 10)
+        if (!Number.isFinite(mi) || mi < 0) {
+          return reply.status(400).send({ error: '"map_index" must be a non-negative integer' })
+        }
+        mapIndex = mi
+      }
+
+      const result = await clearTaskInstance(app.mongo, runId, taskId, mapIndex)
+
+      if (!result.cleared) {
+        if (result.reason === 'run_not_found') {
+          return reply.status(404).send({ error: `Run '${runId}' not found` })
+        }
+        if (result.reason === 'task_not_found') {
+          return reply.status(404).send({ error: `Task '${taskId}' not found in run '${runId}'` })
+        }
+        // task_not_terminal → task is still running or already queued
+        return reply.status(409).send({
+          error: `Task '${taskId}' is not in a terminal state — cannot clear a running or queued task`,
+        })
+      }
+
+      // Re-advance immediately so the cleared task runs without waiting for the next tick
+      await advanceRun(app.mongo, runId)
+
+      return reply.send({
+        run_id: runId,
+        task_id: taskId,
+        cleared_count: result.clearedCount,
+        map_index: mapIndex ?? null,
+      })
+    },
+  )
 
   // POST /dag-runs/:runId/note — add or update a free-text note on a run
   // Allowed on any state (terminal runs can be annotated post-hoc).

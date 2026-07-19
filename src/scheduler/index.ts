@@ -145,6 +145,78 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
   }
 }
 
+export type ClearResult =
+  | { cleared: true; clearedCount: number }
+  | { cleared: false; reason: 'run_not_found' | 'task_not_found' | 'task_not_terminal' }
+
+/**
+ * Clear one or all instances of a task back to queued, then un-terminal the run.
+ *
+ * Semantics:
+ *   - Only clears instances whose state ∈ {success, failed, cancelled}.
+ *     Clearing a running instance would cause two concurrent workers on the same row.
+ *   - try_number is reset to 0 (fresh retry budget).
+ *   - If mapIndex is given: clears only that specific instance (full tiFilter identity).
+ *     If mapIndex is null/undefined: clears ALL instances of taskId.
+ *   - After clearing, the parent run is reset to 'queued' so the scheduler tick
+ *     re-picks it. Without this, tick() skips terminal runs forever.
+ *   - Downstream tasks are NOT cleared (YAGNI — re-run of just this task may be enough).
+ */
+export async function clearTaskInstance(
+  db: Db,
+  dagRunId: string,
+  taskId: string,
+  mapIndex?: number | null,
+): Promise<ClearResult> {
+  const run = await db.collection('dag_runs').findOne({ _id: new ObjectId(dagRunId) })
+  if (!run) return { cleared: false, reason: 'run_not_found' }
+
+  // Build the filter: full identity when mapIndex given; all instances otherwise
+  const taskFilter: Record<string, unknown> = {
+    dag_run_id: dagRunId,
+    task_id: taskId,
+    // Only clear terminal instances — never touch a running one
+    state: { $in: ['success', 'failed', 'cancelled'] },
+  }
+  if (mapIndex !== undefined && mapIndex !== null) {
+    taskFilter['map_index'] = mapIndex
+  }
+
+  const result = await db.collection('task_instances').updateMany(
+    taskFilter,
+    {
+      $set: {
+        state: 'queued',
+        started_at: null,
+        ended_at: null,
+        error: null,
+        next_poke_at: null,
+        first_poked_at: null,
+        poke_count: 0,
+        try_number: 0,   // reset retry budget
+      },
+    },
+  )
+
+  if (result.matchedCount === 0) {
+    // Task not found at all OR it's in a non-terminal state (running/queued)
+    const exists = await db.collection('task_instances').findOne({
+      dag_run_id: dagRunId, task_id: taskId,
+    })
+    return { cleared: false, reason: exists ? 'task_not_terminal' : 'task_not_found' }
+  }
+
+  // Un-terminal the run so tick() re-picks it. Use updateOne (not CAS) because
+  // we must reset even if the run is already terminal — that's the whole point.
+  await db.collection('dag_runs').updateOne(
+    { _id: new ObjectId(dagRunId) },
+    { $set: { state: 'queued', ended_at: null } },
+  )
+
+  console.log(`[scheduler] cleared ${result.modifiedCount} instance(s) of task '${taskId}' in run ${dagRunId}`)
+  return { cleared: true, clearedCount: result.modifiedCount }
+}
+
 /**
  * Cancel a dag_run atomically:
  * - Marks run state → cancelled

@@ -16,6 +16,7 @@ export interface TaskDefinition {
   dependsOn?: string[]
   retries?: number        // max retry attempts (default: 0 = no retries)
   retryDelay?: number     // ms to wait before requeuing (default: 0)
+  timeout?: number        // ms before worker is killed and task marked failed (default: no timeout)
   run: (ctx: TaskContext) => Promise<unknown>
 }
 

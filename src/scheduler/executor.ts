@@ -33,7 +33,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     return
   }
 
-  // Local: fork directly (original behaviour)
+  // Local: fork directly
   await acquire()
   console.log(`[executor] running ${ti.dag_id}.${ti.task_id} (run: ${ti.dag_run_id})`)
 
@@ -44,6 +44,26 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
       silent: true,
     })
 
+    // ── Timeout ───────────────────────────────────────────────────────
+    let timedOut = false
+    let killTimer: ReturnType<typeof setTimeout> | null = null
+
+    if (ti.timeout_ms > 0) {
+      killTimer = setTimeout(() => {
+        timedOut = true
+        child.kill('SIGTERM')
+        const msg = `Task timed out after ${ti.timeout_ms}ms`
+        console.error(`[executor] ⏱ ${ti.dag_id}.${ti.task_id}: ${msg}`)
+        release()
+        void markFailed(db, ti, msg).then(() => done())
+      }, ti.timeout_ms)
+    }
+
+    const clearKillTimer = () => {
+      if (killTimer !== null) { clearTimeout(killTimer); killTimer = null }
+    }
+
+    // ── Stdio logging ─────────────────────────────────────────────────
     const rl_out = createInterface({ input: child.stdout! })
     rl_out.on('line', (line) => {
       process.stdout.write(`${line}\n`)
@@ -64,6 +84,8 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
 
     child.on('message', async (msg: WorkerMsg) => {
       if (msg.type !== 'done') return
+      if (timedOut) return  // timeout handler already resolved
+      clearKillTimer()
       release()
       if (msg.success) {
         await markSuccess(db, ti)
@@ -82,12 +104,15 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     })
 
     child.on('error', async (err) => {
+      if (timedOut) return
+      clearKillTimer()
       release()
       await markFailed(db, ti, err.message)
       done()
     })
 
     child.on('exit', (code) => {
+      if (timedOut) return  // expected kill — already handled
       if (code !== 0 && code !== null) {
         console.error(`[executor] worker exited with code ${code} for ${ti.task_id}`)
       }

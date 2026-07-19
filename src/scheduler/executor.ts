@@ -8,6 +8,7 @@ import { getDag } from '../dag/registry.js'
 import { acquire, release } from './pool.js'
 import { appendLog } from '../logs/index.js'
 import { enqueueTask } from '../queue/producer.js'
+import { sensorOutcome } from './sensor.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WORKER_SCRIPT = pathResolve(__dirname, 'worker.ts')
@@ -16,7 +17,7 @@ const TSX_BIN = pathResolve(__dirname, '../../node_modules/.bin/tsx')
 // When REDIS_URL is set, use BullMQ (distributed). Otherwise use local fork.
 const USE_BULLMQ = Boolean(process.env.REDIS_URL)
 
-type WorkerMsg = { type: 'done'; success: boolean; error?: string }
+type WorkerDoneMsg = { type: 'done'; outcome: 'success' | 'reschedule' | 'fail'; error?: string }
 
 export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
   const dag = getDag(ti.dag_id)
@@ -25,17 +26,24 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
   const taskDef = dag.tasks[ti.task_id]
   if (!taskDef) { await markFailed(db, ti, `Task '${ti.task_id}' not found in dag '${ti.dag_id}'`); return }
 
+  // Sensors must run locally — BullMQ workers don't have reschedule semantics yet
+  if (USE_BULLMQ && ti.is_sensor) {
+    await markFailed(db, ti, 'Sensor tasks require local execution mode (REDIS_URL must not be set)')
+    return
+  }
+
   if (USE_BULLMQ) {
     // Distributed: enqueue to Redis — BullMQ worker picks it up
-    await enqueueTask(ti, taskDef.run.toString())
+    await enqueueTask(ti, taskDef.run!.toString())
     console.log(`[executor] enqueued ${ti.dag_id}.${ti.task_id} → BullMQ`)
-    // Don't wait — advanceRun will check completion on next tick
     return
   }
 
   // Local: fork directly
   await acquire()
-  console.log(`[executor] running ${ti.dag_id}.${ti.task_id} (run: ${ti.dag_run_id})`)
+
+  const label = ti.is_sensor ? 'poking' : 'running'
+  console.log(`[executor] ${label} ${ti.dag_id}.${ti.task_id} (run: ${ti.dag_run_id})`)
 
   return new Promise((done) => {
     const child = fork(WORKER_SCRIPT, [], {
@@ -44,7 +52,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
       silent: true,
     })
 
-    // ── Timeout ───────────────────────────────────────────────────────
+    // ── Timeout (task-level, not sensor deadline) ─────────────────────
     let timedOut = false
     let killTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -76,28 +84,54 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
       void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line)
     })
 
-    child.send({
-      type: 'run',
-      fn: taskDef.run.toString(),
-      ctx: { dagId: ti.dag_id, runId: ti.dag_run_id, taskId: ti.task_id },
-    })
+    // Send appropriate message type to worker
+    if (ti.is_sensor) {
+      child.send({
+        type: 'poke',
+        fn: taskDef.poke!.toString(),
+        ctx: { dagId: ti.dag_id, runId: ti.dag_run_id, taskId: ti.task_id },
+      })
+    } else {
+      child.send({
+        type: 'run',
+        fn: taskDef.run!.toString(),
+        ctx: { dagId: ti.dag_id, runId: ti.dag_run_id, taskId: ti.task_id },
+      })
+    }
 
-    child.on('message', async (msg: WorkerMsg) => {
+    child.on('message', async (msg: WorkerDoneMsg) => {
       if (msg.type !== 'done') return
-      if (timedOut) return  // timeout handler already resolved
+      if (timedOut) return
       clearKillTimer()
       release()
-      if (msg.success) {
+
+      if (msg.outcome === 'reschedule') {
+        // Sensor: poke returned false — compute next outcome based on deadline
+        const now = new Date()
+        // first_poked_at is stamped on first reschedule; never null after first poke
+        const firstPokedAt = ti.first_poked_at ?? now
+        const result = sensorOutcome(false, firstPokedAt, now, ti.sensor_timeout_ms)
+
+        if (result === 'timeout') {
+          await markFailed(db, ti, `Sensor timed out after ${ti.sensor_timeout_ms}ms`)
+          console.error(`[executor] ⏱ sensor ${ti.dag_id}.${ti.task_id} timed out`)
+        } else {
+          // reschedule: requeue with next_poke_at; do NOT touch try_number
+          await schedulePoke(db, ti, firstPokedAt, now)
+          console.log(`[executor] ↻ sensor ${ti.dag_id}.${ti.task_id} requeued (poke #${ti.poke_count + 1})`)
+        }
+      } else if (msg.outcome === 'success') {
         await markSuccess(db, ti)
         console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id}`)
       } else {
+        // outcome === 'fail'
         const error = msg.error ?? 'unknown error'
-        if (ti.try_number < ti.max_retries) {
+        if (!ti.is_sensor && ti.try_number < ti.max_retries) {
           await scheduleRetry(db, ti, error)
           console.warn(`[executor] ↩ ${ti.dag_id}.${ti.task_id} retrying (${ti.try_number + 1}/${ti.max_retries + 1})`)
         } else {
           await markFailed(db, ti, error)
-          console.error(`[executor] ✗ ${ti.dag_id}.${ti.task_id} (try ${ti.try_number + 1}/${ti.max_retries + 1}): ${error}`)
+          console.error(`[executor] ✗ ${ti.dag_id}.${ti.task_id}: ${error}`)
         }
       }
       done()
@@ -112,12 +146,32 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     })
 
     child.on('exit', (code) => {
-      if (timedOut) return  // expected kill — already handled
+      if (timedOut) return
       if (code !== 0 && code !== null) {
         console.error(`[executor] worker exited with code ${code} for ${ti.task_id}`)
       }
     })
   })
+}
+
+/**
+ * Requeue a sensor task after a false poke.
+ * Does NOT touch try_number — reschedule ≠ retry.
+ */
+async function schedulePoke(db: Db, ti: TaskInstance, firstPokedAt: Date, now: Date): Promise<void> {
+  const nextPokeAt = new Date(now.getTime() + ti.poke_interval_ms)
+  await db.collection('task_instances').updateOne(
+    { dag_run_id: ti.dag_run_id, task_id: ti.task_id },
+    {
+      $set: {
+        state: 'queued',
+        started_at: null,
+        next_poke_at: nextPokeAt,
+        first_poked_at: firstPokedAt,  // idempotent: only changes on very first poke
+      },
+      $inc: { poke_count: 1 },
+    },
+  )
 }
 
 async function scheduleRetry(db: Db, ti: TaskInstance, error: string): Promise<void> {

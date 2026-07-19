@@ -7,11 +7,12 @@ export async function ensureIndexes(db: Db): Promise<void> {
     { key: { run_after: 1 } },
   ])
 
-  // task_instances: claim query (state + dag_run_id) + dependency checks
+  // task_instances: claim query (state + dag_run_id) + dependency checks + sensor poke gate
   await db.collection('task_instances').createIndexes([
     { key: { state: 1, dag_run_id: 1 } },
     { key: { dag_run_id: 1, task_id: 1 }, unique: true },
     { key: { dag_id: 1, state: 1 } },
+    { key: { dag_run_id: 1, state: 1, next_poke_at: 1 } },  // sensor claim filter
   ])
 
   // xcoms: lookup by run + source task + key

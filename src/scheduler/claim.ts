@@ -14,12 +14,25 @@ export async function claimReadyTasks(db: Db, dagRunId: string): Promise<TaskIns
     .toArray()
   const doneIds = doneTasks.map(t => t.task_id)
 
+  const now = new Date()
   const filter = {
     dag_run_id: dagRunId,
     state: 'queued',
-    $or: [
-      { depends_on: { $size: 0 } },
-      { depends_on: { $not: { $elemMatch: { $nin: doneIds } } } },
+    // Sensor poke gate: next_poke_at must be null (never poked) or <= now.
+    // Use $and so the dependency $or is preserved as a sibling condition.
+    $and: [
+      {
+        $or: [
+          { next_poke_at: null },
+          { next_poke_at: { $lte: now } },
+        ],
+      },
+      {
+        $or: [
+          { depends_on: { $size: 0 } },
+          { depends_on: { $not: { $elemMatch: { $nin: doneIds } } } },
+        ],
+      },
     ],
   }
 

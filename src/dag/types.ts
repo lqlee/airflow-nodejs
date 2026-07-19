@@ -18,7 +18,18 @@ export interface TaskDefinition {
   retries?: number        // max retry attempts (default: 0 = no retries)
   retryDelay?: number     // ms to wait before requeuing (default: 0)
   timeout?: number        // ms before worker is killed and task marked failed (default: no timeout)
-  run: (ctx: TaskContext) => Promise<unknown>
+  run?: (ctx: TaskContext) => Promise<unknown>
+
+  /**
+   * Sensor mode: if present, this task polls a condition instead of running once.
+   * Return true → task succeeds; return false → task requeues after pokeInterval.
+   * `run` should be omitted for sensor tasks.
+   */
+  poke?: (ctx: TaskContext) => Promise<boolean>
+  /** ms between poke attempts when poke() returns false. Default: 30 000 (30s). Min: 1 000. */
+  pokeInterval?: number
+  /** ms total deadline for sensor; exceeding it marks the task failed. Default: 3 600 000 (1h). */
+  sensorTimeout?: number
 }
 
 /**

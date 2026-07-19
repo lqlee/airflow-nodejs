@@ -4,6 +4,7 @@ import { listDags, getDag } from '../../dag/registry.js'
 import { createRun } from '../../scheduler/runs.js'
 import { advanceRun } from '../../scheduler/index.js'
 import { pauseDag, resumeDag, isDagPaused, getPausedDagIds } from '../../dag/pause.js'
+import { getDagStats } from '../../stats/index.js'
 
 export async function dagsRoutes(app: FastifyInstance): Promise<void> {
   // GET /dags — list all registered dags with pause state
@@ -73,4 +74,19 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
     await resumeDag(app.mongo, dag.id)
     return reply.send({ dag_id: dag.id, is_paused: false })
   })
+
+  // GET /dags/:dagId/stats?limit=20 — run statistics for a dag
+  app.get<{ Params: { dagId: string }; Querystring: { limit?: string } }>(
+    '/dags/:dagId/stats',
+    async (req, reply) => {
+      const dag = getDag(req.params.dagId)
+      if (!dag) return reply.status(404).send({ error: `Dag '${req.params.dagId}' not found` })
+
+      const rawLimit = parseInt(req.query.limit ?? '20', 10)
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 20
+
+      const stats = await getDagStats(app.mongo, dag.id, limit)
+      return reply.send(stats)
+    },
+  )
 }

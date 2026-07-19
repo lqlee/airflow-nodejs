@@ -100,6 +100,15 @@
     .sla-dag { font-family: monospace; color: #e2e8f0; min-width: 120px; }
     .sla-time { color: #718096; flex: 1; }
     .sla-acked { color: #4a5568; font-style: italic; }
+    .stats-bar-wrap { display:flex; gap:4px; margin-bottom:16px; }
+    .stats-bar-seg { height:8px; border-radius:4px; transition:width .3s; }
+    .stats-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px 16px; margin-bottom:12px; }
+    .stats-kv { display:flex; flex-direction:column; gap:2px; }
+    .stats-label { font-size:10px; color:#718096; text-transform:uppercase; letter-spacing:.06em; }
+    .stats-value { font-size:18px; font-weight:700; color:#e2e8f0; font-family:monospace; }
+    .stats-sub   { font-size:10px; color:#718096; }
+    .stats-panel { background:#1a1d27; border:1px solid #2d3748; border-radius:8px; padding:16px; margin-bottom:16px; }
+    .stats-panel h4 { font-size:12px; color:#718096; text-transform:uppercase; letter-spacing:.08em; margin-bottom:12px; }
   </style>
 </head>
 <body>
@@ -672,6 +681,76 @@ function RunsTable({ dagId, onSelectRun }) {
   );
 }
 
+// ── Stats Panel ───────────────────────────────────────────────────────
+function fmtMs(ms) {
+  if (ms == null) return '—';
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms/1000).toFixed(1)}s`;
+  return `${Math.floor(ms/60000)}m ${Math.round((ms%60000)/1000)}s`;
+}
+
+function StatsPanel({ dagId }) {
+  const [stats, setStats] = useState(null);
+  const fetch_ = useCallback(() =>
+    apiFetch(`${BASE}/dags/${dagId}/stats?limit=50`)
+      .then(r => r.json()).then(setStats).catch(() => {}),
+    [dagId]);
+
+  useEffect(() => { fetch_(); }, [fetch_]);
+
+  if (!stats) return null;
+
+  const terminal = stats.success_count + stats.failed_count + stats.cancelled_count;
+  const running  = stats.total_runs - terminal;
+  const rate     = stats.success_rate;
+
+  // Bar segments: success=green, failed=red, cancelled=grey, running=blue
+  const seg = (count, color, title) => {
+    if (!count) return null;
+    const pct = (count / stats.total_runs * 100).toFixed(1);
+    return <div key={color} className="stats-bar-seg" title={`${title}: ${count}`}
+      style={{width:`${pct}%`, background:color}} />;
+  };
+
+  return (
+    <div className="stats-panel">
+      <h4>📊 Last {stats.total_runs} runs</h4>
+
+      {stats.total_runs > 0 && (
+        <div className="stats-bar-wrap">
+          {seg(stats.success_count,   '#276749', 'Success')}
+          {seg(stats.failed_count,    '#9b1c1c', 'Failed')}
+          {seg(stats.cancelled_count, '#4a5568', 'Cancelled')}
+          {seg(running,               '#1a365d', 'Active')}
+        </div>
+      )}
+
+      <div className="stats-grid">
+        <div className="stats-kv">
+          <span className="stats-label">Success rate</span>
+          <span className="stats-value"
+            style={{color: rate == null ? '#718096' : rate >= .9 ? '#68d391' : rate >= .5 ? '#f6ad55' : '#fc8181'}}>
+            {rate == null ? '—' : `${(rate*100).toFixed(0)}%`}
+          </span>
+          <span className="stats-sub">{stats.success_count}✓ {stats.failed_count}✗ {stats.cancelled_count}⊘</span>
+        </div>
+        <div className="stats-kv">
+          <span className="stats-label">Avg duration</span>
+          <span className="stats-value">{fmtMs(stats.avg_duration_ms)}</span>
+        </div>
+        <div className="stats-kv">
+          <span className="stats-label">p95 duration</span>
+          <span className="stats-value">{fmtMs(stats.p95_duration_ms)}</span>
+        </div>
+        <div className="stats-kv">
+          <span className="stats-label">Min / Max</span>
+          <span className="stats-value" style={{fontSize:13}}>{fmtMs(stats.min_duration_ms)} / {fmtMs(stats.max_duration_ms)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── App ───────────────────────────────────────────────────────────────
 function App() {
   const [dags, setDags] = useState([]);
@@ -745,17 +824,20 @@ function App() {
         </div>
 
         {selectedDag && (
-          <div className="split">
-            <div>
-              <div className="section-title" style={{marginBottom:8}}>
-                Runs — {selectedDag}
+          <>
+            <StatsPanel dagId={selectedDag} />
+            <div className="split">
+              <div>
+                <div className="section-title" style={{marginBottom:8}}>
+                  Runs — {selectedDag}
+                </div>
+                <RunsTable dagId={selectedDag} onSelectRun={setSelectedRun} />
               </div>
-              <RunsTable dagId={selectedDag} onSelectRun={setSelectedRun} />
+              {selectedRun && (
+                <RunDetail runId={selectedRun} onClose={() => setSelectedRun(null)} />
+              )}
             </div>
-            {selectedRun && (
-              <RunDetail runId={selectedRun} onClose={() => setSelectedRun(null)} />
-            )}
-          </div>
+          </>
         )}
       </div>
     </>

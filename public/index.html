@@ -462,11 +462,15 @@ function topoLayers(tasks) {
   return layers;
 }
 
+// Group colours — cycle through a palette by group index
+const GROUP_PALETTE = ['#1a2744','#1a2f1a','#2f1a2f','#2f2a1a','#1a2f2f','#2a1a1f'];
+const GROUP_LABEL_COLOR = ['#90cdf4','#68d391','#d6bcfa','#f6ad55','#81e6d9','#fc8181'];
+
 function DagGraph({ tasks, onClickTask }) {
   const NODE_W = 130, NODE_H = 44, GAP_X = 70, GAP_Y = 16, PAD = 20;
+  const GROUP_PAD = 10, GROUP_LABEL_H = 16;
 
   const layers = topoLayers(tasks);
-  const taskById = Object.fromEntries(tasks.map(t => [t.task_id, t]));
 
   // Assign positions
   const pos = {};
@@ -475,14 +479,14 @@ function DagGraph({ tasks, onClickTask }) {
     layer.forEach((id, row) => {
       pos[id] = {
         x: PAD + col * (NODE_W + GAP_X),
-        y: PAD + row * (NODE_H + GAP_Y) + (layers.reduce((m, l) => Math.max(m, l.length), 0) * (NODE_H + GAP_Y) - totalH) / 2,
+        y: PAD + GROUP_LABEL_H + row * (NODE_H + GAP_Y) + (layers.reduce((m, l) => Math.max(m, l.length), 0) * (NODE_H + GAP_Y) - totalH) / 2,
       };
     });
   });
 
   const svgW = PAD * 2 + layers.length * NODE_W + (layers.length - 1) * GAP_X;
   const maxRows = layers.reduce((m, l) => Math.max(m, l.length), 0);
-  const svgH = PAD * 2 + maxRows * NODE_H + (maxRows - 1) * GAP_Y;
+  const svgH = PAD * 2 + GROUP_LABEL_H + maxRows * NODE_H + (maxRows - 1) * GAP_Y;
 
   const dur = (t) => {
     if (!t.started_at) return '';
@@ -490,9 +494,44 @@ function DagGraph({ tasks, onClickTask }) {
     return ms < 1000 ? `${ms}ms` : `${(ms/1000).toFixed(1)}s`;
   };
 
+  // Compute group bounding boxes for background rects
+  const groups = {};
+  tasks.forEach(t => {
+    if (!t.group_id) return;
+    const p = pos[t.task_id];
+    if (!p) return;
+    if (!groups[t.group_id]) groups[t.group_id] = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    const g = groups[t.group_id];
+    g.minX = Math.min(g.minX, p.x);
+    g.minY = Math.min(g.minY, p.y);
+    g.maxX = Math.max(g.maxX, p.x + NODE_W);
+    g.maxY = Math.max(g.maxY, p.y + NODE_H);
+  });
+  const groupIds = Object.keys(groups);
+
   return (
     <div className="dag-graph-wrap">
       <svg width={svgW} height={svgH} style={{minWidth: svgW}}>
+        <defs>
+          <marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 Z" fill="#4a5568" />
+          </marker>
+        </defs>
+        {/* Group background rects (drawn before edges/nodes) */}
+        {groupIds.map((gid, i) => {
+          const { minX, minY, maxX, maxY } = groups[gid];
+          const rx = minX - GROUP_PAD, ry = minY - GROUP_LABEL_H - GROUP_PAD;
+          const rw = maxX - minX + GROUP_PAD * 2, rh = maxY - minY + GROUP_LABEL_H + GROUP_PAD * 2;
+          const fill = GROUP_PALETTE[i % GROUP_PALETTE.length];
+          const labelColor = GROUP_LABEL_COLOR[i % GROUP_LABEL_COLOR.length];
+          return (
+            <g key={gid}>
+              <rect x={rx} y={ry} width={rw} height={rh}
+                fill={fill} stroke={labelColor} strokeWidth="1" rx="8" ry="8" opacity="0.6" />
+              <text x={rx + 8} y={ry + 12} fill={labelColor} fontSize="10" fontFamily="monospace">{gid}</text>
+            </g>
+          );
+        })}
         {/* Edges */}
         {tasks.map(t =>
           (t.depends_on ?? []).map(dep => {
@@ -507,12 +546,6 @@ function DagGraph({ tasks, onClickTask }) {
             );
           })
         )}
-        {/* Arrow marker */}
-        <defs>
-          <marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-            <path d="M0,0 L6,3 L0,6 Z" fill="#4a5568" />
-          </marker>
-        </defs>
         {/* Nodes */}
         {tasks.map(t => {
           const { x, y } = pos[t.task_id] ?? { x: 0, y: 0 };
@@ -645,24 +678,46 @@ function RunDetail({ runId, onClose }) {
 
       {view === 'xcom' && <XComPanel runId={runId} />}
 
-      {view === 'list' && run.tasks.map(t => (
-        <div key={t.task_id}>
-          <div className="task-row">
-            <span className="task-name">{t.task_id}</span>
-            {statusBadge(t.state)}
-            {t.depends_on?.length > 0 &&
-              <span className="task-deps">← {t.depends_on.join(', ')}</span>}
-            <span className="duration">{duration(t.started_at, t.ended_at)}</span>
-            <button className="log-btn"
-              onClick={() => setLogTask(prev => prev === t.task_id ? null : t.task_id)}>
-              {logTask === t.task_id ? 'hide logs' : 'logs'}
-            </button>
+      {view === 'list' && (() => {
+        // Group tasks by group_id for display; ungrouped tasks shown inline
+        const grouped = {};
+        const ungrouped = [];
+        run.tasks.forEach(t => {
+          if (t.group_id) { (grouped[t.group_id] = grouped[t.group_id] || []).push(t); }
+          else ungrouped.push(t);
+        });
+        const renderTask = (t) => (
+          <div key={t.task_id}>
+            <div className="task-row">
+              <span className="task-name">{t.task_id}</span>
+              {statusBadge(t.state)}
+              {t.depends_on?.length > 0 &&
+                <span className="task-deps">← {t.depends_on.join(', ')}</span>}
+              <span className="duration">{duration(t.started_at, t.ended_at)}</span>
+              <button className="log-btn"
+                onClick={() => setLogTask(prev => prev === t.task_id ? null : t.task_id)}>
+                {logTask === t.task_id ? 'hide logs' : 'logs'}
+              </button>
+            </div>
+            {t.error && <div className="error-msg" style={{padding:'4px 0 4px 140px'}}>{t.error}</div>}
+            {logTask === t.task_id &&
+              <LogPanel runId={runId} taskId={t.task_id} onClose={() => setLogTask(null)} />}
           </div>
-          {t.error && <div className="error-msg" style={{padding:'4px 0 4px 140px'}}>{t.error}</div>}
-          {logTask === t.task_id &&
-            <LogPanel runId={runId} taskId={t.task_id} onClose={() => setLogTask(null)} />}
-        </div>
-      ))}
+        );
+        return (
+          <>
+            {Object.entries(grouped).map(([gid, gtasks]) => (
+              <div key={gid} style={{border:'1px solid #2d3748',borderRadius:6,marginBottom:8,padding:'4px 8px'}}>
+                <div style={{fontSize:10,fontFamily:'monospace',color:'#90cdf4',marginBottom:4,paddingBottom:4,borderBottom:'1px solid #2d3748'}}>
+                  ▤ {gid}
+                </div>
+                {gtasks.map(renderTask)}
+              </div>
+            ))}
+            {ungrouped.map(renderTask)}
+          </>
+        );
+      })()}
     </div>
   );
 }

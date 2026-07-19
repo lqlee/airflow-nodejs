@@ -3,6 +3,7 @@ import { resolve, extname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { register, clearRegistry } from './registry.js'
 import { hashDagSource } from './version.js'
+import { expandGroups } from './taskgroups.js'
 import type { DagDefinition } from './types.js'
 
 const DAGS_DIR = resolve(process.cwd(), 'dags')
@@ -36,8 +37,11 @@ export async function loadDags(): Promise<void> {
       }
       // Stamp version onto the dag object (overwrites any author-set version)
       dag.version = version
-      register(dag)
-      console.log(`[loader] loaded Dag: ${dag.id} v${version} (tasks: ${Object.keys(dag.tasks).join(', ')})`)
+      // Expand group→group dependencies into task-level edges before registration
+      const expanded = expandGroups(dag)
+      register(expanded)
+      const groupSuffix = dag.groups ? ` (groups: ${Object.keys(dag.groups).join(', ')})` : ''
+      console.log(`[loader] loaded Dag: ${dag.id} v${version} (tasks: ${Object.keys(dag.tasks).join(', ')})${groupSuffix}`)
     } catch (err) {
       console.error(`[loader] failed to load ${file}:`, err)
     }

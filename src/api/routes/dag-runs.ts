@@ -16,7 +16,7 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
     const tasks = await db
       .collection('task_instances')
       .find({ dag_run_id: runId })
-      .project({ task_id: 1, state: 1, started_at: 1, ended_at: 1, error: 1, depends_on: 1 })
+      .project({ task_id: 1, group_id: 1, state: 1, started_at: 1, ended_at: 1, error: 1, depends_on: 1 })
       .toArray()
 
     return reply.send({
@@ -29,6 +29,7 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
       ended_at: run.ended_at ?? null,
       tasks: tasks.map(t => ({
         task_id: t.task_id,
+        group_id: t.group_id ?? null,
         state: t.state,
         depends_on: t.depends_on,
         started_at: t.started_at,

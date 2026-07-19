@@ -31,8 +31,16 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
       id: dag.id,
       schedule: dag.schedule,
       is_paused: isPaused,
+      groups: dag.groups
+        ? Object.entries(dag.groups).map(([groupId, g]) => ({
+            group_id: groupId,
+            label: g.label ?? groupId,
+            depends_on: g.dependsOn ?? [],
+          }))
+        : [],
       tasks: Object.entries(dag.tasks).map(([taskId, t]) => ({
         task_id: taskId,
+        group_id: t.group ?? null,
         depends_on: t.dependsOn ?? [],
       })),
     })

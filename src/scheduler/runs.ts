@@ -13,6 +13,7 @@ export interface TaskInstance {
   dag_run_id: string        // stringified ObjectId of parent dag_run
   dag_id: string
   task_id: string
+  group_id: string | null   // TaskGroup membership label; null for ungrouped tasks
   state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled'
   depends_on: string[]
   try_number: number
@@ -52,6 +53,7 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
     dag_run_id: runId,
     dag_id: dag.id,
     task_id: taskId,
+    group_id: task.group ?? null,
     state: 'queued',
     depends_on: task.dependsOn ?? [],
     try_number: 0,

@@ -40,4 +40,15 @@ export async function ensureIndexes(db: Db): Promise<void> {
     { key: { revoked: 1, created_at: -1 } },
     { key: { name: 1 } },
   ])
+
+  // dataset_events: aggregate latest event per URI efficiently
+  await db.collection('dataset_events').createIndexes([
+    { key: { uri: 1, emitted_at: -1 } },
+  ])
+
+  // dataset_watermarks: unique per (consumer, dataset) — prevents duplicate inserts
+  // on concurrent first-boot ticks hitting the upsert path simultaneously
+  await db.collection('dataset_watermarks').createIndexes([
+    { key: { consumer_dag_id: 1, dataset_uri: 1 }, unique: true },
+  ])
 }

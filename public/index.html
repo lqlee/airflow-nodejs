@@ -365,7 +365,14 @@ function DagCard({ dag, onTrigger, onSelect, onTogglePause, selected }) {
         {dag.is_paused && <span className="paused-badge">paused</span>}
       </h3>
       <div className="dag-meta">
-        {dag.schedule ? `⏰ ${dag.schedule}` : '● manual only'}
+        {dag.datasets?.length > 0
+          ? <span title={`Consumes: ${dag.datasets.join(', ')}`}>📥 dataset-triggered</span>
+          : dag.schedule ? `⏰ ${dag.schedule}` : '● manual only'}
+        {dag.outlets?.length > 0 && (
+          <span title={`Produces: ${dag.outlets.join(', ')}`} style={{marginLeft:6,color:'#68d391'}}>
+            📤 {dag.outlets.length} outlet{dag.outlets.length > 1 ? 's' : ''}
+          </span>
+        )}
       </div>
       <div className="tasks-list">
         {dag.tasks.map(t => <span key={t}>{t}</span>)}

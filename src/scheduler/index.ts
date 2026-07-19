@@ -1,10 +1,13 @@
 import { ObjectId, type Db } from 'mongodb'
 import { loadDags } from '../dag/loader.js'
-import { listDags } from '../dag/registry.js'
+import { getDag, listDags } from '../dag/registry.js'
 import { claimReadyTasks } from './claim.js'
 import { executeTask } from './executor.js'
 import { syncCronJobs, stopAllCronJobs } from './cron.js'
 import { checkSlaBreaches } from '../sla/index.js'
+import { emitOutlets, triggerDatasetConsumers } from '../datasets/index.js'
+import { createRun } from './runs.js'
+import { isDagPaused } from '../dag/pause.js'
 
 const POLL_INTERVAL_MS = 5_000
 
@@ -46,6 +49,9 @@ async function tick(db: Db): Promise<void> {
     for (const run of activeRuns) {
       await advanceRun(db, run._id.toString())
     }
+
+    // Trigger dataset-aware consumers whose datasets have new events
+    await triggerDatasetConsumers(db, dags, createRun, isDagPaused)
   } catch (err) {
     console.error('[scheduler] tick error:', err)
   }
@@ -84,11 +90,20 @@ export async function advanceRun(db: Db, dagRunId: string): Promise<void> {
 
   if (allDone) {
     const finalState = anyFailed ? 'failed' : 'success'
-    await db.collection('dag_runs').updateOne(
-      { _id: new ObjectId(dagRunId) },
-      { $set: { state: finalState, ended_at: new Date() } }
+    // CAS: only transition if run is still in a non-terminal state (guards concurrent ticks)
+    const transitioned = await db.collection('dag_runs').findOneAndUpdate(
+      { _id: new ObjectId(dagRunId), state: { $in: ['queued', 'running'] } },
+      { $set: { state: finalState, ended_at: new Date() } },
+      { returnDocument: 'after' },
     )
+    if (!transitioned) return  // another tick already finalized this run
     console.log(`[scheduler] run ${dagRunId} → ${finalState}`)
+
+    // Emit dataset outlets only on success — exactly-once via CAS guard above
+    if (finalState === 'success') {
+      const dag = getDag(transitioned.dag_id)
+      if (dag) await emitOutlets(db, dag, dagRunId)
+    }
   }
 }
 

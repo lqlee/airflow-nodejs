@@ -8,6 +8,7 @@ import { dagsRoutes } from './routes/dags.js'
 import { dagRunsRoutes } from './routes/dag-runs.js'
 import { slaRoutes } from './routes/sla.js'
 import { apiKeysRoutes } from './routes/api-keys.js'
+import { datasetsRoutes } from './routes/datasets.js'
 import { activeWorkers, queueDepth } from '../scheduler/pool.js'
 import { authHook, AUTH_ENABLED, setDb } from '../auth/index.js'
 
@@ -82,6 +83,7 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
     app.register(dagRunsRoutes)
     app.register(slaRoutes)
     app.register(apiKeysRoutes)
+    app.register(datasetsRoutes)
   })
 
   return app

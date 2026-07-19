@@ -15,6 +15,8 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
     const dags = listDags().map(d => ({
       id: d.id,
       schedule: d.schedule,
+      datasets: d.datasets ?? [],
+      outlets: d.outlets ?? [],
       tasks: Object.keys(d.tasks),
       is_paused: paused.has(d.id),
     }))
@@ -30,6 +32,8 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({
       id: dag.id,
       schedule: dag.schedule,
+      datasets: dag.datasets ?? [],
+      outlets: dag.outlets ?? [],
       is_paused: isPaused,
       groups: dag.groups
         ? Object.entries(dag.groups).map(([groupId, g]) => ({

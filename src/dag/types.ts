@@ -41,6 +41,17 @@ export interface DagDefinition {
   tasks: Record<string, TaskDefinition>
   /** Optional TaskGroup definitions. Tasks opt-in via task.group = 'groupId'. */
   groups?: Record<string, TaskGroupDefinition>
+  /**
+   * Dataset URIs this dag PRODUCES when it completes successfully.
+   * e.g. ['s3://bucket/users/', 'pg://mydb/orders']
+   */
+  outlets?: string[]
+  /**
+   * Dataset URIs this dag CONSUMES. The dag runs when ALL listed datasets have
+   * received a new event since the last trigger (AND-semantics).
+   * A dag with `datasets` keeps `schedule: null` — cron scheduling is ignored.
+   */
+  datasets?: string[]
 }
 
 /** Helper to define a Dag with full TypeScript inference */

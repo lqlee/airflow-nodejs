@@ -26,6 +26,9 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
       dag_id: run.dag_id,
       dag_version: run.dag_version ?? null,
       logical_date: run.logical_date ?? null,
+      conf: run.conf ?? {},
+      tags: run.tags ?? [],
+      note: run.note ?? null,
       state: run.state,
       created_at: run.created_at,
       ended_at: run.ended_at ?? null,
@@ -94,21 +97,27 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
   )
 
   // GET /dags/:dagId/runs — list recent runs for a dag
+  // Query params: limit, cursor, tag (exact single-tag filter)
   app.get<{
     Params: { dagId: string }
-    Querystring: { limit?: string; cursor?: string }
+    Querystring: { limit?: string; cursor?: string; tag?: string }
   }>('/dags/:dagId/runs', async (req, reply) => {
     const db = app.mongo
     const rawLimit = parseInt(req.query.limit ?? '20', 10)
     const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 20
-    const cursor = req.query.cursor // ObjectId hex string of the last seen run
+    const cursor = req.query.cursor
+    const tag = req.query.tag
 
     const filter: Record<string, unknown> = { dag_id: req.params.dagId }
+
+    // Tag filter: ANDs with the existing dag_id filter — does not overwrite
+    if (tag) {
+      filter['tags'] = tag  // MongoDB matches docs where tags array contains this value
+    }
+
     if (cursor) {
       if (!ObjectId.isValid(cursor))
         return reply.status(400).send({ error: 'Invalid cursor' })
-      // Runs are sorted created_at desc; cursor points to the last returned run's _id.
-      // We want runs whose created_at is strictly before that run's created_at.
       const pivot = await db.collection('dag_runs').findOne({ _id: new ObjectId(cursor) })
       if (pivot) {
         filter['created_at'] = { $lt: pivot.created_at }
@@ -130,10 +139,37 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
         dag_id: r.dag_id,
         dag_version: r.dag_version ?? null,
         logical_date: r.logical_date ?? null,
+        conf: r.conf ?? {},
+        tags: r.tags ?? [],
+        note: r.note ?? null,
         state: r.state,
         created_at: r.created_at,
       })),
       next_cursor: nextCursor,
     })
   })
+
+  // POST /dag-runs/:runId/note — add or update a free-text note on a run
+  // Allowed on any state (terminal runs can be annotated post-hoc).
+  app.post<{ Params: { runId: string }; Body: { note: string } }>(
+    '/dag-runs/:runId/note',
+    async (req, reply) => {
+      const { runId } = req.params
+      if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
+
+      const { note } = req.body ?? {}
+      if (typeof note !== 'string') {
+        return reply.status(400).send({ error: '"note" must be a string' })
+      }
+
+      const result = await app.mongo.collection('dag_runs').findOneAndUpdate(
+        { _id: new ObjectId(runId) },
+        { $set: { note } },
+        { returnDocument: 'after' },
+      )
+      if (!result) return reply.status(404).send({ error: `Run '${runId}' not found` })
+
+      return reply.send({ run_id: runId, note: result.note ?? null })
+    },
+  )
 }

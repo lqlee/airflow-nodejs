@@ -36,6 +36,12 @@ export interface TaskContext {
   mapIndex: number | null
   /** For mapped task instances: the input value for this instance. Null for non-mapped tasks. */
   mapValue: unknown
+  /**
+   * Trigger-time configuration passed by the caller via POST /dags/:id/trigger.
+   * Empty object for scheduled/backfill runs (no caller-supplied conf).
+   * Read-only — tasks should not mutate this object.
+   */
+  conf: Record<string, unknown>
   xcom: XComHelper
   connections: ConnectionHelper
   variables: VariableHelper

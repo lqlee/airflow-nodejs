@@ -1,6 +1,6 @@
 /**
  * Worker process — runs a single task function in isolation.
- * Connects directly to MongoDB for XCom, Connections, and Variables.
+ * Connects directly to MongoDB for XCom, Connections, Variables, and run conf.
  * Secrets are decrypted HERE in the worker — never passed as plaintext over IPC.
  *
  * IPC protocol:
@@ -8,12 +8,14 @@
  *   parent → worker (sensor task):   { type: 'poke', fn, ctx }
  *   worker → parent:                 { type: 'done', outcome: 'success'|'reschedule'|'fail', error? }
  *
- * ctx includes: dagId, runId, taskId, mapIndex (null for non-mapped), mapValue (null for non-mapped)
+ * ctx includes: dagId, runId, taskId, mapIndex, mapValue
+ * Injected in worker: conf (from DB), xcom, connections, variables
  */
 import { MongoClient } from 'mongodb'
 import { xcomPush, xcomPull } from '../xcom/index.js'
 import { getConnectionRuntime } from '../connections/index.js'
 import { getVariableRuntime } from '../variables/index.js'
+import { getRunConf } from './run-conf.js'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 const DB_NAME = process.env.DB_NAME ?? 'airflow'
@@ -40,6 +42,9 @@ process.on('message', async (msg: WorkerMsg) => {
     await client.connect()
     const db = client.db(DB_NAME)
 
+    // Trigger-time conf — read from DB, not IPC (conf could be large)
+    const conf = await getRunConf(db, ctx.runId)
+
     // XCom helpers — run-scoped; mapIndex threads through push for mapped instances
     const xcom = {
       push: (key: string, value: unknown) =>
@@ -60,10 +65,15 @@ process.on('message', async (msg: WorkerMsg) => {
 
     // eslint-disable-next-line no-new-func
     const fn_ = new Function(`return (${fn})`)() as (
-      ctx: WorkerCtx & { xcom: typeof xcom; connections: typeof connections; variables: typeof variables }
+      ctx: WorkerCtx & {
+        conf: Record<string, unknown>
+        xcom: typeof xcom
+        connections: typeof connections
+        variables: typeof variables
+      }
     ) => Promise<unknown>
 
-    const fullCtx = { ...ctx, xcom, connections, variables }
+    const fullCtx = { ...ctx, conf, xcom, connections, variables }
 
     if (msg.type === 'poke') {
       const ready = await fn_(fullCtx) as boolean

@@ -1,10 +1,11 @@
 import type { Db } from 'mongodb'
 
 export async function ensureIndexes(db: Db): Promise<void> {
-  // dag_runs: find runs by dag_id + state
+  // dag_runs: find runs by dag_id + state; tag filter
   await db.collection('dag_runs').createIndexes([
     { key: { dag_id: 1, state: 1 } },
     { key: { run_after: 1 } },
+    { key: { dag_id: 1, tags: 1, created_at: -1 } },  // tag filter + sort
   ])
 
   // task_instances: claim query (state + dag_run_id) + dependency checks + sensor poke gate

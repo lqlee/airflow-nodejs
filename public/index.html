@@ -341,11 +341,31 @@ function SlaPanel({ alerts, onAck, onClose }) {
 function DagCard({ dag, onTrigger, onSelect, onTogglePause, selected }) {
   const [triggering, setTriggering] = useState(false);
   const [toggling, setToggling] = useState(false);
+  const [showTriggerForm, setShowTriggerForm] = useState(false);
+  const [confText, setConfText] = useState('{}');
+  const [tagsText, setTagsText] = useState('');
+  const [triggerNote, setTriggerNote] = useState('');
+  const [triggerError, setTriggerError] = useState('');
 
-  const trigger = async () => {
+  const trigger = async (withForm = false) => {
+    setTriggerError('');
+    let body = {};
+    if (withForm) {
+      try {
+        const conf = JSON.parse(confText);
+        if (typeof conf !== 'object' || Array.isArray(conf)) throw new Error('"conf" must be a JSON object');
+        const tags = tagsText.trim() ? tagsText.split(',').map(t => t.trim()).filter(Boolean) : [];
+        body = { conf, tags, ...(triggerNote ? { note: triggerNote } : {}) };
+      } catch (e) { setTriggerError(e.message); return; }
+    }
     setTriggering(true);
-    await apiFetch(`${BASE}/dags/${dag.id}/trigger`, { method: 'POST' });
+    await apiFetch(`${BASE}/dags/${dag.id}/trigger`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
     setTriggering(false);
+    setShowTriggerForm(false);
     onTrigger();
   };
 
@@ -378,8 +398,12 @@ function DagCard({ dag, onTrigger, onSelect, onTogglePause, selected }) {
         {dag.tasks.map(t => <span key={t}>{t}</span>)}
       </div>
       <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-        <button className="btn btn-primary btn-sm" onClick={trigger} disabled={triggering}>
+        <button className="btn btn-primary btn-sm" onClick={() => trigger(false)} disabled={triggering}>
           {triggering ? '…' : '▶ Trigger'}
+        </button>
+        <button className="btn btn-sm" style={{background:'#2d3a50',color:'#90cdf4'}}
+          onClick={() => setShowTriggerForm(v => !v)} title="Trigger with conf/tags">
+          ⚙ With params
         </button>
         <button className={`btn btn-sm ${dag.is_paused ? 'btn-resume' : 'btn-pause'}`}
           onClick={togglePause} disabled={toggling}>
@@ -390,6 +414,23 @@ function DagCard({ dag, onTrigger, onSelect, onTogglePause, selected }) {
           {selected ? 'Hide runs' : 'View runs'}
         </button>
       </div>
+      {showTriggerForm && (
+        <div style={{marginTop:8,padding:10,background:'#1a2130',borderRadius:6,border:'1px solid #2d3748'}}>
+          <div style={{fontSize:11,color:'#a0aec0',marginBottom:4}}>conf (JSON object)</div>
+          <textarea value={confText} onChange={e => setConfText(e.target.value)} rows={3}
+            style={{width:'100%',background:'#2d3748',color:'#e2e8f0',border:'none',borderRadius:4,padding:'4px 6px',fontSize:11,fontFamily:'monospace',boxSizing:'border-box'}} />
+          <div style={{fontSize:11,color:'#a0aec0',marginTop:6,marginBottom:2}}>tags (comma-separated)</div>
+          <input value={tagsText} onChange={e => setTagsText(e.target.value)} placeholder="etl, prod, debug"
+            style={{width:'100%',background:'#2d3748',color:'#e2e8f0',border:'none',borderRadius:4,padding:'4px 6px',fontSize:11,boxSizing:'border-box'}} />
+          <div style={{fontSize:11,color:'#a0aec0',marginTop:6,marginBottom:2}}>note (optional)</div>
+          <input value={triggerNote} onChange={e => setTriggerNote(e.target.value)} placeholder="Reason for manual run…"
+            style={{width:'100%',background:'#2d3748',color:'#e2e8f0',border:'none',borderRadius:4,padding:'4px 6px',fontSize:11,boxSizing:'border-box'}} />
+          {triggerError && <div style={{fontSize:11,color:'#fc8181',marginTop:4}}>{triggerError}</div>}
+          <button className="btn btn-primary btn-sm" style={{marginTop:8}} onClick={() => trigger(true)} disabled={triggering}>
+            {triggering ? '…' : '▶ Trigger with params'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -645,6 +686,44 @@ function XComPanel({ runId }) {
   );
 }
 
+// ── Note Editor ──────────────────────────────────────────────────────
+function NoteEditor({ runId, initialNote }) {
+  const [editing, setEditing] = useState(false);
+  const [note, setNote] = useState(initialNote ?? '');
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    setSaving(true);
+    await apiFetch(`${BASE}/dag-runs/${runId}/note`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    });
+    setSaving(false);
+    setEditing(false);
+  };
+
+  if (!editing) return (
+    <div style={{marginBottom:8,fontSize:12}}>
+      {note
+        ? <span style={{color:'#a0aec0'}}>📝 {note} <button className="log-btn" onClick={() => setEditing(true)}>edit</button></span>
+        : <button className="log-btn" onClick={() => setEditing(true)}>+ Add note</button>
+      }
+    </div>
+  );
+  return (
+    <div style={{marginBottom:8,display:'flex',gap:6,alignItems:'flex-start'}}>
+      <textarea value={note} onChange={e => setNote(e.target.value)} rows={2}
+        placeholder="Add a note…"
+        style={{flex:1,background:'#2d3748',color:'#e2e8f0',border:'1px solid #4a5568',borderRadius:4,padding:'4px 6px',fontSize:12,resize:'vertical'}} />
+      <div style={{display:'flex',flexDirection:'column',gap:4}}>
+        <button className="btn btn-sm" onClick={save} disabled={saving}>{saving ? '…' : 'Save'}</button>
+        <button className="refresh-btn" onClick={() => setEditing(false)}>✕</button>
+      </div>
+    </div>
+  );
+}
+
 // ── Run Detail ────────────────────────────────────────────────────────
 function RunDetail({ runId, onClose }) {
   const [run, setRun] = useState(null);
@@ -683,6 +762,11 @@ function RunDetail({ runId, onClose }) {
             ⏮ {new Date(run.logical_date).toISOString().slice(0,10)}
           </span>
         )}
+        {(run.tags ?? []).map(tag => (
+          <span key={tag} style={{fontSize:10,background:'#2d3748',color:'#a0aec0',padding:'2px 6px',borderRadius:10,border:'1px solid #4a5568'}}>
+            #{tag}
+          </span>
+        ))}
         <div className="view-toggle">
           <button className={view==='graph'?'active':''} onClick={() => setView('graph')}>⬡ Graph</button>
           <button className={view==='list' ?'active':''} onClick={() => setView('list')}>≡ List</button>
@@ -712,6 +796,18 @@ function RunDetail({ runId, onClose }) {
           )}
         </>
       )}
+
+      {/* Conf panel — shown when conf is non-empty */}
+      {run.conf && Object.keys(run.conf).length > 0 && (
+        <details style={{marginBottom:8}}>
+          <summary style={{fontSize:11,color:'#a0aec0',cursor:'pointer',userSelect:'none'}}>⚙ conf ({Object.keys(run.conf).length} keys)</summary>
+          <pre style={{fontSize:11,background:'#1e2130',padding:8,borderRadius:4,overflowX:'auto',marginTop:4,color:'#e2e8f0'}}>
+            {JSON.stringify(run.conf, null, 2)}
+          </pre>
+        </details>
+      )}
+      {/* Note panel — inline editable */}
+      <NoteEditor runId={runId} initialNote={run.note} />
 
       {view === 'xcom' && <XComPanel runId={runId} />}
 
@@ -788,13 +884,19 @@ function RunsTable({ dagId, onSelectRun }) {
     <>
       <table className="runs-table">
         <thead><tr>
-          <th>Run ID</th><th>State</th><th>Version</th><th>Logical Date</th><th>Created</th><th></th>
+          <th>Run ID</th><th>State</th><th>Tags</th><th>Version</th><th>Logical Date</th><th>Created</th><th></th>
         </tr></thead>
         <tbody>
           {runs.map(r => (
             <tr key={r.run_id}>
               <td><code style={{fontSize:12}}>{r.run_id.slice(-8)}</code></td>
               <td>{statusBadge(r.state)}</td>
+              <td style={{fontSize:10}}>
+                {(r.tags ?? []).map(tag => (
+                  <span key={tag} style={{background:'#2d3748',color:'#a0aec0',padding:'1px 5px',borderRadius:8,marginRight:3,border:'1px solid #4a5568'}}>#{tag}</span>
+                ))}
+                {r.note && <span title={r.note} style={{color:'#718096'}}>📝</span>}
+              </td>
               <td><code style={{fontSize:10,color:'#718096'}}>{r.dag_version ?? '—'}</code></td>
               <td style={{color:'#90cdf4',fontSize:11}}>
                 {r.logical_date ? new Date(r.logical_date).toISOString().slice(0,10) : '—'}

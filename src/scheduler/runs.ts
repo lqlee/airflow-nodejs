@@ -6,6 +6,15 @@ export interface DagRun {
   dag_id: string
   dag_version: string | null   // sha256[:12] of the dag source file at run creation time
   logical_date: Date | null    // scheduled execution date; null for ad-hoc/manual runs
+  /**
+   * Trigger-time configuration (arbitrary JSON object from the caller).
+   * Empty object for cron/dataset/backfill runs.
+   */
+  conf: Record<string, unknown>
+  /** User-supplied tags for filtering/organisation. Default: []. */
+  tags: string[]
+  /** Free-text note added post-hoc. Null until updated via POST /dag-runs/:id/note. */
+  note: string | null
   state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled'
   created_at: Date
 }
@@ -41,6 +50,10 @@ export interface TaskInstance {
 export interface CreateRunOptions {
   /** Logical execution date (backfill). Defaults to now (ad-hoc / manual trigger). */
   logicalDate?: Date
+  /** Trigger-time configuration (arbitrary JSON object). Defaults to {}. */
+  conf?: Record<string, unknown>
+  /** Tags for filtering. Defaults to []. */
+  tags?: string[]
 }
 
 /**
@@ -55,6 +68,9 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
     dag_id: dag.id,
     dag_version: dag.version ?? null,
     logical_date: opts.logicalDate ?? null,
+    conf: opts.conf ?? {},
+    tags: opts.tags ?? [],
+    note: null,
     state: 'queued',
     created_at: now,
   })

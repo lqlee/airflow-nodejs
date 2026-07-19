@@ -97,7 +97,7 @@ export async function backfill(
       skipped++
       continue
     }
-    const runId = await createRun(db, dag, { logicalDate: date })
+    const runId = await createRun(db, dag, { logicalDate: date, tags: ['backfill'] })
     created.push(runId)
   }
 

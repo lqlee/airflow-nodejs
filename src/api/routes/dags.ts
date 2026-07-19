@@ -51,12 +51,39 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
   })
 
   // POST /dags/:dagId/trigger — manually trigger a dag run (works even when paused)
-  app.post<{ Params: { dagId: string } }>('/dags/:dagId/trigger', async (req, reply) => {
+  // Optional body: { conf?: Record<string, unknown>, tags?: string[], note?: string }
+  app.post<{
+    Params: { dagId: string }
+    Body: { conf?: Record<string, unknown>; tags?: string[]; note?: string }
+  }>('/dags/:dagId/trigger', async (req, reply) => {
     const dag = getDag(req.params.dagId)
     if (!dag) return reply.status(404).send({ error: `Dag '${req.params.dagId}' not found` })
 
+    const body = req.body ?? {}
+
+    // Validate conf is a plain object if provided
+    if (body.conf !== undefined && (typeof body.conf !== 'object' || Array.isArray(body.conf) || body.conf === null)) {
+      return reply.status(400).send({ error: '"conf" must be a plain JSON object (not array or primitive)' })
+    }
+
+    // Validate tags is string array if provided
+    if (body.tags !== undefined && (!Array.isArray(body.tags) || body.tags.some(t => typeof t !== 'string'))) {
+      return reply.status(400).send({ error: '"tags" must be an array of strings' })
+    }
+
     const db = app.mongo
-    const runId = await createRun(db, dag)
+    const runId = await createRun(db, dag, {
+      conf: body.conf,
+      tags: body.tags,
+    })
+
+    // Apply note if provided at trigger time
+    if (body.note) {
+      await db.collection('dag_runs').updateOne(
+        { _id: new ObjectId(runId) },
+        { $set: { note: String(body.note) } },
+      )
+    }
 
     // Execute immediately — don't wait for the next scheduler tick
     await advanceRun(db, runId)
@@ -66,6 +93,9 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(201).send({
       run_id: runId,
       dag_id: dag.id,
+      conf: run?.conf ?? {},
+      tags: run?.tags ?? [],
+      note: run?.note ?? null,
       state: run?.state ?? 'queued',
     })
   })

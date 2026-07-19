@@ -5,6 +5,7 @@ import { createRun } from '../../scheduler/runs.js'
 import { advanceRun } from '../../scheduler/index.js'
 import { pauseDag, resumeDag, isDagPaused, getPausedDagIds } from '../../dag/pause.js'
 import { getDagStats } from '../../stats/index.js'
+import { backfill, BACKFILL_MAX_RUNS } from '../../scheduler/backfill.js'
 
 export async function dagsRoutes(app: FastifyInstance): Promise<void> {
   // GET /dags — list all registered dags with pause state
@@ -89,4 +90,54 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
       return reply.send(stats)
     },
   )
+
+  // POST /dags/:dagId/backfill — create queued runs for every scheduled date in [start, end]
+  // Body: { start: ISO string, end: ISO string }
+  // Skips (dag_id, logical_date) pairs that already have a run (idempotent).
+  // Returns: { created: string[], skipped: number, total_dates: number }
+  app.post<{
+    Params: { dagId: string }
+    Body: { start: string; end: string }
+  }>('/dags/:dagId/backfill', async (req, reply) => {
+    const dag = getDag(req.params.dagId)
+    if (!dag) return reply.status(404).send({ error: `Dag '${req.params.dagId}' not found` })
+
+    if (!dag.schedule) {
+      return reply.status(400).send({
+        error: `Dag '${dag.id}' has no schedule — backfill requires a cron schedule`,
+      })
+    }
+
+    const { start: startStr, end: endStr } = req.body ?? {}
+    if (!startStr || !endStr) {
+      return reply.status(400).send({ error: 'Body must include "start" and "end" ISO date strings' })
+    }
+
+    const start = new Date(startStr)
+    const end = new Date(endStr)
+
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      return reply.status(400).send({ error: '"start" and "end" must be valid ISO date strings' })
+    }
+
+    if (start > end) {
+      return reply.status(400).send({ error: '"start" must be before or equal to "end"' })
+    }
+
+    try {
+      const result = await backfill(app.mongo, dag, { start, end })
+      return reply.status(201).send({
+        dag_id: dag.id,
+        created: result.created,
+        created_count: result.created.length,
+        skipped: result.skipped,
+        total_dates: result.dates.length,
+      })
+    } catch (err) {
+      if (err instanceof RangeError) {
+        return reply.status(400).send({ error: err.message })
+      }
+      throw err
+    }
+  })
 }

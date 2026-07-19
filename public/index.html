@@ -607,6 +607,12 @@ function RunDetail({ runId, onClose }) {
             v{run.dag_version}
           </span>
         )}
+        {run.logical_date && (
+          <span title="Backfill logical date"
+            style={{fontSize:10,fontFamily:'monospace',color:'#90cdf4',background:'#1a2744',padding:'2px 6px',borderRadius:4}}>
+            ⏮ {new Date(run.logical_date).toISOString().slice(0,10)}
+          </span>
+        )}
         <div className="view-toggle">
           <button className={view==='graph'?'active':''} onClick={() => setView('graph')}>⬡ Graph</button>
           <button className={view==='list' ?'active':''} onClick={() => setView('list')}>≡ List</button>
@@ -690,7 +696,7 @@ function RunsTable({ dagId, onSelectRun }) {
     <>
       <table className="runs-table">
         <thead><tr>
-          <th>Run ID</th><th>State</th><th>Version</th><th>Created</th><th></th>
+          <th>Run ID</th><th>State</th><th>Version</th><th>Logical Date</th><th>Created</th><th></th>
         </tr></thead>
         <tbody>
           {runs.map(r => (
@@ -698,6 +704,9 @@ function RunsTable({ dagId, onSelectRun }) {
               <td><code style={{fontSize:12}}>{r.run_id.slice(-8)}</code></td>
               <td>{statusBadge(r.state)}</td>
               <td><code style={{fontSize:10,color:'#718096'}}>{r.dag_version ?? '—'}</code></td>
+              <td style={{color:'#90cdf4',fontSize:11}}>
+                {r.logical_date ? new Date(r.logical_date).toISOString().slice(0,10) : '—'}
+              </td>
               <td style={{color:'#718096'}}>{new Date(r.created_at).toLocaleTimeString()}</td>
               <td><button className="refresh-btn" onClick={() => onSelectRun(r.run_id)}>detail →</button></td>
             </tr>
@@ -785,6 +794,63 @@ function StatsPanel({ dagId }) {
   );
 }
 
+// ── Backfill Panel ────────────────────────────────────────────────────
+function BackfillPanel({ dagId, hasSchedule }) {
+  const [open, setOpen] = useState(false);
+  const [start, setStart] = useState('');
+  const [end, setEnd] = useState('');
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  if (!hasSchedule) return null;
+
+  const submit = async () => {
+    setError(''); setResult(null); setLoading(true);
+    try {
+      const res = await apiFetch(`${BASE}/dags/${dagId}/backfill`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ start, end }),
+      });
+      const body = await res.json();
+      if (!res.ok) { setError(body.error ?? 'Request failed'); }
+      else { setResult(body); }
+    } catch (e) { setError(String(e)); }
+    finally { setLoading(false); }
+  };
+
+  return (
+    <div style={{marginBottom:12}}>
+      <button className="btn btn-sm" onClick={() => { setOpen(v => !v); setResult(null); setError(''); }}
+        style={{background:'#1a2744',color:'#90cdf4',border:'1px solid #2d4a8a'}}>
+        ⏮ Backfill
+      </button>
+      {open && (
+        <div style={{marginTop:8,padding:12,background:'#1a2130',borderRadius:6,border:'1px solid #2d3748',display:'flex',flexWrap:'wrap',gap:8,alignItems:'flex-end'}}>
+          <label style={{fontSize:12,color:'#a0aec0'}}>Start
+            <input type="date" value={start} onChange={e => setStart(e.target.value)}
+              style={{display:'block',marginTop:2,background:'#2d3748',color:'#e2e8f0',border:'none',borderRadius:4,padding:'4px 8px',fontSize:12}} />
+          </label>
+          <label style={{fontSize:12,color:'#a0aec0'}}>End
+            <input type="date" value={end} onChange={e => setEnd(e.target.value)}
+              style={{display:'block',marginTop:2,background:'#2d3748',color:'#e2e8f0',border:'none',borderRadius:4,padding:'4px 8px',fontSize:12}} />
+          </label>
+          <button className="btn btn-sm" disabled={!start || !end || loading} onClick={submit}>
+            {loading ? '…' : 'Run backfill'}
+          </button>
+          {error && <span style={{fontSize:12,color:'#fc8181'}}>{error}</span>}
+          {result && (
+            <span style={{fontSize:12,color:'#68d391'}}>
+              ✓ {result.created_count} runs created, {result.skipped} skipped ({result.total_dates} dates)
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── App ───────────────────────────────────────────────────────────────
 function App() {
   const [dags, setDags] = useState([]);
@@ -860,6 +926,8 @@ function App() {
         {selectedDag && (
           <>
             <StatsPanel dagId={selectedDag} />
+            <BackfillPanel dagId={selectedDag}
+              hasSchedule={!!(dags.find(d => d.id === selectedDag)?.schedule)} />
             <div className="split">
               <div>
                 <div className="section-title" style={{marginBottom:8}}>

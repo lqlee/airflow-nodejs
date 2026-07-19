@@ -4,6 +4,7 @@ import type { DagDefinition } from '../dag/types.js'
 export interface DagRun {
   dag_id: string
   dag_version: string | null   // sha256[:12] of the dag source file at run creation time
+  logical_date: Date | null    // scheduled execution date; null for ad-hoc/manual runs
   state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled'
   created_at: Date
 }
@@ -24,17 +25,23 @@ export interface TaskInstance {
   created_at: Date
 }
 
+export interface CreateRunOptions {
+  /** Logical execution date (backfill). Defaults to now (ad-hoc / manual trigger). */
+  logicalDate?: Date
+}
+
 /**
  * Create a dag_run + one task_instance per task for the given Dag.
  * Returns the run id (string).
  */
-export async function createRun(db: Db, dag: DagDefinition): Promise<string> {
+export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptions = {}): Promise<string> {
   const now = new Date()
 
   // Insert dag_run — stamp the dag version so every run records which code ran it
   const runResult = await db.collection<DagRun>('dag_runs').insertOne({
     dag_id: dag.id,
     dag_version: dag.version ?? null,
+    logical_date: opts.logicalDate ?? null,
     state: 'queued',
     created_at: now,
   })

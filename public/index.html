@@ -69,6 +69,14 @@
     .view-toggle { display:flex; gap:4px; background:#0f1117; border:1px solid #2d3748; border-radius:6px; padding:2px; }
     .view-toggle button { background:none; border:none; color:#718096; padding:3px 10px; border-radius:4px; cursor:pointer; font-size:11px; }
     .view-toggle button.active { background:#2d3748; color:#e2e8f0; }
+    .xcom-panel { margin-top:12px; background:#0d1117; border:1px solid #2d3748; border-radius:6px; }
+    .xcom-panel-header { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid #2d3748; font-size:12px; color:#718096; }
+    .xcom-row { display:flex; align-items:baseline; gap:10px; padding:6px 12px; border-bottom:1px solid #1e2130; font-size:12px; font-family:monospace; }
+    .xcom-row:last-child { border-bottom:none; }
+    .xcom-task { color:#63b3ed; min-width:90px; flex-shrink:0; }
+    .xcom-key { color:#fbd38d; min-width:80px; flex-shrink:0; }
+    .xcom-val { color:#e2e8f0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .xcom-ts { color:#4a5568; font-size:10px; flex-shrink:0; }
     .dag-graph-wrap { overflow-x:auto; margin-top:4px; }
     .dag-graph-wrap svg { display:block; }
     .dag-node { cursor:pointer; }
@@ -517,6 +525,47 @@ function DagGraph({ tasks, onClickTask }) {
   );
 }
 
+// ── XCom Panel ───────────────────────────────────────────────────────
+function XComPanel({ runId }) {
+  const [xcoms, setXcoms] = useState([]);
+  const fetch_ = useCallback(() =>
+    apiFetch(`${BASE}/dag-runs/${runId}/xcoms`)
+      .then(r => r.json())
+      .then(data => { if (Array.isArray(data)) setXcoms(data); })
+      .catch(() => {}), [runId]);
+  useInterval(fetch_, 3000);
+
+  const fmt = ts => new Date(ts).toLocaleTimeString('en', { hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  const fmtVal = v => {
+    if (v === null || v === undefined) return 'null';
+    if (typeof v === 'object') {
+      try { return JSON.stringify(v); } catch { return String(v); }
+    }
+    return String(v);
+  };
+
+  return (
+    <div className="xcom-panel">
+      <div className="xcom-panel-header">
+        <span>XCom values</span>
+        <span style={{marginLeft:'auto',fontSize:11}}>{xcoms.length} entr{xcoms.length === 1 ? 'y' : 'ies'}</span>
+        <button className="log-btn" onClick={fetch_}>↻</button>
+      </div>
+      {xcoms.length === 0
+        ? <div style={{padding:'10px 12px',color:'#4a5568',fontSize:12}}>No XCom values yet</div>
+        : xcoms.map((x, i) => (
+          <div key={i} className="xcom-row">
+            <span className="xcom-task">{x.task_id}</span>
+            <span className="xcom-key">{x.key}</span>
+            <span className="xcom-val" title={fmtVal(x.value)}>{fmtVal(x.value)}</span>
+            <span className="xcom-ts">{fmt(x.pushed_at)}</span>
+          </div>
+        ))
+      }
+    </div>
+  );
+}
+
 // ── Run Detail ────────────────────────────────────────────────────────
 function RunDetail({ runId, onClose }) {
   const [run, setRun] = useState(null);
@@ -546,6 +595,7 @@ function RunDetail({ runId, onClose }) {
         <div className="view-toggle">
           <button className={view==='graph'?'active':''} onClick={() => setView('graph')}>⬡ Graph</button>
           <button className={view==='list' ?'active':''} onClick={() => setView('list')}>≡ List</button>
+          <button className={view==='xcom' ?'active':''} onClick={() => setView('xcom')}>⇄ XCom</button>
         </div>
         {isActive && (
           <button className="btn btn-sm" disabled={cancelling}
@@ -571,6 +621,8 @@ function RunDetail({ runId, onClose }) {
           )}
         </>
       )}
+
+      {view === 'xcom' && <XComPanel runId={runId} />}
 
       {view === 'list' && run.tasks.map(t => (
         <div key={t.task_id}>

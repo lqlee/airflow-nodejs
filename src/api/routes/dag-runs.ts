@@ -48,6 +48,25 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ run_id: runId, state: 'cancelled' })
   })
 
+  // GET /dag-runs/:runId/xcoms — all XCom values pushed during this run
+  app.get<{ Params: { runId: string } }>('/dag-runs/:runId/xcoms', async (req, reply) => {
+    const { runId } = req.params
+    if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
+
+    const xcoms = await app.mongo
+      .collection('xcoms')
+      .find({ dag_run_id: runId })
+      .sort({ pushed_at: 1 })
+      .toArray()
+
+    return reply.send(xcoms.map(x => ({
+      task_id: x.task_id,
+      key: x.key,
+      value: x.value,
+      pushed_at: x.pushed_at,
+    })))
+  })
+
   // GET /dag-runs/:runId/tasks/:taskId/logs — task log lines
   app.get<{ Params: { runId: string; taskId: string } }>(
     '/dag-runs/:runId/tasks/:taskId/logs',

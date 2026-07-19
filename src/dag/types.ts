@@ -5,11 +5,32 @@ export interface XComHelper {
   pull: (fromTaskId: string, key: string) => Promise<unknown>
 }
 
+export interface ConnectionHelper {
+  /** Retrieve a connection by conn_id. Returns null if not found. Decrypts in worker. */
+  get: (connId: string) => Promise<{
+    conn_id: string
+    conn_type: string
+    host: string | null
+    port: number | null
+    schema: string | null
+    login: string | null
+    password: string | null
+    extra: Record<string, unknown> | null
+  } | null>
+}
+
+export interface VariableHelper {
+  /** Retrieve a variable value by key. Returns null if not found. Decrypts secrets in worker. */
+  get: (key: string) => Promise<string | null>
+}
+
 export interface TaskContext {
   dagId: string
   runId: string
   taskId: string
   xcom: XComHelper
+  connections: ConnectionHelper
+  variables: VariableHelper
 }
 
 export interface TaskDefinition {

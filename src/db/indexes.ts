@@ -52,4 +52,15 @@ export async function ensureIndexes(db: Db): Promise<void> {
   await db.collection('dataset_watermarks').createIndexes([
     { key: { consumer_dag_id: 1, dataset_uri: 1 }, unique: true },
   ])
+
+  // connections: unique conn_id — fast lookup for task injection
+  await db.collection('connections').createIndexes([
+    { key: { conn_id: 1 }, unique: true },
+    { key: { conn_type: 1 } },
+  ])
+
+  // variables: unique key — fast lookup for task injection
+  await db.collection('variables').createIndexes([
+    { key: { key: 1 }, unique: true },
+  ])
 }

@@ -126,3 +126,41 @@ describe('GET /dags/:dagId/runs', () => {
     expect(body[0].dag_id).toBe('api_test_dag')
   })
 })
+
+describe('POST /dags/:dagId/pause and /resume', () => {
+  afterEach(async () => {
+    // always leave test dag in resumed state
+    await db.collection('dag_paused').deleteMany({})
+  })
+
+  it('pause returns is_paused: true', async () => {
+    const res = await app.inject({ method: 'POST', url: '/dags/api_test_dag/pause' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().is_paused).toBe(true)
+    expect(res.json().dag_id).toBe('api_test_dag')
+  })
+
+  it('resume returns is_paused: false', async () => {
+    await app.inject({ method: 'POST', url: '/dags/api_test_dag/pause' })
+    const res = await app.inject({ method: 'POST', url: '/dags/api_test_dag/resume' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().is_paused).toBe(false)
+  })
+
+  it('GET /dags reflects is_paused state', async () => {
+    await app.inject({ method: 'POST', url: '/dags/api_test_dag/pause' })
+    const res = await app.inject({ method: 'GET', url: '/dags' })
+    const dag = res.json().find((d: { id: string }) => d.id === 'api_test_dag')
+    expect(dag.is_paused).toBe(true)
+  })
+
+  it('pause returns 404 for unknown dag', async () => {
+    const res = await app.inject({ method: 'POST', url: '/dags/ghost/pause' })
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('resume returns 404 for unknown dag', async () => {
+    const res = await app.inject({ method: 'POST', url: '/dags/ghost/resume' })
+    expect(res.statusCode).toBe(404)
+  })
+})

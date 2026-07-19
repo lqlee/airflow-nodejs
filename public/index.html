@@ -16,8 +16,10 @@
     .container { max-width: 1100px; margin: 0 auto; padding: 24px; }
     .section-title { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: #718096; margin-bottom: 12px; }
     .dag-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin-bottom: 32px; }
-    .dag-card { background: #1a1d27; border: 1px solid #2d3748; border-radius: 8px; padding: 16px; }
-    .dag-card h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+    .dag-card { background: #1a1d27; border: 1px solid #2d3748; border-radius: 8px; padding: 16px; transition: border-color .15s; }
+    .dag-card.paused { border-color: #744210; background: #1a1812; }
+    .dag-card h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
+    .paused-badge { font-size: 10px; font-weight: 600; background: #744210; color: #fbd38d; padding: 1px 6px; border-radius: 4px; text-transform: uppercase; letter-spacing: .04em; }
     .dag-meta { font-size: 12px; color: #718096; margin-bottom: 12px; }
     .tasks-list { font-size: 12px; color: #a0aec0; margin-bottom: 12px; }
     .tasks-list span { background: #2d3748; padding: 2px 7px; border-radius: 4px; margin-right: 4px; display: inline-block; margin-bottom: 4px; }
@@ -26,6 +28,8 @@
     .btn:disabled { opacity: .4; cursor: not-allowed; }
     .btn-primary { background: #3182ce; color: #fff; }
     .btn-sm { padding: 4px 10px; font-size: 12px; }
+    .btn-pause { background: #744210; color: #fbd38d; }
+    .btn-resume { background: #1c4532; color: #68d391; }
     .runs-table { width: 100%; border-collapse: collapse; }
     .runs-table th { text-align: left; font-size: 12px; color: #718096; font-weight: 500; padding: 8px 12px; border-bottom: 1px solid #2d3748; }
     .runs-table td { padding: 10px 12px; border-bottom: 1px solid #1e2130; font-size: 13px; }
@@ -159,26 +163,45 @@ function Health() {
 }
 
 // ── Dag Cards ─────────────────────────────────────────────────────────
-function DagCard({ dag, onTrigger, onSelect, selected }) {
+function DagCard({ dag, onTrigger, onSelect, onTogglePause, selected }) {
   const [triggering, setTriggering] = useState(false);
+  const [toggling, setToggling] = useState(false);
+
   const trigger = async () => {
     setTriggering(true);
     await apiFetch(`${BASE}/dags/${dag.id}/trigger`, { method: 'POST' });
     setTriggering(false);
     onTrigger();
   };
+
+  const togglePause = async () => {
+    setToggling(true);
+    const action = dag.is_paused ? 'resume' : 'pause';
+    await apiFetch(`${BASE}/dags/${dag.id}/${action}`, { method: 'POST' });
+    setToggling(false);
+    onTogglePause();
+  };
+
   return (
-    <div className="dag-card" style={{ borderColor: selected ? '#3182ce' : undefined }}>
-      <h3>{dag.id}</h3>
+    <div className={`dag-card${dag.is_paused ? ' paused' : ''}`}
+      style={{ borderColor: selected && !dag.is_paused ? '#3182ce' : undefined }}>
+      <h3>
+        {dag.id}
+        {dag.is_paused && <span className="paused-badge">paused</span>}
+      </h3>
       <div className="dag-meta">
         {dag.schedule ? `⏰ ${dag.schedule}` : '● manual only'}
       </div>
       <div className="tasks-list">
         {dag.tasks.map(t => <span key={t}>{t}</span>)}
       </div>
-      <div style={{ display:'flex', gap:8 }}>
+      <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
         <button className="btn btn-primary btn-sm" onClick={trigger} disabled={triggering}>
           {triggering ? '…' : '▶ Trigger'}
+        </button>
+        <button className={`btn btn-sm ${dag.is_paused ? 'btn-resume' : 'btn-pause'}`}
+          onClick={togglePause} disabled={toggling}>
+          {toggling ? '…' : dag.is_paused ? '▶ Resume' : '⏸ Pause'}
         </button>
         <button className="btn btn-sm" style={{background:'#2d3748',color:'#a0aec0'}}
           onClick={() => onSelect(dag.id)}>
@@ -312,6 +335,7 @@ function App() {
   useInterval(fetchDags, 5000);
 
   const handleTrigger = () => { if (selectedDag) fetchDags(); };
+  const handleTogglePause = () => fetchDags();
   const selectDag = (id) => { setSelectedDag(prev => prev === id ? null : id); setSelectedRun(null); };
 
   if (authed === null) return null;  // loading
@@ -332,6 +356,7 @@ function App() {
             <DagCard key={d.id} dag={d}
               selected={selectedDag === d.id}
               onTrigger={handleTrigger}
+              onTogglePause={handleTogglePause}
               onSelect={selectDag} />
           ))}
           {!dags.length && <div className="empty">No Dags loaded</div>}

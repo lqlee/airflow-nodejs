@@ -3,6 +3,7 @@ import type { Db } from 'mongodb'
 import type { DagDefinition } from '../dag/types.js'
 import { createRun } from './runs.js'
 import { advanceRun } from './index.js'
+import { isDagPaused } from '../dag/pause.js'
 
 // Map of dagId → active cron task
 const cronJobs = new Map<string, cron.ScheduledTask>()
@@ -23,6 +24,13 @@ export function scheduleDag(db: Db, dag: DagDefinition): void {
   unscheduleDag(dag.id)
 
   const job = cron.schedule(dag.schedule, async () => {
+    // Skip if paused — check DB each time so pause/resume takes effect immediately
+    const paused = await isDagPaused(db, dag.id)
+    if (paused) {
+      console.log(`[cron] ⏸  dag '${dag.id}' is paused — skipping scheduled run`)
+      return
+    }
+
     console.log(`[cron] ⏰ dag '${dag.id}' triggered by schedule '${dag.schedule}'`)
     try {
       const runId = await createRun(db, dag)

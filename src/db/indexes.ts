@@ -23,4 +23,9 @@ export async function ensureIndexes(db: Db): Promise<void> {
   await db.collection('task_logs').createIndexes([
     { key: { dag_run_id: 1, task_id: 1, ts: 1 } },
   ])
+
+  // dag_paused: pause/resume state per dag
+  await db.collection('dag_paused').createIndexes([
+    { key: { dag_id: 1 }, unique: true },
+  ])
 }

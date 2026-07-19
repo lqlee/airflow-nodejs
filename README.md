@@ -214,3 +214,9 @@ Check Redis:
 docker exec airflow-nodejs-redis-1 redis-cli ping
 # PONG
 ```
+
+Run test with Mongod:
+```bash
+mongod --dbpath /tmp/mongodb-test --logpath /tmp/mongod.log &
+npm test
+```

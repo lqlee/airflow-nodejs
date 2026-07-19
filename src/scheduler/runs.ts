@@ -3,7 +3,7 @@ import type { DagDefinition } from '../dag/types.js'
 
 export interface DagRun {
   dag_id: string
-  state: 'queued' | 'running' | 'success' | 'failed'
+  state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled'
   created_at: Date
 }
 
@@ -11,7 +11,7 @@ export interface TaskInstance {
   dag_run_id: string        // stringified ObjectId of parent dag_run
   dag_id: string
   task_id: string
-  state: 'queued' | 'running' | 'success' | 'failed'
+  state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled'
   depends_on: string[]
   try_number: number
   max_retries: number       // max allowed retries (0 = no retries)

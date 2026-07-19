@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { ObjectId } from 'mongodb'
 import { getTaskLogs } from '../../logs/index.js'
+import { cancelRun } from '../../scheduler/index.js'
 
 export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
   // GET /dag-runs/:runId — get a single run + task summary
@@ -23,6 +24,7 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
       dag_id: run.dag_id,
       state: run.state,
       created_at: run.created_at,
+      ended_at: run.ended_at ?? null,
       tasks: tasks.map(t => ({
         task_id: t.task_id,
         state: t.state,
@@ -32,6 +34,18 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
         error: t.error ?? null,
       })),
     })
+  })
+
+  // POST /dag-runs/:runId/cancel — cancel a queued or running run
+  app.post<{ Params: { runId: string } }>('/dag-runs/:runId/cancel', async (req, reply) => {
+    const { runId } = req.params
+    if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
+
+    const cancelled = await cancelRun(app.mongo, runId)
+    if (!cancelled) {
+      return reply.status(409).send({ error: 'Run is already in a terminal state (success, failed, or cancelled)' })
+    }
+    return reply.send({ run_id: runId, state: 'cancelled' })
   })
 
   // GET /dag-runs/:runId/tasks/:taskId/logs — task log lines

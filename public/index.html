@@ -35,10 +35,11 @@
     .runs-table td { padding: 10px 12px; border-bottom: 1px solid #1e2130; font-size: 13px; }
     .runs-table tr:hover td { background: #1e2130; }
     .badge { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 11px; font-weight: 600; }
-    .badge-success { background: #1c4532; color: #68d391; }
-    .badge-failed  { background: #4a1515; color: #fc8181; }
-    .badge-running { background: #1a365d; color: #63b3ed; }
-    .badge-queued  { background: #2d3748; color: #a0aec0; }
+    .badge-success   { background: #1c4532; color: #68d391; }
+    .badge-failed    { background: #4a1515; color: #fc8181; }
+    .badge-running   { background: #1a365d; color: #63b3ed; }
+    .badge-queued    { background: #2d3748; color: #a0aec0; }
+    .badge-cancelled { background: #2d2d2d; color: #718096; }
     .run-detail { margin-top: 24px; background: #1a1d27; border: 1px solid #2d3748; border-radius: 8px; padding: 20px; }
     .run-detail h3 { font-size: 14px; margin-bottom: 16px; }
     .task-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid #1e2130; }
@@ -245,15 +246,32 @@ function LogPanel({ runId, taskId, onClose }) {
 function RunDetail({ runId, onClose }) {
   const [run, setRun] = useState(null);
   const [logTask, setLogTask] = useState(null);
+  const [cancelling, setCancelling] = useState(false);
   const fetch_ = useCallback(() =>
     apiFetch(`${BASE}/dag-runs/${runId}`).then(r=>r.json()).then(setRun).catch(()=>{}), [runId]);
   useInterval(fetch_, 2000);
+
+  const cancel = async () => {
+    setCancelling(true);
+    await apiFetch(`${BASE}/dag-runs/${runId}/cancel`, { method: 'POST' });
+    setCancelling(false);
+    fetch_();
+  };
+
+  const isActive = run && (run.state === 'queued' || run.state === 'running');
+
   if (!run) return <div className="run-detail"><div className="empty">Loading…</div></div>;
   return (
     <div className="run-detail">
       <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:16}}>
         <h3 style={{flex:1}}>Run: <code style={{fontSize:12}}>{runId.slice(-8)}</code></h3>
         {statusBadge(run.state)}
+        {isActive && (
+          <button className="btn btn-sm" disabled={cancelling}
+            style={{background:'#4a1515',color:'#fc8181'}} onClick={cancel}>
+            {cancelling ? '…' : '⏹ Cancel'}
+          </button>
+        )}
         <button className="refresh-btn" onClick={fetch_}>↻</button>
         <button className="refresh-btn" onClick={onClose}>✕</button>
       </div>

@@ -66,6 +66,15 @@
     .log-stderr { color: #fbb6ce; }
     .log-btn { background: none; border: 1px solid #2d3748; color: #718096; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
     .log-btn:hover { border-color: #4a5568; color: #a0aec0; }
+    .view-toggle { display:flex; gap:4px; background:#0f1117; border:1px solid #2d3748; border-radius:6px; padding:2px; }
+    .view-toggle button { background:none; border:none; color:#718096; padding:3px 10px; border-radius:4px; cursor:pointer; font-size:11px; }
+    .view-toggle button.active { background:#2d3748; color:#e2e8f0; }
+    .dag-graph-wrap { overflow-x:auto; margin-top:4px; }
+    .dag-graph-wrap svg { display:block; }
+    .dag-node { cursor:pointer; }
+    .dag-node rect { rx:6; ry:6; stroke-width:2; }
+    .dag-node text { font-family:monospace; font-size:11px; pointer-events:none; }
+    .dag-node .dur { font-size:9px; fill:#718096; }
     .keys-panel { background: #1a1d27; border: 1px solid #2d3748; border-radius: 8px; padding: 16px; margin-bottom: 24px; }
     .keys-panel h4 { font-size: 13px; color: #a0aec0; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
     .keys-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid #2d3748; font-size: 12px; }
@@ -390,11 +399,131 @@ function LogPanel({ runId, taskId, onClose }) {
   );
 }
 
+// ── DAG Graph ─────────────────────────────────────────────────────────
+// Pure SVG graph, no external library.
+// Layout: topological layers left-to-right, nodes sorted within each layer.
+
+const STATE_COLORS = {
+  success:   { fill: '#1c4532', stroke: '#68d391', text: '#68d391' },
+  failed:    { fill: '#4a1515', stroke: '#fc8181', text: '#fc8181' },
+  running:   { fill: '#1a365d', stroke: '#63b3ed', text: '#63b3ed' },
+  queued:    { fill: '#1e2130', stroke: '#4a5568', text: '#a0aec0' },
+  cancelled: { fill: '#1a1a1a', stroke: '#4a5568', text: '#718096' },
+};
+
+function topoLayers(tasks) {
+  // tasks: [{ task_id, depends_on, ... }]
+  const byId = Object.fromEntries(tasks.map(t => [t.task_id, t]));
+  const layers = [];
+  const assigned = {};
+
+  // Kahn's algorithm
+  const inDeg = {};
+  tasks.forEach(t => { inDeg[t.task_id] = 0; });
+  tasks.forEach(t => t.depends_on?.forEach(dep => { inDeg[t.task_id] = (inDeg[t.task_id] || 0) + 1; }));
+
+  let queue = tasks.filter(t => (inDeg[t.task_id] || 0) === 0).map(t => t.task_id);
+  while (queue.length) {
+    layers.push([...queue]);
+    queue.forEach(id => { assigned[id] = layers.length - 1; });
+    const next = [];
+    queue.forEach(id => {
+      tasks.forEach(t => {
+        if (t.depends_on?.includes(id)) {
+          inDeg[t.task_id]--;
+          if (inDeg[t.task_id] === 0) next.push(t.task_id);
+        }
+      });
+    });
+    queue = next;
+  }
+  // Any remaining (cycles / unresolved) go in last layer
+  tasks.forEach(t => {
+    if (assigned[t.task_id] === undefined) layers.push([t.task_id]);
+  });
+
+  return layers;
+}
+
+function DagGraph({ tasks, onClickTask }) {
+  const NODE_W = 130, NODE_H = 44, GAP_X = 70, GAP_Y = 16, PAD = 20;
+
+  const layers = topoLayers(tasks);
+  const taskById = Object.fromEntries(tasks.map(t => [t.task_id, t]));
+
+  // Assign positions
+  const pos = {};
+  layers.forEach((layer, col) => {
+    const totalH = layer.length * NODE_H + (layer.length - 1) * GAP_Y;
+    layer.forEach((id, row) => {
+      pos[id] = {
+        x: PAD + col * (NODE_W + GAP_X),
+        y: PAD + row * (NODE_H + GAP_Y) + (layers.reduce((m, l) => Math.max(m, l.length), 0) * (NODE_H + GAP_Y) - totalH) / 2,
+      };
+    });
+  });
+
+  const svgW = PAD * 2 + layers.length * NODE_W + (layers.length - 1) * GAP_X;
+  const maxRows = layers.reduce((m, l) => Math.max(m, l.length), 0);
+  const svgH = PAD * 2 + maxRows * NODE_H + (maxRows - 1) * GAP_Y;
+
+  const dur = (t) => {
+    if (!t.started_at) return '';
+    const ms = new Date(t.ended_at ?? Date.now()) - new Date(t.started_at);
+    return ms < 1000 ? `${ms}ms` : `${(ms/1000).toFixed(1)}s`;
+  };
+
+  return (
+    <div className="dag-graph-wrap">
+      <svg width={svgW} height={svgH} style={{minWidth: svgW}}>
+        {/* Edges */}
+        {tasks.map(t =>
+          (t.depends_on ?? []).map(dep => {
+            if (!pos[dep] || !pos[t.task_id]) return null;
+            const x1 = pos[dep].x + NODE_W, y1 = pos[dep].y + NODE_H / 2;
+            const x2 = pos[t.task_id].x,   y2 = pos[t.task_id].y + NODE_H / 2;
+            const cx = (x1 + x2) / 2;
+            return (
+              <path key={`${dep}->${t.task_id}`}
+                d={`M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}`}
+                fill="none" stroke="#4a5568" strokeWidth="1.5" markerEnd="url(#arr)" />
+            );
+          })
+        )}
+        {/* Arrow marker */}
+        <defs>
+          <marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 Z" fill="#4a5568" />
+          </marker>
+        </defs>
+        {/* Nodes */}
+        {tasks.map(t => {
+          const { x, y } = pos[t.task_id] ?? { x: 0, y: 0 };
+          const c = STATE_COLORS[t.state] ?? STATE_COLORS.queued;
+          const d = dur(t);
+          return (
+            <g key={t.task_id} className="dag-node" onClick={() => onClickTask(t.task_id)}
+              transform={`translate(${x},${y})`}>
+              <rect width={NODE_W} height={NODE_H} fill={c.fill} stroke={c.stroke} rx="6" ry="6" />
+              <text x={NODE_W/2} y={d ? 17 : NODE_H/2 + 4} textAnchor="middle" fill={c.text}>
+                {t.task_id.length > 14 ? t.task_id.slice(0, 13) + '…' : t.task_id}
+              </text>
+              {d && <text className="dur" x={NODE_W/2} y={30} textAnchor="middle">{d}</text>}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
 // ── Run Detail ────────────────────────────────────────────────────────
 function RunDetail({ runId, onClose }) {
   const [run, setRun] = useState(null);
   const [logTask, setLogTask] = useState(null);
   const [cancelling, setCancelling] = useState(false);
+  const [view, setView] = useState('graph');  // 'graph' | 'list'
+
   const fetch_ = useCallback(() =>
     apiFetch(`${BASE}/dag-runs/${runId}`).then(r=>r.json()).then(setRun).catch(()=>{}), [runId]);
   useInterval(fetch_, 2000);
@@ -411,9 +540,13 @@ function RunDetail({ runId, onClose }) {
   if (!run) return <div className="run-detail"><div className="empty">Loading…</div></div>;
   return (
     <div className="run-detail">
-      <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:16}}>
-        <h3 style={{flex:1}}>Run: <code style={{fontSize:12}}>{runId.slice(-8)}</code></h3>
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12,flexWrap:'wrap'}}>
+        <h3 style={{flex:1,marginBottom:0}}>Run: <code style={{fontSize:12}}>{runId.slice(-8)}</code></h3>
         {statusBadge(run.state)}
+        <div className="view-toggle">
+          <button className={view==='graph'?'active':''} onClick={() => setView('graph')}>⬡ Graph</button>
+          <button className={view==='list' ?'active':''} onClick={() => setView('list')}>≡ List</button>
+        </div>
         {isActive && (
           <button className="btn btn-sm" disabled={cancelling}
             style={{background:'#4a1515',color:'#fc8181'}} onClick={cancel}>
@@ -423,7 +556,23 @@ function RunDetail({ runId, onClose }) {
         <button className="refresh-btn" onClick={fetch_}>↻</button>
         <button className="refresh-btn" onClick={onClose}>✕</button>
       </div>
-      {run.tasks.map(t => (
+
+      {view === 'graph' && (
+        <>
+          <DagGraph tasks={run.tasks}
+            onClickTask={id => setLogTask(prev => prev === id ? null : id)} />
+          {logTask && (
+            <LogPanel runId={runId} taskId={logTask} onClose={() => setLogTask(null)} />
+          )}
+          {run.tasks.find(t => t.task_id === logTask)?.error && (
+            <div className="error-msg" style={{marginTop:4}}>
+              {run.tasks.find(t => t.task_id === logTask).error}
+            </div>
+          )}
+        </>
+      )}
+
+      {view === 'list' && run.tasks.map(t => (
         <div key={t.task_id}>
           <div className="task-row">
             <span className="task-name">{t.task_id}</span>

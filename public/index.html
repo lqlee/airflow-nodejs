@@ -294,6 +294,26 @@ function useSlaAlerts() {
   return { alerts, refresh };
 }
 
+function ImportErrorBanner({ errors }) {
+  if (!errors.length) return null;
+  return (
+    <div className="sla-banner" style={{background:'#4a1515',borderColor:'#c05621'}}>
+      <span>🔴</span>
+      <strong>{errors.length} Dag import error{errors.length > 1 ? 's' : ''}</strong>
+      <span>— {errors.map(e => e.filename).join(', ')}</span>
+    </div>
+  );
+}
+
+function useImportErrors() {
+  const [errors, setErrors] = useState([]);
+  useInterval(() =>
+    apiFetch(`${BASE}/import-errors`).then(r => r.json()).then(setErrors).catch(() => {}),
+    10000
+  );
+  return errors;
+}
+
 function SlaBanner({ alerts, onViewAlerts }) {
   const unacked = alerts.filter(a => !a.acked);
   if (!unacked.length) return null;
@@ -1056,6 +1076,7 @@ function App() {
   const [authed, setAuthed] = useState(null);
 
   const { alerts, refresh: refreshAlerts } = useSlaAlerts();
+  const importErrors = useImportErrors();
 
   // On mount: check if auth is required and whether we have a valid key
   useEffect(() => {
@@ -1099,6 +1120,7 @@ function App() {
         <button className="refresh-btn" onClick={handleLogout}
           title="Sign out">⏻</button>
       </header>
+      <ImportErrorBanner errors={importErrors} />
       <SlaBanner alerts={alerts} onViewAlerts={() => setShowAlerts(true)} />
       <div className="container">
         {showKeys && <ApiKeysPanel onClose={() => setShowKeys(false)} />}

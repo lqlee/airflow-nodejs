@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { ObjectId } from 'mongodb'
 import { getTaskLogs } from '../../logs/index.js'
 import { cancelRun, clearTaskInstance, advanceRun } from '../../scheduler/index.js'
+import { xcomPush } from '../../xcom/index.js'
 
 export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
   // GET /dag-runs/:runId — get a single run + task summary
@@ -63,22 +64,143 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
   })
 
   // GET /dag-runs/:runId/xcoms — all XCom values pushed during this run
-  app.get<{ Params: { runId: string } }>('/dag-runs/:runId/xcoms', async (req, reply) => {
+  // Optional query: ?task_id=  ?key=  (both independent filters)
+  app.get<{
+    Params: { runId: string }
+    Querystring: { task_id?: string; key?: string }
+  }>('/dag-runs/:runId/xcoms', async (req, reply) => {
     const { runId } = req.params
     if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
 
+    const filter: Record<string, unknown> = { dag_run_id: runId }
+    if (req.query.task_id) filter['task_id'] = req.query.task_id
+    if (req.query.key) filter['key'] = req.query.key
+
     const xcoms = await app.mongo
       .collection('xcoms')
-      .find({ dag_run_id: runId })
-      .sort({ pushed_at: 1 })
+      .find(filter)
+      .sort({ task_id: 1, map_index: 1, key: 1, pushed_at: 1 })
       .toArray()
 
     return reply.send(xcoms.map(x => ({
+      run_id: runId,
+      dag_id: x.dag_id,
       task_id: x.task_id,
+      map_index: x.map_index ?? null,
       key: x.key,
       value: x.value,
       pushed_at: x.pushed_at,
     })))
+  })
+
+  // GET /dag-runs/:runId/xcoms/:taskId/:key — single XCom entry
+  // ?map_index=N to target a specific mapped instance; omit for non-mapped tasks.
+  app.get<{
+    Params: { runId: string; taskId: string; key: string }
+    Querystring: { map_index?: string }
+  }>('/dag-runs/:runId/xcoms/:taskId/:key', async (req, reply) => {
+    const { runId, taskId, key } = req.params
+    if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
+
+    const filter: Record<string, unknown> = { dag_run_id: runId, task_id: taskId, key }
+    if (req.query.map_index !== undefined) {
+      const mi = parseInt(req.query.map_index, 10)
+      if (!Number.isFinite(mi) || mi < 0) {
+        return reply.status(400).send({ error: '"map_index" must be a non-negative integer' })
+      }
+      filter['map_index'] = mi
+    } else {
+      filter['map_index'] = null  // non-mapped tasks store null
+    }
+
+    const xcom = await app.mongo.collection('xcoms').findOne(filter)
+    if (!xcom) return reply.status(404).send({ error: `XCom '${key}' not found for task '${taskId}'` })
+
+    return reply.send({
+      run_id: runId,
+      dag_id: xcom.dag_id,
+      task_id: xcom.task_id,
+      map_index: xcom.map_index ?? null,
+      key: xcom.key,
+      value: xcom.value,
+      pushed_at: xcom.pushed_at,
+    })
+  })
+
+  // POST /dag-runs/:runId/xcoms — push an XCom value via API (upserts by task_id+key+map_index)
+  // Body: { task_id: string, key: string, value: unknown, map_index?: number }
+  // Useful for injecting values in tests or human-in-the-loop workflows.
+  app.post<{
+    Params: { runId: string }
+    Body: { task_id?: string; key?: string; value?: unknown; map_index?: number | null }
+  }>('/dag-runs/:runId/xcoms', async (req, reply) => {
+    const { runId } = req.params
+    if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
+
+    const run = await app.mongo.collection('dag_runs').findOne({ _id: new ObjectId(runId) })
+    if (!run) return reply.status(404).send({ error: `Run '${runId}' not found` })
+
+    const { task_id, key, value, map_index = null } = req.body ?? {}
+    if (!task_id || typeof task_id !== 'string') {
+      return reply.status(400).send({ error: '"task_id" is required (string)' })
+    }
+    if (!key || typeof key !== 'string') {
+      return reply.status(400).send({ error: '"key" is required (string)' })
+    }
+    if (value === undefined) {
+      return reply.status(400).send({ error: '"value" is required' })
+    }
+    if (map_index !== null && (typeof map_index !== 'number' || !Number.isFinite(map_index) || map_index < 0)) {
+      return reply.status(400).send({ error: '"map_index" must be a non-negative integer or null' })
+    }
+
+    await xcomPush(app.mongo, runId, run.dag_id as string, task_id, map_index, key, value)
+
+    return reply.status(201).send({
+      run_id: runId,
+      dag_id: run.dag_id,
+      task_id,
+      map_index: map_index ?? null,
+      key,
+      value,
+    })
+  })
+
+  // DELETE /dag-runs/:runId/xcoms/:taskId/:key — delete a single XCom entry
+  // ?map_index=N for mapped tasks; omit to delete the non-mapped entry.
+  app.delete<{
+    Params: { runId: string; taskId: string; key: string }
+    Querystring: { map_index?: string }
+  }>('/dag-runs/:runId/xcoms/:taskId/:key', async (req, reply) => {
+    const { runId, taskId, key } = req.params
+    if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
+
+    const filter: Record<string, unknown> = { dag_run_id: runId, task_id: taskId, key }
+    if (req.query.map_index !== undefined) {
+      const mi = parseInt(req.query.map_index, 10)
+      if (!Number.isFinite(mi) || mi < 0) {
+        return reply.status(400).send({ error: '"map_index" must be a non-negative integer' })
+      }
+      filter['map_index'] = mi
+    } else {
+      filter['map_index'] = null
+    }
+
+    const result = await app.mongo.collection('xcoms').deleteOne(filter)
+    if (result.deletedCount === 0) {
+      return reply.status(404).send({ error: `XCom '${key}' not found for task '${taskId}'` })
+    }
+    return reply.status(204).send()
+  })
+
+  // DELETE /dag-runs/:runId/xcoms — delete ALL XComs for a run
+  // Useful after clearing tasks to start fresh. Returns count of deleted entries.
+  app.delete<{ Params: { runId: string } }>('/dag-runs/:runId/xcoms', async (req, reply) => {
+    const { runId } = req.params
+    if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
+
+    const result = await app.mongo.collection('xcoms').deleteMany({ dag_run_id: runId })
+    return reply.send({ run_id: runId, deleted_count: result.deletedCount })
   })
 
   // GET /dag-runs/:runId/tasks/:taskId/logs — task log lines

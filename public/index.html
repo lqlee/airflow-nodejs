@@ -66,6 +66,14 @@
     .log-stderr { color: #fbb6ce; }
     .log-btn { background: none; border: 1px solid #2d3748; color: #718096; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
     .log-btn:hover { border-color: #4a5568; color: #a0aec0; }
+    .keys-panel { background: #1a1d27; border: 1px solid #2d3748; border-radius: 8px; padding: 16px; margin-bottom: 24px; }
+    .keys-panel h4 { font-size: 13px; color: #a0aec0; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+    .keys-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid #2d3748; font-size: 12px; }
+    .keys-row:last-child { border-bottom: none; }
+    .key-name { font-weight: 600; min-width: 120px; color: #e2e8f0; }
+    .key-meta { color: #718096; flex: 1; }
+    .key-revoked { color: #4a5568; font-style: italic; }
+    .key-new-val { font-family: monospace; font-size: 11px; color: #68d391; background: #0d1117; padding: 6px 10px; border-radius: 4px; word-break: break-all; margin-top: 8px; border: 1px solid #1c4532; }
     .sla-banner { background: #4a2008; border-bottom: 1px solid #c05621; padding: 8px 24px; display: flex; align-items: center; gap: 10px; font-size: 13px; color: #fbd38d; }
     .sla-banner strong { color: #f6ad55; }
     .sla-panel { background: #1a1d27; border: 1px solid #c05621; border-radius: 8px; padding: 16px; margin-bottom: 24px; }
@@ -169,6 +177,82 @@ function Health() {
     <span className="workers-badge">
       workers: {info.workers?.active ?? 0} active · {info.workers?.queued ?? 0} waiting
     </span>
+  );
+}
+
+// ── API Keys Panel ────────────────────────────────────────────────────
+function ApiKeysPanel({ onClose }) {
+  const [keys, setKeys] = useState([]);
+  const [name, setName] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [newKey, setNewKey] = useState(null);  // shown once
+
+  const fetchKeys = useCallback(() =>
+    apiFetch(`${BASE}/api-keys`).then(r => r.json()).then(data => {
+      if (Array.isArray(data)) setKeys(data);
+    }).catch(() => {}), []);
+
+  useEffect(() => { fetchKeys(); }, []);
+
+  const create = async (e) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setCreating(true);
+    const res = await apiFetch(`${BASE}/api-keys`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name.trim() }),
+    });
+    const data = await res.json();
+    setCreating(false);
+    if (res.ok) {
+      setNewKey(data.key);
+      setName('');
+      fetchKeys();
+    }
+  };
+
+  const revoke = async (id) => {
+    await apiFetch(`${BASE}/api-keys/${id}`, { method: 'DELETE' });
+    fetchKeys();
+  };
+
+  const fmtDate = d => d ? new Date(d).toLocaleDateString() : '—';
+
+  return (
+    <div className="keys-panel">
+      <h4>
+        🔑 API Keys
+        <span style={{flex:1}} />
+        <button className="log-btn" onClick={onClose}>✕</button>
+      </h4>
+      <form onSubmit={create} style={{display:'flex',gap:8,marginBottom:16}}>
+        <input value={name} onChange={e => setName(e.target.value)} placeholder="Key name (e.g. ci-bot)"
+          style={{flex:1,background:'#0f1117',border:'1px solid #4a5568',borderRadius:4,padding:'5px 10px',color:'#e2e8f0',fontSize:12}} />
+        <button type="submit" className="btn btn-primary btn-sm" disabled={creating || !name.trim()}>
+          {creating ? '…' : '+ Create'}
+        </button>
+      </form>
+      {newKey && (
+        <div>
+          <div style={{fontSize:11,color:'#68d391',marginBottom:4}}>✓ Key created — copy it now, it won't be shown again:</div>
+          <div className="key-new-val">{newKey}</div>
+          <button className="log-btn" style={{marginTop:6}} onClick={() => setNewKey(null)}>Dismiss</button>
+        </div>
+      )}
+      {keys.length === 0 && !newKey && <div className="empty" style={{padding:'12px 0'}}>No API keys yet</div>}
+      {keys.map(k => (
+        <div key={k.id} className="keys-row">
+          <span className="key-name">{k.name}</span>
+          <span className="key-meta">created {fmtDate(k.created_at)} · last used {fmtDate(k.last_used_at)}</span>
+          {k.revoked
+            ? <span className="key-revoked">revoked</span>
+            : <button className="log-btn" style={{color:'#fc8181',borderColor:'#4a1515'}}
+                onClick={() => { if (confirm(`Revoke key "${k.name}"?`)) revoke(k.id); }}>Revoke</button>
+          }
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -393,6 +477,7 @@ function App() {
   const [selectedDag, setSelectedDag] = useState(null);
   const [selectedRun, setSelectedRun] = useState(null);
   const [showAlerts, setShowAlerts] = useState(false);
+  const [showKeys, setShowKeys] = useState(false);
   // null = not checked yet, true = authenticated, false = needs login
   const [authed, setAuthed] = useState(null);
 
@@ -435,11 +520,14 @@ function App() {
       <header>
         <h1>✈ Airflow Node</h1>
         <Health />
-        <button className="refresh-btn" style={{marginLeft:'auto'}} onClick={handleLogout}
+        <button className="refresh-btn" style={{marginLeft:'auto'}} onClick={() => setShowKeys(v => !v)}
+          title="API Keys">🔑</button>
+        <button className="refresh-btn" onClick={handleLogout}
           title="Sign out">⏻</button>
       </header>
       <SlaBanner alerts={alerts} onViewAlerts={() => setShowAlerts(true)} />
       <div className="container">
+        {showKeys && <ApiKeysPanel onClose={() => setShowKeys(false)} />}
         {showAlerts && (
           <SlaPanel alerts={alerts} onAck={ackAlert} onClose={() => setShowAlerts(false)} />
         )}

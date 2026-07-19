@@ -34,4 +34,10 @@ export async function ensureIndexes(db: Db): Promise<void> {
     { key: { dag_run_id: 1 }, unique: true },
     { key: { acked: 1, fired_at: -1 } },
   ])
+
+  // api_keys: fast validation (revoked=false scan) + name lookup
+  await db.collection('api_keys').createIndexes([
+    { key: { revoked: 1, created_at: -1 } },
+    { key: { name: 1 } },
+  ])
 }

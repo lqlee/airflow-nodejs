@@ -6,8 +6,9 @@ import type { Db } from 'mongodb'
 import { dagsRoutes } from './routes/dags.js'
 import { dagRunsRoutes } from './routes/dag-runs.js'
 import { slaRoutes } from './routes/sla.js'
+import { apiKeysRoutes } from './routes/api-keys.js'
 import { activeWorkers, queueDepth } from '../scheduler/pool.js'
-import { authHook, AUTH_ENABLED } from '../auth/index.js'
+import { authHook, AUTH_ENABLED, setDb } from '../auth/index.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PUBLIC_DIR = resolve(__dirname, '../../public')
@@ -22,6 +23,9 @@ export function buildServer(db: Db): FastifyInstance {
   const app = Fastify({ logger: false })
 
   app.decorate('mongo', db)
+
+  // Wire DB into auth so DB-backed keys are validated
+  setDb(db)
 
   // Auth hook — runs before every request
   app.addHook('preHandler', authHook)
@@ -39,6 +43,7 @@ export function buildServer(db: Db): FastifyInstance {
   app.register(dagsRoutes)
   app.register(dagRunsRoutes)
   app.register(slaRoutes)
+  app.register(apiKeysRoutes)
 
   return app
 }

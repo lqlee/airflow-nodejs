@@ -200,3 +200,122 @@ describe('POST /dag-runs/:runId/cancel', () => {
     expect(res.statusCode).toBe(400)
   })
 })
+
+// ── GET /dags/:dagId/tasks ────────────────────────────────────────────────
+
+describe('GET /dags/:dagId/tasks', () => {
+  it('returns 404 for unknown dag', async () => {
+    const res = await app.inject({ method: 'GET', url: '/dags/nonexistent/tasks' })
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('returns all tasks for a dag', async () => {
+    const res = await app.inject({ method: 'GET', url: '/dags/api_test_dag/tasks' })
+    expect(res.statusCode).toBe(200)
+    const tasks = res.json() as Array<{ task_id: string }>
+    const ids = tasks.map(t => t.task_id).sort()
+    expect(ids).toEqual(['step1', 'step2'])
+  })
+
+  it('each task includes dag_id, depends_on, group_id', async () => {
+    const res = await app.inject({ method: 'GET', url: '/dags/api_test_dag/tasks' })
+    const tasks = res.json() as Array<{ task_id: string; dag_id: string; depends_on: string[]; group_id: string | null }>
+    const step2 = tasks.find(t => t.task_id === 'step2')!
+    expect(step2.dag_id).toBe('api_test_dag')
+    expect(step2.depends_on).toEqual(['step1'])
+    expect(step2.group_id).toBeNull()
+  })
+
+  it('includes retries, retry_delay_ms, timeout_ms fields', async () => {
+    clearRegistry()
+    const dagWithRetries: DagDefinition = {
+      id: 'tasks_retries_dag',
+      schedule: null,
+      tasks: {
+        flaky: { retries: 3, retryDelay: 2000, timeout: 60000, run: async () => {} },
+      },
+    }
+    register(dagWithRetries)
+    const res = await app.inject({ method: 'GET', url: '/dags/tasks_retries_dag/tasks' })
+    const tasks = res.json() as Array<{ task_id: string; retries: number; retry_delay_ms: number; timeout_ms: number }>
+    const flaky = tasks.find(t => t.task_id === 'flaky')!
+    expect(flaky.retries).toBe(3)
+    expect(flaky.retry_delay_ms).toBe(2000)
+    expect(flaky.timeout_ms).toBe(60000)
+    clearRegistry()
+    register(testDag)
+  })
+
+  it('is_mapped=true and mapped_count for expanded tasks', async () => {
+    clearRegistry()
+    const mappedDag: DagDefinition = {
+      id: 'tasks_mapped_dag',
+      schedule: null,
+      tasks: {
+        fan_out: { expand: ['a', 'b', 'c'], run: async (ctx) => ctx.mapValue },
+        final: { dependsOn: ['fan_out'], run: async () => {} },
+      },
+    }
+    register(mappedDag)
+    const res = await app.inject({ method: 'GET', url: '/dags/tasks_mapped_dag/tasks' })
+    const tasks = res.json() as Array<{ task_id: string; is_mapped: boolean; mapped_count: number | null }>
+    const fanOut = tasks.find(t => t.task_id === 'fan_out')!
+    const final  = tasks.find(t => t.task_id === 'final')!
+    expect(fanOut.is_mapped).toBe(true)
+    expect(fanOut.mapped_count).toBe(3)
+    expect(final.is_mapped).toBe(false)
+    expect(final.mapped_count).toBeNull()
+    clearRegistry()
+    register(testDag)
+  })
+
+  it('is_sensor=true with poke fields for sensor tasks', async () => {
+    clearRegistry()
+    const sensorDag: DagDefinition = {
+      id: 'tasks_sensor_dag',
+      schedule: null,
+      tasks: {
+        wait: { poke: async () => true, pokeInterval: 5000, sensorTimeout: 120000 },
+        after: { dependsOn: ['wait'], run: async () => {} },
+      },
+    }
+    register(sensorDag)
+    const res = await app.inject({ method: 'GET', url: '/dags/tasks_sensor_dag/tasks' })
+    const tasks = res.json() as Array<{
+      task_id: string; is_sensor: boolean
+      poke_interval_ms: number | null; sensor_timeout_ms: number | null
+    }>
+    const wait  = tasks.find(t => t.task_id === 'wait')!
+    const after = tasks.find(t => t.task_id === 'after')!
+    expect(wait.is_sensor).toBe(true)
+    expect(wait.poke_interval_ms).toBe(5000)
+    expect(wait.sensor_timeout_ms).toBe(120000)
+    expect(after.is_sensor).toBe(false)
+    expect(after.poke_interval_ms).toBeNull()
+    expect(after.sensor_timeout_ms).toBeNull()
+    clearRegistry()
+    register(testDag)
+  })
+
+  it('group_id reflects task group membership', async () => {
+    clearRegistry()
+    const groupedDag: DagDefinition = {
+      id: 'tasks_grouped_dag',
+      schedule: null,
+      groups: { etl: { label: 'ETL' } },
+      tasks: {
+        extract: { group: 'etl', run: async () => {} },
+        load:    { group: 'etl', dependsOn: ['extract'], run: async () => {} },
+        notify:  { run: async () => {} },
+      },
+    }
+    register(groupedDag)
+    const res = await app.inject({ method: 'GET', url: '/dags/tasks_grouped_dag/tasks' })
+    const tasks = res.json() as Array<{ task_id: string; group_id: string | null }>
+    expect(tasks.find(t => t.task_id === 'extract')?.group_id).toBe('etl')
+    expect(tasks.find(t => t.task_id === 'load')?.group_id).toBe('etl')
+    expect(tasks.find(t => t.task_id === 'notify')?.group_id).toBeNull()
+    clearRegistry()
+    register(testDag)
+  })
+})

@@ -50,6 +50,35 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
     })
   })
 
+  // GET /dags/:dagId/tasks — list all tasks for a dag with full metadata
+  app.get<{ Params: { dagId: string } }>('/dags/:dagId/tasks', async (req, reply) => {
+    const dag = getDag(req.params.dagId)
+    if (!dag) return reply.status(404).send({ error: `Dag '${req.params.dagId}' not found` })
+
+    const tasks = Object.entries(dag.tasks).map(([taskId, t]) => ({
+      task_id: taskId,
+      dag_id: dag.id,
+      depends_on: t.dependsOn ?? [],
+      group_id: t.group ?? null,
+      // Retry / timeout
+      retries: t.retries ?? 0,
+      retry_delay_ms: t.retryDelay ?? 0,
+      timeout_ms: t.timeout ?? 0,
+      // Task type flags
+      is_mapped: Array.isArray(t.expand),
+      mapped_count: Array.isArray(t.expand) ? t.expand.length : null,
+      is_sensor: typeof t.poke === 'function',
+      poke_interval_ms: typeof t.poke === 'function'
+        ? Math.max(1_000, t.pokeInterval ?? 30_000)
+        : null,
+      sensor_timeout_ms: typeof t.poke === 'function'
+        ? (t.sensorTimeout ?? 3_600_000)
+        : null,
+    }))
+
+    return reply.send(tasks)
+  })
+
   // POST /dags/:dagId/trigger — manually trigger a dag run (works even when paused)
   // Optional body: { conf?: Record<string, unknown>, tags?: string[], note?: string }
   app.post<{

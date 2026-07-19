@@ -1,7 +1,11 @@
 export interface XComHelper {
   /** Push a value under key — available to downstream tasks via pull() */
   push: (key: string, value: unknown) => Promise<void>
-  /** Pull a value pushed by an upstream task */
+  /**
+   * Pull a value from an upstream task.
+   * - Non-mapped task: returns the single pushed value.
+   * - Mapped task: returns an array of all instances' values ordered by map_index.
+   */
   pull: (fromTaskId: string, key: string) => Promise<unknown>
 }
 
@@ -28,6 +32,10 @@ export interface TaskContext {
   dagId: string
   runId: string
   taskId: string
+  /** For mapped task instances: the 0-based index of this instance. Null for non-mapped tasks. */
+  mapIndex: number | null
+  /** For mapped task instances: the input value for this instance. Null for non-mapped tasks. */
+  mapValue: unknown
   xcom: XComHelper
   connections: ConnectionHelper
   variables: VariableHelper
@@ -40,6 +48,15 @@ export interface TaskDefinition {
   retryDelay?: number     // ms to wait before requeuing (default: 0)
   timeout?: number        // ms before worker is killed and task marked failed (default: no timeout)
   run?: (ctx: TaskContext) => Promise<unknown>
+  /**
+   * Literal expand (Branch A): fan out this task over a static array of values.
+   * One task_instance is created per value at run-creation time.
+   * ctx.mapIndex (0-based) and ctx.mapValue are injected into each instance.
+   * Downstream tasks that depend_on a mapped task wait for ALL instances to succeed.
+   *
+   * Branch B (XCom-driven dynamic expand) is a planned future extension.
+   */
+  expand?: unknown[]
 
   /**
    * Sensor mode: if present, this task polls a condition instead of running once.

@@ -1,5 +1,6 @@
 import type { Db, WithId } from 'mongodb'
 import type { DagDefinition } from '../dag/types.js'
+import { planExpansion, isMappedTask } from './mapping.js'
 
 export interface DagRun {
   dag_id: string
@@ -14,6 +15,10 @@ export interface TaskInstance {
   dag_id: string
   task_id: string
   group_id: string | null   // TaskGroup membership label; null for ungrouped tasks
+  /** 0-based fan-out index for mapped tasks; null for non-mapped tasks */
+  map_index: number | null
+  /** Per-instance input value for mapped tasks; null for non-mapped tasks */
+  map_value: unknown
   state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled'
   depends_on: string[]
   try_number: number
@@ -59,34 +64,44 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
   const DEFAULT_POKE_INTERVAL_MS = 30_000
   const DEFAULT_SENSOR_TIMEOUT_MS = 3_600_000  // 1 hour
 
-  // Insert one task_instance per task
-  const taskDocs: TaskInstance[] = Object.entries(dag.tasks).map(([taskId, task]) => {
+  // Insert one task_instance per task (or N instances for mapped tasks)
+  const taskDocs: TaskInstance[] = []
+
+  for (const [taskId, task] of Object.entries(dag.tasks)) {
     const isSensor = typeof task.poke === 'function'
-    return {
-      dag_run_id: runId,
-      dag_id: dag.id,
-      task_id: taskId,
-      group_id: task.group ?? null,
-      state: 'queued',
-      depends_on: task.dependsOn ?? [],
-      try_number: 0,
-      max_retries: task.retries ?? 0,
-      retry_delay: task.retryDelay ?? 0,
-      timeout_ms: task.timeout ?? 0,
-      started_at: null,
-      ended_at: null,
-      error: null,
-      created_at: now,
-      is_sensor: isSensor,
-      poke_interval_ms: isSensor
-        ? Math.max(MIN_POKE_INTERVAL_MS, task.pokeInterval ?? DEFAULT_POKE_INTERVAL_MS)
-        : 0,
-      sensor_timeout_ms: isSensor ? (task.sensorTimeout ?? DEFAULT_SENSOR_TIMEOUT_MS) : 0,
-      first_poked_at: null,
-      next_poke_at: null,
-      poke_count: 0,
+    const instances = isMappedTask(task.expand)
+      ? planExpansion(task.expand)
+      : [{ map_index: null as number | null, map_value: null as unknown }]
+
+    for (const { map_index, map_value } of instances) {
+      taskDocs.push({
+        dag_run_id: runId,
+        dag_id: dag.id,
+        task_id: taskId,
+        group_id: task.group ?? null,
+        map_index,
+        map_value,
+        state: 'queued',
+        depends_on: task.dependsOn ?? [],
+        try_number: 0,
+        max_retries: task.retries ?? 0,
+        retry_delay: task.retryDelay ?? 0,
+        timeout_ms: task.timeout ?? 0,
+        started_at: null,
+        ended_at: null,
+        error: null,
+        created_at: now,
+        is_sensor: isSensor,
+        poke_interval_ms: isSensor
+          ? Math.max(MIN_POKE_INTERVAL_MS, task.pokeInterval ?? DEFAULT_POKE_INTERVAL_MS)
+          : 0,
+        sensor_timeout_ms: isSensor ? (task.sensorTimeout ?? DEFAULT_SENSOR_TIMEOUT_MS) : 0,
+        first_poked_at: null,
+        next_poke_at: null,
+        poke_count: 0,
+      })
     }
-  })
+  }
 
   await db.collection<TaskInstance>('task_instances').insertMany(taskDocs)
 

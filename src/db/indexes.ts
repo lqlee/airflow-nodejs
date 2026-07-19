@@ -8,16 +8,19 @@ export async function ensureIndexes(db: Db): Promise<void> {
   ])
 
   // task_instances: claim query (state + dag_run_id) + dependency checks + sensor poke gate
+  // IMPORTANT: unique key includes map_index to support mapped tasks (N instances per task_id).
+  // On a live deployment, drop the old (dag_run_id, task_id) unique index before applying:
+  //   db.task_instances.dropIndex('dag_run_id_1_task_id_1')
   await db.collection('task_instances').createIndexes([
     { key: { state: 1, dag_run_id: 1 } },
-    { key: { dag_run_id: 1, task_id: 1 }, unique: true },
+    { key: { dag_run_id: 1, task_id: 1, map_index: 1 }, unique: true },
     { key: { dag_id: 1, state: 1 } },
     { key: { dag_run_id: 1, state: 1, next_poke_at: 1 } },  // sensor claim filter
   ])
 
-  // xcoms: lookup by run + source task + key
+  // xcoms: unique per (run, task, map_index, key) — map_index scopes mapped instances
   await db.collection('xcoms').createIndexes([
-    { key: { dag_run_id: 1, task_id: 1, key: 1 }, unique: true },
+    { key: { dag_run_id: 1, task_id: 1, map_index: 1, key: 1 }, unique: true },
   ])
 
   // task_logs: fetch logs for a task ordered by time

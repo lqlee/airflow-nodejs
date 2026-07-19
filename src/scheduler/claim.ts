@@ -7,12 +7,28 @@ import type { TaskInstance } from './runs.js'
  * Returns an array of claimed tasks (may be empty).
  */
 export async function claimReadyTasks(db: Db, dagRunId: string): Promise<TaskInstance[]> {
-  const doneTasks = await db
+  // Fetch ALL instances for this run to compute which task_ids are "fully done".
+  // A task_id is done iff it has ≥1 instance AND every instance is success.
+  // Non-mapped tasks have exactly 1 instance — behavior identical to before.
+  // Mapped tasks have N instances — only done when ALL N are success.
+  const allInstances = await db
     .collection<TaskInstance>('task_instances')
-    .find({ dag_run_id: dagRunId, state: 'success' })
-    .project({ task_id: 1 })
+    .find({ dag_run_id: dagRunId })
+    .project({ task_id: 1, state: 1 })
     .toArray()
-  const doneIds = doneTasks.map(t => t.task_id)
+
+  // Group by task_id
+  const byTaskId = new Map<string, string[]>()
+  for (const inst of allInstances) {
+    const arr = byTaskId.get(inst.task_id) ?? []
+    arr.push(inst.state)
+    byTaskId.set(inst.task_id, arr)
+  }
+
+  // task_id is "done" = all its instances are success
+  const doneIds = [...byTaskId.entries()]
+    .filter(([, states]) => states.length > 0 && states.every(s => s === 'success'))
+    .map(([taskId]) => taskId)
 
   const now = new Date()
   const filter = {

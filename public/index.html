@@ -435,27 +435,55 @@ const STATE_COLORS = {
   cancelled: { fill: '#1a1a1a', stroke: '#4a5568', text: '#718096' },
 };
 
+/**
+ * Expand mapped tasks into uniquely-keyed nodes for graph rendering.
+ * A task with map_index gets node_id = 'task[0]', 'task[1]', etc.
+ * Downstream tasks that depend_on a mapped task get edges to ALL instances.
+ * Returns array of enriched task objects with node_id, display_label, resolved_deps.
+ */
+function expandForGraph(tasks) {
+  // Build set of mapped task_ids (those with non-null map_index)
+  const mappedIds = new Set(tasks.filter(t => t.map_index !== null).map(t => t.task_id));
+  // Build map: task_id → all node_ids for that task_id
+  const nodesByTaskId = {};
+  tasks.forEach(t => {
+    const nodeId = t.map_index !== null ? `${t.task_id}[${t.map_index}]` : t.task_id;
+    (nodesByTaskId[t.task_id] = nodesByTaskId[t.task_id] || []).push(nodeId);
+  });
+
+  return tasks.map(t => {
+    const nodeId = t.map_index !== null ? `${t.task_id}[${t.map_index}]` : t.task_id;
+    const label = t.map_index !== null
+      ? `${t.task_id.length > 10 ? t.task_id.slice(0,9)+'…' : t.task_id}[${t.map_index}]`
+      : t.task_id;
+    // Expand deps: if dep is a mapped task, fan out to all its instances
+    const resolvedDeps = (t.depends_on ?? []).flatMap(dep =>
+      mappedIds.has(dep) ? (nodesByTaskId[dep] || [dep]) : [dep]
+    );
+    return { ...t, node_id: nodeId, display_label: label, resolved_deps: resolvedDeps };
+  });
+}
+
 function topoLayers(tasks) {
-  // tasks: [{ task_id, depends_on, ... }]
-  const byId = Object.fromEntries(tasks.map(t => [t.task_id, t]));
+  // tasks: enriched with node_id and resolved_deps from expandForGraph
   const layers = [];
   const assigned = {};
 
-  // Kahn's algorithm
+  // Kahn's algorithm using node_id as the unique key
   const inDeg = {};
-  tasks.forEach(t => { inDeg[t.task_id] = 0; });
-  tasks.forEach(t => t.depends_on?.forEach(dep => { inDeg[t.task_id] = (inDeg[t.task_id] || 0) + 1; }));
+  tasks.forEach(t => { inDeg[t.node_id] = 0; });
+  tasks.forEach(t => t.resolved_deps?.forEach(() => { inDeg[t.node_id] = (inDeg[t.node_id] || 0) + 1; }));
 
-  let queue = tasks.filter(t => (inDeg[t.task_id] || 0) === 0).map(t => t.task_id);
+  let queue = tasks.filter(t => (inDeg[t.node_id] || 0) === 0).map(t => t.node_id);
   while (queue.length) {
     layers.push([...queue]);
     queue.forEach(id => { assigned[id] = layers.length - 1; });
     const next = [];
     queue.forEach(id => {
       tasks.forEach(t => {
-        if (t.depends_on?.includes(id)) {
-          inDeg[t.task_id]--;
-          if (inDeg[t.task_id] === 0) next.push(t.task_id);
+        if (t.resolved_deps?.includes(id)) {
+          inDeg[t.node_id]--;
+          if (inDeg[t.node_id] === 0) next.push(t.node_id);
         }
       });
     });
@@ -463,7 +491,7 @@ function topoLayers(tasks) {
   }
   // Any remaining (cycles / unresolved) go in last layer
   tasks.forEach(t => {
-    if (assigned[t.task_id] === undefined) layers.push([t.task_id]);
+    if (assigned[t.node_id] === undefined) layers.push([t.node_id]);
   });
 
   return layers;
@@ -477,14 +505,16 @@ function DagGraph({ tasks, onClickTask }) {
   const NODE_W = 130, NODE_H = 44, GAP_X = 70, GAP_Y = 16, PAD = 20;
   const GROUP_PAD = 10, GROUP_LABEL_H = 16;
 
-  const layers = topoLayers(tasks);
+  // Expand mapped tasks to unique node_ids before layout
+  const expanded = expandForGraph(tasks);
+  const layers = topoLayers(expanded);
 
-  // Assign positions
+  // Assign positions keyed by node_id (unique per instance)
   const pos = {};
   layers.forEach((layer, col) => {
     const totalH = layer.length * NODE_H + (layer.length - 1) * GAP_Y;
-    layer.forEach((id, row) => {
-      pos[id] = {
+    layer.forEach((nodeId, row) => {
+      pos[nodeId] = {
         x: PAD + col * (NODE_W + GAP_X),
         y: PAD + GROUP_LABEL_H + row * (NODE_H + GAP_Y) + (layers.reduce((m, l) => Math.max(m, l.length), 0) * (NODE_H + GAP_Y) - totalH) / 2,
       };
@@ -501,11 +531,11 @@ function DagGraph({ tasks, onClickTask }) {
     return ms < 1000 ? `${ms}ms` : `${(ms/1000).toFixed(1)}s`;
   };
 
-  // Compute group bounding boxes for background rects
+  // Compute group bounding boxes for background rects (keyed by node_id)
   const groups = {};
-  tasks.forEach(t => {
+  expanded.forEach(t => {
     if (!t.group_id) return;
-    const p = pos[t.task_id];
+    const p = pos[t.node_id];
     if (!p) return;
     if (!groups[t.group_id]) groups[t.group_id] = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
     const g = groups[t.group_id];
@@ -539,31 +569,31 @@ function DagGraph({ tasks, onClickTask }) {
             </g>
           );
         })}
-        {/* Edges */}
-        {tasks.map(t =>
-          (t.depends_on ?? []).map(dep => {
-            if (!pos[dep] || !pos[t.task_id]) return null;
+        {/* Edges — use resolved_deps (expanded fan-out for mapped upstreams) */}
+        {expanded.map(t =>
+          (t.resolved_deps ?? []).map(dep => {
+            if (!pos[dep] || !pos[t.node_id]) return null;
             const x1 = pos[dep].x + NODE_W, y1 = pos[dep].y + NODE_H / 2;
-            const x2 = pos[t.task_id].x,   y2 = pos[t.task_id].y + NODE_H / 2;
+            const x2 = pos[t.node_id].x,   y2 = pos[t.node_id].y + NODE_H / 2;
             const cx = (x1 + x2) / 2;
             return (
-              <path key={`${dep}->${t.task_id}`}
+              <path key={`${dep}->${t.node_id}`}
                 d={`M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}`}
                 fill="none" stroke="#4a5568" strokeWidth="1.5" markerEnd="url(#arr)" />
             );
           })
         )}
-        {/* Nodes */}
-        {tasks.map(t => {
-          const { x, y } = pos[t.task_id] ?? { x: 0, y: 0 };
+        {/* Nodes — keyed by node_id, labelled with display_label */}
+        {expanded.map(t => {
+          const { x, y } = pos[t.node_id] ?? { x: 0, y: 0 };
           const c = STATE_COLORS[t.state] ?? STATE_COLORS.queued;
           const d = dur(t);
           return (
-            <g key={t.task_id} className="dag-node" onClick={() => onClickTask(t.task_id)}
+            <g key={t.node_id} className="dag-node" onClick={() => onClickTask(t.task_id)}
               transform={`translate(${x},${y})`}>
               <rect width={NODE_W} height={NODE_H} fill={c.fill} stroke={c.stroke} rx="6" ry="6" />
               <text x={NODE_W/2} y={d ? 17 : NODE_H/2 + 4} textAnchor="middle" fill={c.text}>
-                {t.task_id.length > 14 ? t.task_id.slice(0, 13) + '…' : t.task_id}
+                {t.display_label.length > 14 ? t.display_label.slice(0, 13) + '…' : t.display_label}
               </text>
               {d && <text className="dur" x={NODE_W/2} y={30} textAnchor="middle">{d}</text>}
             </g>

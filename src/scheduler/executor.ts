@@ -84,19 +84,20 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
       void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line)
     })
 
+    // Base ctx — includes mapIndex/mapValue for mapped task instances
+    const workerCtx = {
+      dagId: ti.dag_id,
+      runId: ti.dag_run_id,
+      taskId: ti.task_id,
+      mapIndex: ti.map_index ?? null,
+      mapValue: ti.map_value ?? null,
+    }
+
     // Send appropriate message type to worker
     if (ti.is_sensor) {
-      child.send({
-        type: 'poke',
-        fn: taskDef.poke!.toString(),
-        ctx: { dagId: ti.dag_id, runId: ti.dag_run_id, taskId: ti.task_id },
-      })
+      child.send({ type: 'poke', fn: taskDef.poke!.toString(), ctx: workerCtx })
     } else {
-      child.send({
-        type: 'run',
-        fn: taskDef.run!.toString(),
-        ctx: { dagId: ti.dag_id, runId: ti.dag_run_id, taskId: ti.task_id },
-      })
+      child.send({ type: 'run', fn: taskDef.run!.toString(), ctx: workerCtx })
     }
 
     child.on('message', async (msg: WorkerDoneMsg) => {
@@ -158,16 +159,21 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
  * Requeue a sensor task after a false poke.
  * Does NOT touch try_number — reschedule ≠ retry.
  */
+/** Unique filter for a single task instance — includes map_index for mapped tasks. */
+function tiFilter(ti: TaskInstance) {
+  return { dag_run_id: ti.dag_run_id, task_id: ti.task_id, map_index: ti.map_index ?? null }
+}
+
 async function schedulePoke(db: Db, ti: TaskInstance, firstPokedAt: Date, now: Date): Promise<void> {
   const nextPokeAt = new Date(now.getTime() + ti.poke_interval_ms)
   await db.collection('task_instances').updateOne(
-    { dag_run_id: ti.dag_run_id, task_id: ti.task_id },
+    tiFilter(ti),
     {
       $set: {
         state: 'queued',
         started_at: null,
         next_poke_at: nextPokeAt,
-        first_poked_at: firstPokedAt,  // idempotent: only changes on very first poke
+        first_poked_at: firstPokedAt,
       },
       $inc: { poke_count: 1 },
     },
@@ -177,7 +183,7 @@ async function schedulePoke(db: Db, ti: TaskInstance, firstPokedAt: Date, now: D
 async function scheduleRetry(db: Db, ti: TaskInstance, error: string): Promise<void> {
   const requeue = async () => {
     await db.collection('task_instances').updateOne(
-      { dag_run_id: ti.dag_run_id, task_id: ti.task_id },
+      tiFilter(ti),
       { $set: { state: 'queued', started_at: null, ended_at: null, error }, $inc: { try_number: 1 } }
     )
   }
@@ -186,14 +192,14 @@ async function scheduleRetry(db: Db, ti: TaskInstance, error: string): Promise<v
 
 async function markSuccess(db: Db, ti: TaskInstance): Promise<void> {
   await db.collection('task_instances').updateOne(
-    { dag_run_id: ti.dag_run_id, task_id: ti.task_id },
+    tiFilter(ti),
     { $set: { state: 'success', ended_at: new Date() } }
   )
 }
 
 async function markFailed(db: Db, ti: TaskInstance, error: string): Promise<void> {
   await db.collection('task_instances').updateOne(
-    { dag_run_id: ti.dag_run_id, task_id: ti.task_id },
+    tiFilter(ti),
     { $set: { state: 'failed', ended_at: new Date(), error } }
   )
 }

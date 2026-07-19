@@ -7,6 +7,8 @@
  *   parent → worker (regular task):  { type: 'run',  fn, ctx }
  *   parent → worker (sensor task):   { type: 'poke', fn, ctx }
  *   worker → parent:                 { type: 'done', outcome: 'success'|'reschedule'|'fail', error? }
+ *
+ * ctx includes: dagId, runId, taskId, mapIndex (null for non-mapped), mapValue (null for non-mapped)
  */
 import { MongoClient } from 'mongodb'
 import { xcomPush, xcomPull } from '../xcom/index.js'
@@ -16,8 +18,16 @@ import { getVariableRuntime } from '../variables/index.js'
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 const DB_NAME = process.env.DB_NAME ?? 'airflow'
 
-type RunMsg  = { type: 'run';  fn: string; ctx: { dagId: string; runId: string; taskId: string } }
-type PokeMsg = { type: 'poke'; fn: string; ctx: { dagId: string; runId: string; taskId: string } }
+type WorkerCtx = {
+  dagId: string
+  runId: string
+  taskId: string
+  mapIndex: number | null
+  mapValue: unknown
+}
+
+type RunMsg  = { type: 'run';  fn: string; ctx: WorkerCtx }
+type PokeMsg = { type: 'poke'; fn: string; ctx: WorkerCtx }
 type WorkerMsg = RunMsg | PokeMsg
 
 process.on('message', async (msg: WorkerMsg) => {
@@ -30,10 +40,10 @@ process.on('message', async (msg: WorkerMsg) => {
     await client.connect()
     const db = client.db(DB_NAME)
 
-    // XCom helpers — run-scoped
+    // XCom helpers — run-scoped; mapIndex threads through push for mapped instances
     const xcom = {
       push: (key: string, value: unknown) =>
-        xcomPush(db, ctx.runId, ctx.dagId, ctx.taskId, key, value),
+        xcomPush(db, ctx.runId, ctx.dagId, ctx.taskId, ctx.mapIndex, key, value),
       pull: (fromTaskId: string, key: string) =>
         xcomPull(db, ctx.runId, fromTaskId, key),
     }
@@ -50,16 +60,16 @@ process.on('message', async (msg: WorkerMsg) => {
 
     // eslint-disable-next-line no-new-func
     const fn_ = new Function(`return (${fn})`)() as (
-      ctx: typeof ctx & { xcom: typeof xcom; connections: typeof connections; variables: typeof variables }
+      ctx: WorkerCtx & { xcom: typeof xcom; connections: typeof connections; variables: typeof variables }
     ) => Promise<unknown>
 
+    const fullCtx = { ...ctx, xcom, connections, variables }
+
     if (msg.type === 'poke') {
-      // Sensor: fn is the poke() function; returns boolean
-      const ready = await fn_({ ...ctx, xcom, connections, variables }) as boolean
+      const ready = await fn_(fullCtx) as boolean
       process.send!({ type: 'done', outcome: ready ? 'success' : 'reschedule' })
     } else {
-      // Regular task: fn is the run() function
-      await fn_({ ...ctx, xcom, connections, variables })
+      await fn_(fullCtx)
       process.send!({ type: 'done', outcome: 'success' })
     }
   } catch (err: unknown) {

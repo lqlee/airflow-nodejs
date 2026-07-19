@@ -200,7 +200,7 @@ async function casWatermark(
 export async function triggerDatasetConsumers(
   db: Db,
   dags: DagDefinition[],
-  createRun: (db: Db, dag: DagDefinition) => Promise<string>,
+  createRun: (db: Db, dag: DagDefinition, opts?: { triggerType?: string }) => Promise<string>,
   isDagPaused: (db: Db, dagId: string) => Promise<boolean>,
 ): Promise<number> {
   const consumers = dags.filter(d => d.datasets && d.datasets.length > 0)
@@ -246,7 +246,7 @@ export async function triggerDatasetConsumers(
       if (paused) {
         console.log(`[datasets] consumer '${dag.id}' is paused — skipping trigger`)
       } else {
-        await createRun(db, dag)
+        await createRun(db, dag, { triggerType: 'dataset' })
         console.log(`[datasets] triggered consumer '${dag.id}' (datasets: ${dag.datasets!.join(', ')})`)
         triggered++
       }

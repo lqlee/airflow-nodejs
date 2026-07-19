@@ -12,6 +12,7 @@ import { datasetsRoutes } from './routes/datasets.js'
 import { connectionsRoutes } from './routes/connections.js'
 import { variablesRoutes } from './routes/variables.js'
 import { importErrorsRoutes } from './routes/import-errors.js'
+import { eventLogsRoutes } from './routes/event-logs.js'
 import { activeWorkers, queueDepth } from '../scheduler/pool.js'
 import { authHook, AUTH_ENABLED, setDb } from '../auth/index.js'
 
@@ -90,6 +91,7 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
     app.register(connectionsRoutes)
     app.register(variablesRoutes)
     app.register(importErrorsRoutes)
+    app.register(eventLogsRoutes)
   })
 
   return app

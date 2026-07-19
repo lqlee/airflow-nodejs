@@ -1,6 +1,7 @@
 import type { Db, WithId } from 'mongodb'
 import type { DagDefinition } from '../dag/types.js'
 import { planExpansion, isMappedTask } from './mapping.js'
+import { recordEvent } from '../events/index.js'
 
 export interface DagRun {
   dag_id: string
@@ -54,6 +55,12 @@ export interface CreateRunOptions {
   conf?: Record<string, unknown>
   /** Tags for filtering. Defaults to []. */
   tags?: string[]
+  /**
+   * Source that triggered this run — used for audit metadata only.
+   * 'manual' = POST /trigger; 'cron' = scheduled; 'backfill' = backfill;
+   * 'dataset' = data-aware scheduling. Defaults to 'manual'.
+   */
+  triggerType?: 'manual' | 'cron' | 'backfill' | 'dataset'
 }
 
 /**
@@ -122,5 +129,17 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
   await db.collection<TaskInstance>('task_instances').insertMany(taskDocs)
 
   console.log(`[scheduler] created run ${runId} for dag '${dag.id}' with ${taskDocs.length} tasks`)
+
+  // Audit — fire-and-forget; never blocks or throws on the caller
+  void recordEvent(db, 'run_triggered', {
+    dag_id: dag.id,
+    dag_run_id: runId,
+    metadata: {
+      trigger_type: opts.triggerType ?? 'manual',
+      tags: opts.tags ?? [],
+      logical_date: opts.logicalDate ?? null,
+    },
+  })
+
   return runId
 }

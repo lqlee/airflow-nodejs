@@ -40,7 +40,7 @@ export function scheduleDag(db: Db, dag: DagDefinition): void {
 
     console.log(`[cron] ⏰ dag '${dag.id}' triggered by schedule '${dag.schedule}'`)
     try {
-      const runId = await createRun(db, dag)
+      const runId = await createRun(db, dag, { triggerType: 'cron' })
       await advanceRun(db, runId)
     } catch (err) {
       console.error(`[cron] error running dag '${dag.id}':`, err)

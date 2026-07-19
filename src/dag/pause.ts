@@ -6,6 +6,7 @@
  */
 
 import type { Db } from 'mongodb'
+import { recordEvent } from '../events/index.js'
 
 const COLLECTION = 'dag_paused'
 
@@ -15,6 +16,7 @@ export async function pauseDag(db: Db, dagId: string): Promise<void> {
     { $set: { dag_id: dagId, paused: true, updated_at: new Date() } },
     { upsert: true }
   )
+  void recordEvent(db, 'dag_paused', { dag_id: dagId })
 }
 
 export async function resumeDag(db: Db, dagId: string): Promise<void> {
@@ -23,6 +25,7 @@ export async function resumeDag(db: Db, dagId: string): Promise<void> {
     { $set: { dag_id: dagId, paused: false, updated_at: new Date() } },
     { upsert: true }
   )
+  void recordEvent(db, 'dag_resumed', { dag_id: dagId })
 }
 
 export async function isDagPaused(db: Db, dagId: string): Promise<boolean> {

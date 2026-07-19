@@ -9,6 +9,7 @@ import { emitOutlets, triggerDatasetConsumers } from '../datasets/index.js'
 import { createRun } from './runs.js'
 import { isDagPaused } from '../dag/pause.js'
 import { fireWebhook, type DeliverOptions } from '../webhooks/index.js'
+import { recordEvent } from '../events/index.js'
 
 const POLL_INTERVAL_MS = 5_000
 
@@ -122,6 +123,12 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
     if (!transitioned) return  // another tick already finalized this run
     console.log(`[scheduler] run ${dagRunId} → ${finalState}`)
 
+    // Audit — after CAS win so only the winning tick records the event
+    void recordEvent(db, finalState === 'success' ? 'run_success' : 'run_failed', {
+      dag_id: transitioned.dag_id,
+      dag_run_id: dagRunId,
+    })
+
     const dag = getDag(transitioned.dag_id)
 
     // Emit dataset outlets only on success — exactly-once via CAS guard above
@@ -214,6 +221,12 @@ export async function clearTaskInstance(
   )
 
   console.log(`[scheduler] cleared ${result.modifiedCount} instance(s) of task '${taskId}' in run ${dagRunId}`)
+  void recordEvent(db, 'task_cleared', {
+    dag_run_id: dagRunId,
+    task_id: taskId,
+    map_index: mapIndex ?? null,
+    metadata: { cleared_count: result.modifiedCount },
+  })
   return { cleared: true, clearedCount: result.modifiedCount }
 }
 
@@ -239,5 +252,9 @@ export async function cancelRun(db: Db, dagRunId: string): Promise<boolean> {
   )
 
   console.log(`[scheduler] run ${dagRunId} → cancelled`)
+  void recordEvent(db, 'run_cancelled', {
+    dag_id: result.dag_id as string,
+    dag_run_id: dagRunId,
+  })
   return true
 }

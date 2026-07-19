@@ -107,6 +107,20 @@ export interface DagDefinition {
    * A dag with `datasets` keeps `schedule: null` — cron scheduling is ignored.
    */
   datasets?: string[]
+
+  /**
+   * URL to POST to when a run completes successfully.
+   * Payload: { dag_id, run_id, state: 'success', logical_date, conf, tags, ended_at }
+   * Delivery is fire-and-forget with a 5s timeout — failures are logged, not retried.
+   * Only trusted authors can set this; never accept caller-supplied URLs at trigger time.
+   */
+  onSuccess?: string
+
+  /**
+   * URL to POST to when a run fails (any task failed).
+   * Same payload shape as onSuccess, with state: 'failed'.
+   */
+  onFailure?: string
 }
 
 /** Helper to define a Dag with full TypeScript inference */

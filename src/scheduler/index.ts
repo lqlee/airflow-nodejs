@@ -8,6 +8,7 @@ import { checkSlaBreaches } from '../sla/index.js'
 import { emitOutlets, triggerDatasetConsumers } from '../datasets/index.js'
 import { createRun } from './runs.js'
 import { isDagPaused } from '../dag/pause.js'
+import { fireWebhook, type DeliverOptions } from '../webhooks/index.js'
 
 const POLL_INTERVAL_MS = 5_000
 
@@ -60,8 +61,9 @@ async function tick(db: Db): Promise<void> {
 /**
  * Drive a single dag_run forward.
  * No-ops if the run is already in a terminal state (success/failed/cancelled).
+ * webhookOptions is injected in tests to capture outbound calls without hitting the network.
  */
-export async function advanceRun(db: Db, dagRunId: string): Promise<void> {
+export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: DeliverOptions): Promise<void> {
   // Guard: skip if already terminal
   const run = await db.collection('dag_runs').findOne({ _id: new ObjectId(dagRunId) })
   if (!run || run.state === 'cancelled' || run.state === 'success' || run.state === 'failed') return
@@ -99,10 +101,25 @@ export async function advanceRun(db: Db, dagRunId: string): Promise<void> {
     if (!transitioned) return  // another tick already finalized this run
     console.log(`[scheduler] run ${dagRunId} → ${finalState}`)
 
+    const dag = getDag(transitioned.dag_id)
+
     // Emit dataset outlets only on success — exactly-once via CAS guard above
-    if (finalState === 'success') {
-      const dag = getDag(transitioned.dag_id)
-      if (dag) await emitOutlets(db, dag, dagRunId)
+    if (finalState === 'success' && dag) {
+      await emitOutlets(db, dag, dagRunId)
+    }
+
+    // Fire webhook callback if configured — fire-and-forget, never blocks the tick loop
+    const callbackUrl = finalState === 'success' ? dag?.onSuccess : dag?.onFailure
+    if (callbackUrl) {
+      fireWebhook(callbackUrl, {
+        dag_id: transitioned.dag_id,
+        run_id: dagRunId,
+        state: finalState,
+        logical_date: transitioned.logical_date ?? null,
+        conf: (transitioned.conf as Record<string, unknown>) ?? {},
+        tags: (transitioned.tags as string[]) ?? [],
+        ended_at: transitioned.ended_at as Date,
+      }, webhookOptions)
     }
   }
 }

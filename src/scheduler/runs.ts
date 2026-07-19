@@ -3,6 +3,7 @@ import type { DagDefinition } from '../dag/types.js'
 
 export interface DagRun {
   dag_id: string
+  dag_version: string | null   // sha256[:12] of the dag source file at run creation time
   state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled'
   created_at: Date
 }
@@ -30,9 +31,10 @@ export interface TaskInstance {
 export async function createRun(db: Db, dag: DagDefinition): Promise<string> {
   const now = new Date()
 
-  // Insert dag_run
+  // Insert dag_run — stamp the dag version so every run records which code ran it
   const runResult = await db.collection<DagRun>('dag_runs').insertOne({
     dag_id: dag.id,
+    dag_version: dag.version ?? null,
     state: 'queued',
     created_at: now,
   })

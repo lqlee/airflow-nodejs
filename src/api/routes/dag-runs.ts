@@ -22,6 +22,7 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({
       run_id: run._id.toString(),
       dag_id: run.dag_id,
+      dag_version: run.dag_version ?? null,
       state: run.state,
       created_at: run.created_at,
       ended_at: run.ended_at ?? null,
@@ -117,6 +118,7 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
       items: runs.map(r => ({
         run_id: r._id.toString(),
         dag_id: r.dag_id,
+        dag_version: r.dag_version ?? null,
         state: r.state,
         created_at: r.created_at,
       })),

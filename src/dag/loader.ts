@@ -1,7 +1,8 @@
-import { readdir } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import { resolve, extname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { register, clearRegistry } from './registry.js'
+import { hashDagSource } from './version.js'
 import type { DagDefinition } from './types.js'
 
 const DAGS_DIR = resolve(process.cwd(), 'dags')
@@ -22,6 +23,10 @@ export async function loadDags(): Promise<void> {
   for (const file of dagFiles) {
     const filePath = resolve(DAGS_DIR, file)
     try {
+      // Read source for hashing before import (cache-bust ensures fresh bytes)
+      const source = await readFile(filePath, 'utf8')
+      const version = hashDagSource(source)
+
       // Cache-bust so re-loads pick up file changes
       const mod = await import(`${pathToFileURL(filePath).href}?t=${Date.now()}`)
       const dag: DagDefinition = mod.default
@@ -29,8 +34,10 @@ export async function loadDags(): Promise<void> {
         console.warn(`[loader] ${file} has no valid default export — skipping`)
         continue
       }
+      // Stamp version onto the dag object (overwrites any author-set version)
+      dag.version = version
       register(dag)
-      console.log(`[loader] loaded Dag: ${dag.id} (tasks: ${Object.keys(dag.tasks).join(', ')})`)
+      console.log(`[loader] loaded Dag: ${dag.id} v${version} (tasks: ${Object.keys(dag.tasks).join(', ')})`)
     } catch (err) {
       console.error(`[loader] failed to load ${file}:`, err)
     }

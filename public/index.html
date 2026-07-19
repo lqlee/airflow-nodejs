@@ -601,6 +601,12 @@ function RunDetail({ runId, onClose }) {
       <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12,flexWrap:'wrap'}}>
         <h3 style={{flex:1,marginBottom:0}}>Run: <code style={{fontSize:12}}>{runId.slice(-8)}</code></h3>
         {statusBadge(run.state)}
+        {run.dag_version && (
+          <span title={`Dag version: ${run.dag_version}`}
+            style={{fontSize:10,fontFamily:'monospace',color:'#718096',background:'#1e2130',padding:'2px 6px',borderRadius:4}}>
+            v{run.dag_version}
+          </span>
+        )}
         <div className="view-toggle">
           <button className={view==='graph'?'active':''} onClick={() => setView('graph')}>⬡ Graph</button>
           <button className={view==='list' ?'active':''} onClick={() => setView('list')}>≡ List</button>
@@ -684,13 +690,14 @@ function RunsTable({ dagId, onSelectRun }) {
     <>
       <table className="runs-table">
         <thead><tr>
-          <th>Run ID</th><th>State</th><th>Created</th><th></th>
+          <th>Run ID</th><th>State</th><th>Version</th><th>Created</th><th></th>
         </tr></thead>
         <tbody>
           {runs.map(r => (
             <tr key={r.run_id}>
               <td><code style={{fontSize:12}}>{r.run_id.slice(-8)}</code></td>
               <td>{statusBadge(r.state)}</td>
+              <td><code style={{fontSize:10,color:'#718096'}}>{r.dag_version ?? '—'}</code></td>
               <td style={{color:'#718096'}}>{new Date(r.created_at).toLocaleTimeString()}</td>
               <td><button className="refresh-btn" onClick={() => onSelectRun(r.run_id)}>detail →</button></td>
             </tr>

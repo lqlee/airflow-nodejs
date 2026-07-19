@@ -24,6 +24,7 @@ export interface DagDefinition {
   id: string
   schedule: string | null  // cron expression, or null for manual-only
   sla?: number             // ms — if a run hasn't completed within this window, an SLA alert is fired
+  version?: string         // sha256[:12] of the dag source file — stamped by the loader
   tasks: Record<string, TaskDefinition>
 }
 

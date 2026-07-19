@@ -4,6 +4,7 @@
  * Keys are stored hashed (scrypt). The raw key is returned once at creation
  * and never stored. Validation is a constant-time hash comparison.
  *
+ * Each key carries a role: 'viewer' | 'editor' | 'admin'.
  * Bootstrap: set ADMIN_KEY env var to seed the first key on startup,
  * or leave API_KEYS set for the legacy env-only mode (still supported).
  */
@@ -17,21 +18,44 @@ const scryptAsync = promisify(scrypt)
 const SCRYPT_KEYLEN = 32
 const PREFIX = 'an_'  // "airflow-node" prefix — easy to grep in logs
 
+export type Role = 'viewer' | 'editor' | 'admin'
+
+export const VALID_ROLES: readonly Role[] = ['viewer', 'editor', 'admin']
+
+export function isRole(v: unknown): v is Role {
+  return typeof v === 'string' && (VALID_ROLES as readonly string[]).includes(v)
+}
+
 export interface ApiKey {
   name: string
+  role: Role
   key_hash: string   // hex: salt:hash
   created_at: Date
   last_used_at: Date | null
   revoked: boolean
 }
 
+export interface ApiKeySummary {
+  id: string
+  name: string
+  role: Role
+  created_at: Date
+  last_used_at: Date | null
+  revoked: boolean
+}
+
 /** Generate a new random key, hash it, store it. Returns the raw key (shown once). */
-export async function createApiKey(db: Db, name: string): Promise<{ raw: string; id: string }> {
+export async function createApiKey(
+  db: Db,
+  name: string,
+  role: Role = 'viewer',
+): Promise<{ raw: string; id: string }> {
   const raw = PREFIX + randomBytes(24).toString('base64url')
   const hash = await hashKey(raw)
 
   const res = await db.collection<ApiKey>('api_keys').insertOne({
     name,
+    role,
     key_hash: hash,
     created_at: new Date(),
     last_used_at: null,
@@ -41,9 +65,17 @@ export async function createApiKey(db: Db, name: string): Promise<{ raw: string;
   return { raw, id: res.insertedId.toString() }
 }
 
-/** Validate a raw key against stored hashes. Updates last_used_at on match. */
-export async function validateApiKey(db: Db, raw: string): Promise<boolean> {
-  if (!raw) return false
+/**
+ * Validate a raw key against stored hashes.
+ * Returns { name, role } on match (updates last_used_at fire-and-forget).
+ * Returns null if invalid or revoked.
+ * Keys without a stored role (pre-migration) default to 'viewer' (fail-closed).
+ */
+export async function validateApiKey(
+  db: Db,
+  raw: string,
+): Promise<{ name: string; role: Role } | null> {
+  if (!raw) return null
 
   const keys = await db
     .collection<ApiKey>('api_keys')
@@ -54,13 +86,14 @@ export async function validateApiKey(db: Db, raw: string): Promise<boolean> {
     if (await verifyKey(raw, k.key_hash)) {
       // Fire-and-forget last_used_at update
       void db.collection('api_keys').updateOne(
-        { _id: (k as any)._id },
-        { $set: { last_used_at: new Date() } }
+        { _id: (k as { _id: unknown })._id },
+        { $set: { last_used_at: new Date() } },
       )
-      return true
+      // Fail-closed: keys created before the role field default to 'viewer'
+      return { name: k.name, role: k.role ?? 'viewer' }
     }
   }
-  return false
+  return null
 }
 
 /** Revoke (soft-delete) a key by id. */
@@ -69,13 +102,13 @@ export async function revokeApiKey(db: Db, keyId: string): Promise<boolean> {
   if (!ObjectId.isValid(keyId)) return false
   const res = await db.collection('api_keys').updateOne(
     { _id: new ObjectId(keyId) },
-    { $set: { revoked: true } }
+    { $set: { revoked: true } },
   )
   return res.matchedCount > 0
 }
 
 /** List all keys (never returns hashes). */
-export async function listApiKeys(db: Db): Promise<Array<{ id: string; name: string; created_at: Date; last_used_at: Date | null; revoked: boolean }>> {
+export async function listApiKeys(db: Db): Promise<ApiKeySummary[]> {
   const keys = await db
     .collection<ApiKey>('api_keys')
     .find({})
@@ -83,8 +116,9 @@ export async function listApiKeys(db: Db): Promise<Array<{ id: string; name: str
     .toArray()
 
   return keys.map(k => ({
-    id: (k as any)._id.toString(),
+    id: (k as { _id: { toString(): string } })._id.toString(),
     name: k.name,
+    role: k.role ?? 'viewer',
     created_at: k.created_at,
     last_used_at: k.last_used_at,
     revoked: k.revoked,

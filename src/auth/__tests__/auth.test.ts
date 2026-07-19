@@ -70,7 +70,7 @@ describe('auth — enabled (API_KEYS set)', () => {
   })
 
   it('authHook returns 401 when no Authorization header', async () => {
-    const req = { url: '/dags', headers: {} } as any
+    const req = { url: '/dags', method: 'GET', headers: {}, routeOptions: { config: {} } } as any
     const reply = { status: vi.fn().mockReturnThis(), send: vi.fn() } as any
     await mod.authHook(req, reply)
     expect(reply.status).toHaveBeenCalledWith(401)
@@ -78,21 +78,22 @@ describe('auth — enabled (API_KEYS set)', () => {
   })
 
   it('authHook returns 401 for a valid-format but wrong key', async () => {
-    const req = { url: '/dags', headers: { authorization: 'Bearer wrong-key' } } as any
+    const req = { url: '/dags', method: 'GET', headers: { authorization: 'Bearer wrong-key' }, routeOptions: { config: {} } } as any
     const reply = { status: vi.fn().mockReturnThis(), send: vi.fn() } as any
     await mod.authHook(req, reply)
     expect(reply.status).toHaveBeenCalledWith(401)
   })
 
-  it('authHook passes through for a valid Bearer token', async () => {
-    const req = { url: '/dags', headers: { authorization: 'Bearer key-alpha' } } as any
+  it('authHook passes through for a valid Bearer token (env key = admin role)', async () => {
+    // Env key → admin role; GET /dags requires viewer → passes
+    const req = { url: '/dags', method: 'GET', headers: { authorization: 'Bearer key-alpha' }, routeOptions: { config: {} } } as any
     const reply = { status: vi.fn().mockReturnThis(), send: vi.fn() } as any
     await mod.authHook(req, reply)
     expect(reply.status).not.toHaveBeenCalled()
   })
 
   it('authHook returns 401 for malformed header (no Bearer prefix)', async () => {
-    const req = { url: '/dags', headers: { authorization: 'key-alpha' } } as any
+    const req = { url: '/dags', method: 'GET', headers: { authorization: 'key-alpha' }, routeOptions: { config: {} } } as any
     const reply = { status: vi.fn().mockReturnThis(), send: vi.fn() } as any
     await mod.authHook(req, reply)
     expect(reply.status).toHaveBeenCalledWith(401)

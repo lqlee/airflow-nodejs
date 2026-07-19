@@ -54,23 +54,26 @@ describe('createApiKey', () => {
 })
 
 describe('validateApiKey', () => {
-  it('returns false for empty string', async () => {
-    expect(await validateApiKey(db, '')).toBe(false)
+  it('returns null for empty string', async () => {
+    expect(await validateApiKey(db, '')).toBeNull()
   })
 
-  it('returns false for random garbage', async () => {
-    expect(await validateApiKey(db, 'not-a-real-key')).toBe(false)
+  it('returns null for random garbage', async () => {
+    expect(await validateApiKey(db, 'not-a-real-key')).toBeNull()
   })
 
-  it('returns true for a valid created key', async () => {
-    const { raw } = await createApiKey(db, 'valid')
-    expect(await validateApiKey(db, raw)).toBe(true)
+  it('returns { name, role } for a valid created key', async () => {
+    const { raw } = await createApiKey(db, 'valid', 'editor')
+    const result = await validateApiKey(db, raw)
+    expect(result).not.toBeNull()
+    expect(result?.name).toBe('valid')
+    expect(result?.role).toBe('editor')
   })
 
-  it('returns false for a revoked key', async () => {
+  it('returns null for a revoked key', async () => {
     const { raw, id } = await createApiKey(db, 'will-revoke')
     await revokeApiKey(db, id)
-    expect(await validateApiKey(db, raw)).toBe(false)
+    expect(await validateApiKey(db, raw)).toBeNull()
   })
 
   it('updates last_used_at on successful validation', async () => {

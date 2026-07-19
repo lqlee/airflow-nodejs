@@ -1065,6 +1065,181 @@ function BackfillPanel({ dagId, hasSchedule }) {
   );
 }
 
+// ── Variables Panel ───────────────────────────────────────────────────
+function VariablesPanel({ onClose }) {
+  const [vars, setVars] = useState([]);
+  const [key, setKey] = useState('');
+  const [value, setValue] = useState('');
+  const [isSecret, setIsSecret] = useState(false);
+  const [desc, setDesc] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const fetchVars = useCallback(() =>
+    apiFetch(`${BASE}/variables`).then(r => r.json()).then(data => {
+      if (Array.isArray(data)) setVars(data);
+    }).catch(() => {}), []);
+
+  useEffect(() => { fetchVars(); }, []);
+
+  const save = async (e) => {
+    e.preventDefault();
+    if (!key.trim()) return;
+    setError(''); setSaving(true);
+    const res = await apiFetch(`${BASE}/variables`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: key.trim(), value, is_secret: isSecret, description: desc || undefined }),
+    });
+    setSaving(false);
+    if (res.ok) {
+      setKey(''); setValue(''); setIsSecret(false); setDesc('');
+      fetchVars();
+    } else {
+      setError((await res.json()).error ?? 'Failed');
+    }
+  };
+
+  const del = async (k) => {
+    if (!confirm(`Delete variable "${k}"?`)) return;
+    await apiFetch(`${BASE}/variables/${encodeURIComponent(k)}`, { method: 'DELETE' });
+    fetchVars();
+  };
+
+  return (
+    <div className="keys-panel">
+      <h4>📦 Variables <span style={{flex:1}} /> <button className="log-btn" onClick={onClose}>✕</button></h4>
+      <form onSubmit={save} style={{display:'grid',gap:6,marginBottom:16}}>
+        <div style={{display:'flex',gap:6}}>
+          <input value={key} onChange={e => setKey(e.target.value)} placeholder="key"
+            style={{flex:1,background:'#0f1117',border:'1px solid #4a5568',borderRadius:4,padding:'5px 8px',color:'#e2e8f0',fontSize:12}} />
+          <input value={value} onChange={e => setValue(e.target.value)} placeholder="value"
+            type={isSecret ? 'password' : 'text'}
+            style={{flex:2,background:'#0f1117',border:'1px solid #4a5568',borderRadius:4,padding:'5px 8px',color:'#e2e8f0',fontSize:12}} />
+        </div>
+        <div style={{display:'flex',gap:12,alignItems:'center',fontSize:12}}>
+          <label style={{display:'flex',gap:4,alignItems:'center',color:'#a0aec0',cursor:'pointer'}}>
+            <input type="checkbox" checked={isSecret} onChange={e => setIsSecret(e.target.checked)} />
+            secret (masked in UI)
+          </label>
+          <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="description (optional)"
+            style={{flex:1,background:'#0f1117',border:'1px solid #4a5568',borderRadius:4,padding:'4px 8px',color:'#e2e8f0',fontSize:12}} />
+          <button type="submit" className="btn btn-primary btn-sm" disabled={saving || !key.trim()}>{saving ? '…' : '+ Set'}</button>
+        </div>
+        {error && <div style={{fontSize:11,color:'#fc8181'}}>{error}</div>}
+      </form>
+      {vars.length === 0 && <div className="empty" style={{padding:'12px 0'}}>No variables yet</div>}
+      {vars.map(v => (
+        <div key={v.key} className="keys-row">
+          <span className="key-name">{v.key}</span>
+          {v.is_secret
+            ? <span style={{fontSize:11,color:'#718096',fontStyle:'italic'}}>••••• (secret)</span>
+            : <span style={{fontSize:12,color:'#e2e8f0',fontFamily:'monospace',maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{v.value}</span>
+          }
+          {v.description && <span className="key-meta">{v.description}</span>}
+          <button className="log-btn" style={{color:'#fc8181',borderColor:'#4a1515',marginLeft:'auto'}}
+            onClick={() => del(v.key)}>Delete</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Connections Panel ──────────────────────────────────────────────────
+function ConnectionsPanel({ onClose }) {
+  const [conns, setConns] = useState([]);
+  const [form, setForm] = useState({ conn_id:'', conn_type:'postgres', host:'', port:'', login:'', password:'', schema:'', extra:'', description:'' });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [showForm, setShowForm] = useState(false);
+
+  const fetchConns = useCallback(() =>
+    apiFetch(`${BASE}/connections`).then(r => r.json()).then(data => {
+      if (Array.isArray(data)) setConns(data);
+    }).catch(() => {}), []);
+
+  useEffect(() => { fetchConns(); }, []);
+
+  const save = async (e) => {
+    e.preventDefault();
+    if (!form.conn_id.trim() || !form.conn_type.trim()) return;
+    setError(''); setSaving(true);
+    const body = {
+      conn_id: form.conn_id.trim(),
+      conn_type: form.conn_type.trim(),
+      ...(form.host && { host: form.host }),
+      ...(form.port && { port: parseInt(form.port, 10) }),
+      ...(form.login && { login: form.login }),
+      ...(form.password && { password: form.password }),
+      ...(form.schema && { schema: form.schema }),
+      ...(form.extra && { extra: form.extra }),
+      ...(form.description && { description: form.description }),
+    };
+    const res = await apiFetch(`${BASE}/connections`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    setSaving(false);
+    if (res.ok) {
+      setForm({ conn_id:'', conn_type:'postgres', host:'', port:'', login:'', password:'', schema:'', extra:'', description:'' });
+      setShowForm(false);
+      fetchConns();
+    } else {
+      setError((await res.json()).error ?? 'Failed');
+    }
+  };
+
+  const del = async (id) => {
+    if (!confirm(`Delete connection "${id}"?`)) return;
+    await apiFetch(`${BASE}/connections/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    fetchConns();
+  };
+
+  const inp = (field, placeholder, opts = {}) => (
+    <input value={form[field]} onChange={e => setForm(f => ({...f, [field]: e.target.value}))}
+      placeholder={placeholder} {...opts}
+      style={{background:'#0f1117',border:'1px solid #4a5568',borderRadius:4,padding:'5px 8px',color:'#e2e8f0',fontSize:12,width:'100%'}} />
+  );
+
+  return (
+    <div className="keys-panel">
+      <h4>🔌 Connections <span style={{flex:1}} />
+        <button className="log-btn" onClick={() => setShowForm(v => !v)} style={{marginRight:8}}>+ Add</button>
+        <button className="log-btn" onClick={onClose}>✕</button>
+      </h4>
+      {showForm && (
+        <form onSubmit={save} style={{display:'grid',gap:6,marginBottom:16,padding:10,background:'#1a2130',borderRadius:6,border:'1px solid #2d3748'}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
+            {inp('conn_id', 'conn_id *')}
+            {inp('conn_type', 'type (postgres, http, s3…) *')}
+            {inp('host', 'host')}
+            {inp('port', 'port', {type:'number'})}
+            {inp('login', 'login/username')}
+            {inp('password', 'password', {type:'password'})}
+            {inp('schema', 'schema/database')}
+            {inp('extra', 'extra (JSON string)')}
+          </div>
+          {inp('description', 'description (optional)')}
+          {error && <div style={{fontSize:11,color:'#fc8181'}}>{error}</div>}
+          <button type="submit" className="btn btn-primary btn-sm" disabled={saving || !form.conn_id.trim()}>{saving ? '…' : '💾 Save connection'}</button>
+        </form>
+      )}
+      {conns.length === 0 && !showForm && <div className="empty" style={{padding:'12px 0'}}>No connections yet</div>}
+      {conns.map(c => (
+        <div key={c.conn_id} className="keys-row">
+          <span className="key-name">{c.conn_id}</span>
+          <span className="key-meta">{c.conn_type}{c.host ? ` · ${c.host}${c.port ? ':'+c.port : ''}` : ''}</span>
+          {c.has_password && <span style={{fontSize:10,color:'#718096'}}>🔒 pwd</span>}
+          {c.description && <span className="key-meta">{c.description}</span>}
+          <button className="log-btn" style={{color:'#fc8181',borderColor:'#4a1515',marginLeft:'auto'}}
+            onClick={() => del(c.conn_id)}>Delete</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── App ───────────────────────────────────────────────────────────────
 function App() {
   const [dags, setDags] = useState([]);
@@ -1072,6 +1247,8 @@ function App() {
   const [selectedRun, setSelectedRun] = useState(null);
   const [showAlerts, setShowAlerts] = useState(false);
   const [showKeys, setShowKeys] = useState(false);
+  const [showVars, setShowVars] = useState(false);
+  const [showConns, setShowConns] = useState(false);
   // null = not checked yet, true = authenticated, false = needs login
   const [authed, setAuthed] = useState(null);
 
@@ -1115,7 +1292,11 @@ function App() {
       <header>
         <h1>✈ Airflow Node</h1>
         <Health />
-        <button className="refresh-btn" style={{marginLeft:'auto'}} onClick={() => setShowKeys(v => !v)}
+        <button className="refresh-btn" style={{marginLeft:'auto'}} onClick={() => setShowVars(v => !v)}
+          title="Variables">📦</button>
+        <button className="refresh-btn" onClick={() => setShowConns(v => !v)}
+          title="Connections">🔌</button>
+        <button className="refresh-btn" onClick={() => setShowKeys(v => !v)}
           title="API Keys">🔑</button>
         <button className="refresh-btn" onClick={handleLogout}
           title="Sign out">⏻</button>
@@ -1123,6 +1304,8 @@ function App() {
       <ImportErrorBanner errors={importErrors} />
       <SlaBanner alerts={alerts} onViewAlerts={() => setShowAlerts(true)} />
       <div className="container">
+        {showVars && <VariablesPanel onClose={() => setShowVars(false)} />}
+        {showConns && <ConnectionsPanel onClose={() => setShowConns(false)} />}
         {showKeys && <ApiKeysPanel onClose={() => setShowKeys(false)} />}
         {showAlerts && (
           <SlaPanel alerts={alerts} onAck={ackAlert} onClose={() => setShowAlerts(false)} />

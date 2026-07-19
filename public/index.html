@@ -109,6 +109,18 @@
     .stats-sub   { font-size:10px; color:#718096; }
     .stats-panel { background:#1a1d27; border:1px solid #2d3748; border-radius:8px; padding:16px; margin-bottom:16px; }
     .stats-panel h4 { font-size:12px; color:#718096; text-transform:uppercase; letter-spacing:.08em; margin-bottom:12px; }
+    /* Duration histogram */
+    .hist-wrap { margin-top:16px; }
+    .hist-label { font-size:10px; color:#718096; text-transform:uppercase; letter-spacing:.06em; margin-bottom:6px; }
+    .hist-bars { display:flex; align-items:flex-end; gap:2px; height:56px; }
+    .hist-bar { flex:1; min-width:6px; background:#2b6cb0; border-radius:2px 2px 0 0; position:relative; cursor:default; transition:background .15s; }
+    .hist-bar:hover { background:#4299e1; }
+    .hist-bar:hover .hist-tip { display:block; }
+    .hist-tip { display:none; position:absolute; bottom:calc(100% + 4px); left:50%; transform:translateX(-50%);
+      background:#2d3748; color:#e2e8f0; font-size:10px; white-space:nowrap; padding:3px 7px;
+      border-radius:4px; pointer-events:none; z-index:10; border:1px solid #4a5568; }
+    .hist-axis { display:flex; justify-content:space-between; margin-top:4px; }
+    .hist-axis span { font-size:9px; color:#4a5568; font-family:monospace; }
   </style>
 </head>
 <body>
@@ -946,6 +958,42 @@ function fmtMs(ms) {
   return `${Math.floor(ms/60000)}m ${Math.round((ms%60000)/1000)}s`;
 }
 
+/**
+ * DurationHistogram — renders a bar chart from the histogram buckets returned
+ * by GET /dags/:id/stats. No external library; pure CSS flex bars.
+ *
+ * Each bar height is proportional to its count relative to the bucket with
+ * the most runs. Tooltip shows [lo–hi) range and count on hover.
+ */
+function DurationHistogram({ buckets }) {
+  if (!buckets || buckets.length === 0) return null;
+
+  const maxCount = Math.max(...buckets.map(b => b.count));
+  if (maxCount === 0) return null;
+
+  return (
+    <div className="hist-wrap">
+      <div className="hist-label">Duration distribution</div>
+      <div className="hist-bars">
+        {buckets.map((b, i) => {
+          const heightPct = maxCount > 0 ? (b.count / maxCount) * 100 : 0;
+          const tip = `${fmtMs(b.lo)}–${fmtMs(b.hi)}: ${b.count} run${b.count !== 1 ? 's' : ''}`;
+          return (
+            <div key={i} className="hist-bar" style={{height:`${Math.max(heightPct, b.count > 0 ? 4 : 0)}%`}}>
+              <span className="hist-tip">{tip}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="hist-axis">
+        <span>{fmtMs(buckets[0].lo)}</span>
+        <span>{fmtMs(buckets[Math.floor(buckets.length / 2)].lo)}</span>
+        <span>{fmtMs(buckets[buckets.length - 1].hi)}</span>
+      </div>
+    </div>
+  );
+}
+
 function StatsPanel({ dagId }) {
   const [stats, setStats] = useState(null);
   const fetch_ = useCallback(() =>
@@ -1004,6 +1052,8 @@ function StatsPanel({ dagId }) {
           <span className="stats-value" style={{fontSize:13}}>{fmtMs(stats.min_duration_ms)} / {fmtMs(stats.max_duration_ms)}</span>
         </div>
       </div>
+
+      <DurationHistogram buckets={stats.histogram} />
     </div>
   );
 }

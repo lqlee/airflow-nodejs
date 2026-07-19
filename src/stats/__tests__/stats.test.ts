@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
 import { MongoClient, type Db } from 'mongodb'
-import { getDagStats } from '../index.js'
+import { getDagStats, buildDurationHistogram } from '../index.js'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 let client: MongoClient
@@ -149,5 +149,104 @@ describe('getDagStats', () => {
     expect(stats.cancelled_count).toBe(1)
     // success_rate = 1 / (1+0+1) = 0.5
     expect(stats.success_rate).toBeCloseTo(0.5)
+  })
+
+  it('histogram is empty when no completed runs', async () => {
+    await db.collection('dag_runs').insertMany([
+      run('dag_hist_empty', 'running'),
+      run('dag_hist_empty', 'queued'),
+    ])
+    const stats = await getDagStats(db, 'dag_hist_empty')
+    expect(stats.histogram).toEqual([])
+  })
+
+  it('histogram bucket counts sum to number of completed runs', async () => {
+    // 6 runs with durations 100..600ms
+    const docs = Array.from({ length: 6 }, (_, i) =>
+      run('dag_hist_sum', 'success', (i + 1) * 100),
+    )
+    await db.collection('dag_runs').insertMany(docs)
+    const stats = await getDagStats(db, 'dag_hist_sum')
+    const total = stats.histogram.reduce((s, b) => s + b.count, 0)
+    expect(total).toBe(6)
+  })
+})
+
+// ── buildDurationHistogram — pure unit tests ───────────────────────────────
+
+describe('buildDurationHistogram', () => {
+  it('returns empty array for empty input', () => {
+    expect(buildDurationHistogram([])).toEqual([])
+  })
+
+  it('single value → one bucket with count 1', () => {
+    const buckets = buildDurationHistogram([5000])
+    expect(buckets).toHaveLength(1)
+    expect(buckets[0].count).toBe(1)
+    expect(buckets[0].lo).toBe(5000)
+    expect(buckets[0].hi).toBe(5000)
+  })
+
+  it('all identical values → one bucket with all counts', () => {
+    const buckets = buildDurationHistogram([1000, 1000, 1000], 5)
+    expect(buckets).toHaveLength(1)
+    expect(buckets[0].count).toBe(3)
+  })
+
+  it('known durations map to correct bucket counts', () => {
+    // 10 values: 0,1,2,...,9 with binCount=5 → buckets [0,2), [2,4), [4,6), [6,8), [8,10]
+    // binWidth = (9-0)/5 = 1.8
+    // 0,1 → bucket 0; 2,3 → bucket 1; 4,5 → bucket 2; 6,7 → bucket 3; 8,9 → bucket 4
+    const sorted = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    const buckets = buildDurationHistogram(sorted, 5)
+    expect(buckets).toHaveLength(5)
+    const total = buckets.reduce((s, b) => s + b.count, 0)
+    expect(total).toBe(10)
+    // Each bucket should have exactly 2 values
+    for (const b of buckets) {
+      expect(b.count).toBe(2)
+    }
+  })
+
+  it('max value lands in last bucket — no out-of-bounds overflow', () => {
+    const sorted = [0, 100, 200, 300, 400, 500]
+    const buckets = buildDurationHistogram(sorted, 5)
+    // All counts in valid range; last bucket must have the max value
+    const lastBucket = buckets[buckets.length - 1]
+    expect(lastBucket.count).toBeGreaterThanOrEqual(1)
+    const total = buckets.reduce((s, b) => s + b.count, 0)
+    expect(total).toBe(sorted.length)
+  })
+
+  it('bucket count is configurable', () => {
+    const sorted = [100, 200, 300, 400, 500, 600]
+    expect(buildDurationHistogram(sorted, 3)).toHaveLength(3)
+    expect(buildDurationHistogram(sorted, 6)).toHaveLength(6)
+  })
+
+  it('no NaN or undefined in bucket bounds', () => {
+    const sorted = [0, 100, 500, 1000, 5000]
+    const buckets = buildDurationHistogram(sorted, 10)
+    for (const b of buckets) {
+      expect(Number.isFinite(b.lo)).toBe(true)
+      expect(Number.isFinite(b.hi)).toBe(true)
+      expect(Number.isFinite(b.count)).toBe(true)
+    }
+  })
+
+  it('getDagStats histogram sum equals durations.length (integration)', async () => {
+    // 5 runs with spread durations
+    const docs = [1000, 2000, 3000, 4000, 5000].map(d => run('hist_int', 'success', d))
+    await db.collection('dag_runs').insertMany(docs)
+    const stats = await getDagStats(db, 'hist_int')
+    // 5 completed runs → histogram sum must be 5
+    const total = stats.histogram.reduce((s, b) => s + b.count, 0)
+    expect(total).toBe(5)
+    // No NaN anywhere
+    for (const b of stats.histogram) {
+      expect(Number.isFinite(b.lo)).toBe(true)
+      expect(Number.isFinite(b.hi)).toBe(true)
+      expect(b.count).toBeGreaterThanOrEqual(0)
+    }
   })
 })

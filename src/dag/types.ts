@@ -23,6 +23,7 @@ export interface TaskDefinition {
 export interface DagDefinition {
   id: string
   schedule: string | null  // cron expression, or null for manual-only
+  sla?: number             // ms — if a run hasn't completed within this window, an SLA alert is fired
   tasks: Record<string, TaskDefinition>
 }
 

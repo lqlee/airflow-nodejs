@@ -4,6 +4,7 @@ import { listDags } from '../dag/registry.js'
 import { claimReadyTasks } from './claim.js'
 import { executeTask } from './executor.js'
 import { syncCronJobs, stopAllCronJobs } from './cron.js'
+import { checkSlaBreaches } from '../sla/index.js'
 
 const POLL_INTERVAL_MS = 5_000
 
@@ -32,6 +33,9 @@ async function tick(db: Db): Promise<void> {
 
     // Sync cron jobs whenever dags reload (picks up schedule changes)
     syncCronJobs(db, dags)
+
+    // Check SLA breaches for all active runs
+    await checkSlaBreaches(db, dags)
 
     // Advance any active runs — cancelled/success/failed are excluded
     const activeRuns = await db

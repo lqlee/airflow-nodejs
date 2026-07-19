@@ -66,6 +66,15 @@
     .log-stderr { color: #fbb6ce; }
     .log-btn { background: none; border: 1px solid #2d3748; color: #718096; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
     .log-btn:hover { border-color: #4a5568; color: #a0aec0; }
+    .sla-banner { background: #4a2008; border-bottom: 1px solid #c05621; padding: 8px 24px; display: flex; align-items: center; gap: 10px; font-size: 13px; color: #fbd38d; }
+    .sla-banner strong { color: #f6ad55; }
+    .sla-panel { background: #1a1d27; border: 1px solid #c05621; border-radius: 8px; padding: 16px; margin-bottom: 24px; }
+    .sla-panel h4 { font-size: 13px; color: #f6ad55; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+    .sla-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid #2d3748; font-size: 12px; }
+    .sla-row:last-child { border-bottom: none; }
+    .sla-dag { font-family: monospace; color: #e2e8f0; min-width: 120px; }
+    .sla-time { color: #718096; flex: 1; }
+    .sla-acked { color: #4a5568; font-style: italic; }
   </style>
 </head>
 <body>
@@ -160,6 +169,61 @@ function Health() {
     <span className="workers-badge">
       workers: {info.workers?.active ?? 0} active · {info.workers?.queued ?? 0} waiting
     </span>
+  );
+}
+
+// ── SLA Alerts ────────────────────────────────────────────────────────
+function useSlaAlerts() {
+  const [alerts, setAlerts] = useState([]);
+  const fetch_ = useCallback(() =>
+    apiFetch(`${BASE}/sla-alerts`).then(r => r.json()).then(data => {
+      if (Array.isArray(data)) setAlerts(data);
+    }).catch(() => {}), []);
+  useInterval(fetch_, 10000);
+  const refresh = fetch_;
+  return { alerts, refresh };
+}
+
+function SlaBanner({ alerts, onViewAlerts }) {
+  const unacked = alerts.filter(a => !a.acked);
+  if (!unacked.length) return null;
+  return (
+    <div className="sla-banner">
+      <span>⚠️</span>
+      <strong>{unacked.length} SLA breach{unacked.length > 1 ? 'es' : ''}</strong>
+      <span>— one or more runs exceeded their deadline.</span>
+      <button className="refresh-btn" style={{marginLeft:'auto',borderColor:'#c05621',color:'#f6ad55'}}
+        onClick={onViewAlerts}>View alerts</button>
+    </div>
+  );
+}
+
+function SlaPanel({ alerts, onAck, onClose }) {
+  const fmt = ms => ms < 60000 ? `${(ms/1000).toFixed(1)}s` : `${(ms/60000).toFixed(1)}m`;
+  return (
+    <div className="sla-panel">
+      <h4>
+        ⚠️ SLA Alerts
+        <span style={{flex:1}} />
+        <button className="log-btn" onClick={onClose}>✕</button>
+      </h4>
+      {alerts.length === 0 && <div className="empty" style={{padding:'12px 0'}}>No alerts</div>}
+      {alerts.map(a => (
+        <div key={a.id} className="sla-row">
+          <span className="sla-dag">{a.dag_id}</span>
+          <span className="sla-time">
+            run <code style={{fontSize:11}}>{a.dag_run_id.slice(-8)}</code>
+            {' · '}elapsed {fmt(a.elapsed_ms)} / SLA {fmt(a.sla_ms)}
+            {' · '}{new Date(a.fired_at).toLocaleTimeString()}
+          </span>
+          {a.acked
+            ? <span className="sla-acked">acked</span>
+            : <button className="log-btn" style={{color:'#f6ad55',borderColor:'#c05621'}}
+                onClick={() => onAck(a.id)}>Ack</button>
+          }
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -328,20 +392,22 @@ function App() {
   const [dags, setDags] = useState([]);
   const [selectedDag, setSelectedDag] = useState(null);
   const [selectedRun, setSelectedRun] = useState(null);
+  const [showAlerts, setShowAlerts] = useState(false);
   // null = not checked yet, true = authenticated, false = needs login
   const [authed, setAuthed] = useState(null);
+
+  const { alerts, refresh: refreshAlerts } = useSlaAlerts();
 
   // On mount: check if auth is required and whether we have a valid key
   useEffect(() => {
     apiFetch(`${BASE}/health`).then(r => r.json()).then(info => {
-      if (!info.auth) { setAuthed(true); return; }  // auth disabled — open access
-      // Auth enabled — verify stored key works
+      if (!info.auth) { setAuthed(true); return; }
       const key = localStorage.getItem(LS_KEY);
       if (!key) { setAuthed(false); return; }
       apiFetch(`${BASE}/dags`).then(r => {
         setAuthed(r.status !== 401);
       }).catch(() => setAuthed(false));
-    }).catch(() => setAuthed(true));  // if health fails, try anyway
+    }).catch(() => setAuthed(true));
   }, []);
 
   const handleLogin = () => setAuthed(true);
@@ -356,7 +422,12 @@ function App() {
   const handleTogglePause = () => fetchDags();
   const selectDag = (id) => { setSelectedDag(prev => prev === id ? null : id); setSelectedRun(null); };
 
-  if (authed === null) return null;  // loading
+  const ackAlert = async (id) => {
+    await apiFetch(`${BASE}/sla-alerts/${id}/ack`, { method: 'POST' });
+    refreshAlerts();
+  };
+
+  if (authed === null) return null;
   if (authed === false) return <LoginScreen onLogin={handleLogin} />;
 
   return (
@@ -367,7 +438,11 @@ function App() {
         <button className="refresh-btn" style={{marginLeft:'auto'}} onClick={handleLogout}
           title="Sign out">⏻</button>
       </header>
+      <SlaBanner alerts={alerts} onViewAlerts={() => setShowAlerts(true)} />
       <div className="container">
+        {showAlerts && (
+          <SlaPanel alerts={alerts} onAck={ackAlert} onClose={() => setShowAlerts(false)} />
+        )}
         <div className="section-title">Dags ({dags.length})</div>
         <div className="dag-grid">
           {dags.map(d => (

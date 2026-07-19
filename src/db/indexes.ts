@@ -28,4 +28,10 @@ export async function ensureIndexes(db: Db): Promise<void> {
   await db.collection('dag_paused').createIndexes([
     { key: { dag_id: 1 }, unique: true },
   ])
+
+  // sla_alerts: lookup by run (dedup) + unacked filter
+  await db.collection('sla_alerts').createIndexes([
+    { key: { dag_run_id: 1 }, unique: true },
+    { key: { acked: 1, fired_at: -1 } },
+  ])
 }

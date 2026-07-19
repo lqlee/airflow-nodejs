@@ -14,7 +14,24 @@ const POLL_INTERVAL_MS = 5_000
 
 let timer: ReturnType<typeof setInterval> | null = null
 
+/**
+ * Set to true during graceful shutdown so advanceRun's claim loop bails
+ * rather than forking new child processes after SIGTERM is received.
+ * Rows left as queued/running are recovered by recoverOrphanedRuns() on next boot.
+ */
+let _shuttingDown = false
+
+/** Exposed for graceful shutdown and testing. */
+export function setShuttingDown(value: boolean): void {
+  _shuttingDown = value
+}
+
+export function isShuttingDown(): boolean {
+  return _shuttingDown
+}
+
 export function startScheduler(db: Db): void {
+  _shuttingDown = false
   console.log(`[scheduler] starting — polling every ${POLL_INTERVAL_MS / 1000}s`)
 
   void tick(db)
@@ -22,6 +39,7 @@ export function startScheduler(db: Db): void {
 }
 
 export function stopScheduler(): void {
+  _shuttingDown = true
   if (timer) {
     clearInterval(timer)
     timer = null
@@ -75,9 +93,12 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
   )
 
   // Claim all currently-ready tasks and execute in parallel.
-  // Re-check cancellation before each wave so a cancel mid-run takes effect quickly.
+  // Re-check cancellation and shutdown flag before each wave.
+  // On shutdown: bail without forking new children — recoverOrphanedRuns()
+  // will re-claim any queued/running rows on next boot.
   let claimed = await claimReadyTasks(db, dagRunId)
   while (claimed.length > 0) {
+    if (_shuttingDown) return
     const current = await db.collection('dag_runs').findOne({ _id: new ObjectId(dagRunId) })
     if (current?.state === 'cancelled') return
 

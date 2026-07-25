@@ -68,6 +68,11 @@ export async function ensureIndexes(db: Db): Promise<void> {
     { key: { key: 1 }, unique: true },
   ])
 
+  // pools: unique name + sorted list
+  await db.collection('pools').createIndexes([
+    { key: { name: 1 }, unique: true },
+  ])
+
   // backfills: list by dag, filter by state
   await db.collection('backfills').createIndexes([
     { key: { dag_id: 1, created_at: -1 } },

@@ -50,6 +50,8 @@ export interface TaskContext {
 export interface TaskDefinition {
   dependsOn?: string[]
   group?: string           // optional TaskGroup membership — label only, no scheduler impact
+  /** Resource pool name — limits concurrency for this task across all runs. */
+  pool?: string
   retries?: number        // max retry attempts (default: 0 = no retries)
   retryDelay?: number     // ms to wait before requeuing (default: 0)
   timeout?: number        // ms before worker is killed and task marked failed (default: no timeout)

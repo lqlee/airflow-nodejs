@@ -6,6 +6,7 @@ import type { Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
 import { getDag } from '../dag/registry.js'
 import { acquire, release } from './pool.js'
+import { acquirePool, releasePool } from '../pools/index.js'
 import { appendLog } from '../logs/index.js'
 import { enqueueTask } from '../queue/producer.js'
 import { sensorOutcome } from './sensor.js'
@@ -39,8 +40,9 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     return
   }
 
-  // Local: fork directly
+  // Local: fork directly — acquire global slot, then per-pool slot (if task declares a pool)
   await acquire()
+  if (ti.pool) await acquirePool(db, ti.pool)
 
   const label = ti.is_sensor ? 'poking' : 'running'
   console.log(`[executor] ${label} ${ti.dag_id}.${ti.task_id} (run: ${ti.dag_run_id})`)
@@ -63,6 +65,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
         const msg = `Task timed out after ${ti.timeout_ms}ms`
         console.error(`[executor] ⏱ ${ti.dag_id}.${ti.task_id}: ${msg}`)
         release()
+        if (ti.pool) releasePool(ti.pool)
         void markFailed(db, ti, msg).then(() => done())
       }, ti.timeout_ms)
     }
@@ -105,6 +108,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
       if (timedOut) return
       clearKillTimer()
       release()
+      if (ti.pool) releasePool(ti.pool)
 
       if (msg.outcome === 'reschedule') {
         // Sensor: poke returned false — compute next outcome based on deadline
@@ -142,6 +146,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
       if (timedOut) return
       clearKillTimer()
       release()
+      if (ti.pool) releasePool(ti.pool)
       await markFailed(db, ti, err.message)
       done()
     })

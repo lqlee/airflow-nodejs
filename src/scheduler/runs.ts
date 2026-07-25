@@ -25,6 +25,8 @@ export interface TaskInstance {
   dag_id: string
   task_id: string
   group_id: string | null   // TaskGroup membership label; null for ungrouped tasks
+  /** Resource pool name; null means no pool constraint (global semaphore only). */
+  pool: string | null
   /** 0-based fan-out index for mapped tasks; null for non-mapped tasks */
   map_index: number | null
   /** Per-instance input value for mapped tasks; null for non-mapped tasks */
@@ -105,6 +107,7 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
         dag_id: dag.id,
         task_id: taskId,
         group_id: task.group ?? null,
+        pool: task.pool ?? null,
         map_index,
         map_value,
         state: 'queued',

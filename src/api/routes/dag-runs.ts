@@ -203,6 +203,45 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ run_id: runId, deleted_count: result.deletedCount })
   })
 
+  // GET /dag-runs/:runId/tasks/:taskId/tries — try history for a task instance
+  // ?map_index= to filter to a specific mapped instance (default null = non-mapped)
+  app.get<{ Params: { runId: string; taskId: string }; Querystring: { map_index?: string } }>(
+    '/dag-runs/:runId/tasks/:taskId/tries',
+    async (req, reply) => {
+      const { runId, taskId } = req.params
+      if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
+
+      const filter: Record<string, unknown> = { dag_run_id: runId, task_id: taskId }
+      if (req.query.map_index !== undefined) {
+        const mi = parseInt(req.query.map_index, 10)
+        if (!Number.isFinite(mi) || mi < 0) {
+          return reply.status(400).send({ error: '"map_index" must be a non-negative integer' })
+        }
+        filter['map_index'] = mi
+      } else {
+        filter['map_index'] = null
+      }
+
+      const tries = await app.mongo
+        .collection('task_instance_tries')
+        .find(filter)
+        .sort({ try_number: 1 })
+        .toArray()
+
+      return reply.send(tries.map(t => ({
+        run_id: runId,
+        dag_id: t.dag_id,
+        task_id: t.task_id,
+        map_index: t.map_index ?? null,
+        try_number: t.try_number,
+        state: t.state,
+        started_at: t.started_at ?? null,
+        ended_at: t.ended_at,
+        error: t.error ?? null,
+      })))
+    }
+  )
+
   // GET /dag-runs/:runId/tasks/:taskId/logs — task log lines
   app.get<{ Params: { runId: string; taskId: string } }>(
     '/dag-runs/:runId/tasks/:taskId/logs',

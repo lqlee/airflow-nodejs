@@ -24,6 +24,11 @@ export async function ensureIndexes(db: Db): Promise<void> {
     { key: { dag_run_id: 1, task_id: 1, map_index: 1, key: 1 }, unique: true },
   ])
 
+  // task_instance_tries: full history per (run, task, map_index) ordered by try_number
+  await db.collection('task_instance_tries').createIndexes([
+    { key: { dag_run_id: 1, task_id: 1, map_index: 1, try_number: 1 } },
+  ])
+
   // task_logs: fetch logs for a task ordered by time
   await db.collection('task_logs').createIndexes([
     { key: { dag_run_id: 1, task_id: 1, ts: 1 } },

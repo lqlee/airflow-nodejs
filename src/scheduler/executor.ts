@@ -10,6 +10,7 @@ import { acquirePool, releasePool } from '../pools/index.js'
 import { appendLog } from '../logs/index.js'
 import { enqueueTask } from '../queue/producer.js'
 import { sensorOutcome } from './sensor.js'
+import { recordTry } from './tries.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WORKER_SCRIPT = pathResolve(__dirname, 'worker.ts')
@@ -29,6 +30,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
 
   // HITL approval-only tasks (no run body) — succeed immediately after approval
   if (ti.is_hitl && !taskDef.run && !taskDef.poke) {
+    void recordTry(db, ti, 'success', new Date())
     await markSuccess(db, ti)
     console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id} (HITL approved, no-op)`)
     return
@@ -73,6 +75,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
         console.error(`[executor] ⏱ ${ti.dag_id}.${ti.task_id}: ${msg}`)
         release()
         if (ti.pool) releasePool(ti.pool)
+        void recordTry(db, ti, 'failed', new Date(), msg)
         void markFailed(db, ti, msg).then(() => done())
       }, ti.timeout_ms)
     }
@@ -133,15 +136,21 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
           console.log(`[executor] ↻ sensor ${ti.dag_id}.${ti.task_id} requeued (poke #${ti.poke_count + 1})`)
         }
       } else if (msg.outcome === 'success') {
+        const endedAt = new Date()
+        void recordTry(db, ti, 'success', endedAt)
         await markSuccess(db, ti)
         console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id}`)
       } else {
         // outcome === 'fail'
         const error = msg.error ?? 'unknown error'
+        const endedAt = new Date()
         if (!ti.is_sensor && ti.try_number < ti.max_retries) {
+          // Record this try as failed before requeueing for the next try
+          void recordTry(db, ti, 'failed', endedAt, error)
           await scheduleRetry(db, ti, error)
           console.warn(`[executor] ↩ ${ti.dag_id}.${ti.task_id} retrying (${ti.try_number + 1}/${ti.max_retries + 1})`)
         } else {
+          void recordTry(db, ti, 'failed', endedAt, error)
           await markFailed(db, ti, error)
           console.error(`[executor] ✗ ${ti.dag_id}.${ti.task_id}: ${error}`)
         }
@@ -154,6 +163,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
       clearKillTimer()
       release()
       if (ti.pool) releasePool(ti.pool)
+      void recordTry(db, ti, 'failed', new Date(), err.message)
       await markFailed(db, ti, err.message)
       done()
     })

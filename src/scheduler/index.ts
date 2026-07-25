@@ -52,7 +52,7 @@ export function stopScheduler(): void {
 
 async function tick(db: Db): Promise<void> {
   try {
-    await loadDags()
+    await loadDags(db)
     const dags = listDags()
 
     // Sync cron jobs whenever dags reload (picks up schedule changes)

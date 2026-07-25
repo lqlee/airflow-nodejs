@@ -1,15 +1,21 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { resolve, extname } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import type { Db } from 'mongodb'
 import { register, clearRegistry } from './registry.js'
-import { hashDagSource } from './version.js'
+import { hashDagSource, recordDagVersion } from './version.js'
 import { expandGroups } from './taskgroups.js'
 import { setImportErrors, type ImportError } from './import-errors.js'
 import type { DagDefinition } from './types.js'
 
 const DAGS_DIR = resolve(process.cwd(), 'dags')
 
-export async function loadDags(): Promise<void> {
+/**
+ * Load and register all Dag files from the dags/ directory.
+ * When db is provided, new (dag_id, version) pairs are persisted to dag_versions.
+ * db is optional so callers without a DB (dev scripts, some tests) remain unchanged.
+ */
+export async function loadDags(db?: Db): Promise<void> {
   clearRegistry()
 
   let entries: string[]
@@ -48,6 +54,12 @@ export async function loadDags(): Promise<void> {
       register(expanded)
       const groupSuffix = dag.groups ? ` (groups: ${Object.keys(dag.groups).join(', ')})` : ''
       console.log(`[loader] loaded Dag: ${dag.id} v${version} (tasks: ${Object.keys(dag.tasks).join(', ')})${groupSuffix}`)
+
+      // Persist new version — fire-and-forget, idempotent; skipped when db not provided
+      if (db) {
+        void recordDagVersion(db, dag.id, version, source, Object.keys(dag.tasks))
+          .catch(() => {/* stub db in tests — swallow silently */})
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.error(`[loader] failed to load ${file}:`, err)

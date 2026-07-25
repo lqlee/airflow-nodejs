@@ -68,6 +68,12 @@ export async function ensureIndexes(db: Db): Promise<void> {
     { key: { key: 1 }, unique: true },
   ])
 
+  // dag_versions: unique (dag_id, version); list by dag sorted newest-first
+  await db.collection('dag_versions').createIndexes([
+    { key: { dag_id: 1, version: 1 }, unique: true },
+    { key: { dag_id: 1, first_seen: -1 } },
+  ])
+
   // pools: unique name + sorted list
   await db.collection('pools').createIndexes([
     { key: { name: 1 }, unique: true },

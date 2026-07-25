@@ -17,7 +17,7 @@ async function main(): Promise<void> {
   const db = await connectDb()
   await ensureIndexes(db)
   await recoverOrphanedRuns(db)
-  await loadDags()
+  await loadDags(db)
 
   startScheduler(db)
 

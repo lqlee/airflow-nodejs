@@ -6,6 +6,7 @@ import { advanceRun } from '../../scheduler/index.js'
 import { pauseDag, resumeDag, isDagPaused, getPausedDagIds } from '../../dag/pause.js'
 import { getDagStats } from '../../stats/index.js'
 import { backfill, BACKFILL_MAX_RUNS } from '../../scheduler/backfill.js'
+import { listDagVersions, getDagSource } from '../../dag/version.js'
 
 export async function dagsRoutes(app: FastifyInstance): Promise<void> {
   // GET /dags — list all registered dags with pause state
@@ -212,4 +213,40 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
       throw err
     }
   })
+
+  // GET /dags/:dagId/versions — list all recorded versions for a dag (newest first)
+  // Each entry includes version hash, first_seen, task_ids snapshot, and derived run_count.
+  app.get<{ Params: { dagId: string } }>('/dags/:dagId/versions', async (req, reply) => {
+    const { dagId } = req.params
+    if (!getDag(dagId)) return reply.status(404).send({ error: `Dag '${dagId}' not found` })
+    const versions = await listDagVersions(app.mongo, dagId)
+    return reply.send(versions)
+  })
+
+  // GET /dags/:dagId/source?version= — source code of a specific version
+  // Omit ?version to get the latest recorded source.
+  app.get<{ Params: { dagId: string }; Querystring: { version?: string } }>(
+    '/dags/:dagId/source',
+    async (req, reply) => {
+      const { dagId } = req.params
+      const { version } = req.query
+
+      const doc = await getDagSource(app.mongo, dagId, version)
+      if (!doc) {
+        return reply.status(404).send({
+          error: version
+            ? `Version '${version}' not found for dag '${dagId}'`
+            : `No recorded source for dag '${dagId}'`,
+        })
+      }
+
+      return reply.send({
+        dag_id: doc.dag_id,
+        version: doc.version,
+        first_seen: doc.first_seen,
+        task_ids: doc.task_ids,
+        source: doc.source,
+      })
+    },
+  )
 }

@@ -48,6 +48,12 @@ export interface TaskInstance {
   first_poked_at: Date | null  // when poke was first invoked — NOT started_at (claim overwrites it)
   next_poke_at: Date | null    // earliest time for the next poke; null = ready immediately
   poke_count: number        // number of poke() calls made so far
+  // HITL fields
+  is_hitl: boolean                              // true = task requires human approval before executing
+  hitl_state: 'pending' | 'approved' | 'rejected' | null  // null for non-HITL tasks
+  hitl_prompt: string | null                    // optional prompt text for the approver
+  hitl_note: string | null                      // human-supplied note when responding
+  hitl_responded_at: Date | null                // when the response was recorded
 }
 
 export interface CreateRunOptions {
@@ -128,6 +134,11 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
         first_poked_at: null,
         next_poke_at: null,
         poke_count: 0,
+        is_hitl: task.requiresApproval === true,
+        hitl_state: task.requiresApproval === true ? 'pending' : null,
+        hitl_prompt: task.hitlPrompt ?? null,
+        hitl_note: null,
+        hitl_responded_at: null,
       })
     }
   }

@@ -76,6 +76,16 @@ export interface TaskDefinition {
   pokeInterval?: number
   /** ms total deadline for sensor; exceeding it marks the task failed. Default: 3 600 000 (1h). */
   sensorTimeout?: number
+
+  /**
+   * Human-in-the-Loop: when true, the task parks at 'queued' until a human
+   * approves or rejects via POST /hitl/:runId/:taskId.
+   * Approved → task executes (or succeeds immediately if no `run` body).
+   * Rejected → task marked 'failed'; run fails.
+   */
+  requiresApproval?: boolean
+  /** Optional prompt shown to the approver in the UI / API. */
+  hitlPrompt?: string
 }
 
 /**

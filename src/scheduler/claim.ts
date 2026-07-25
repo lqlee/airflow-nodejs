@@ -38,15 +38,25 @@ export async function claimReadyTasks(db: Db, dagRunId: string): Promise<TaskIns
     // Use $and so the dependency $or is preserved as a sibling condition.
     $and: [
       {
+        // Sensor poke gate: next_poke_at must be null (never poked) or <= now
         $or: [
           { next_poke_at: null },
           { next_poke_at: { $lte: now } },
         ],
       },
       {
+        // Dependency gate: all upstream task_ids must be done
         $or: [
           { depends_on: { $size: 0 } },
           { depends_on: { $not: { $elemMatch: { $nin: doneIds } } } },
+        ],
+      },
+      {
+        // HITL gate: non-HITL tasks always claimable; HITL tasks only when approved.
+        // $ne:true (not $eq:false) so tasks created before is_hitl field existed still claim.
+        $or: [
+          { is_hitl: { $ne: true } },
+          { hitl_state: 'approved' },
         ],
       },
     ],

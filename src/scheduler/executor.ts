@@ -27,6 +27,13 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
   const taskDef = dag.tasks[ti.task_id]
   if (!taskDef) { await markFailed(db, ti, `Task '${ti.task_id}' not found in dag '${ti.dag_id}'`); return }
 
+  // HITL approval-only tasks (no run body) — succeed immediately after approval
+  if (ti.is_hitl && !taskDef.run && !taskDef.poke) {
+    await markSuccess(db, ti)
+    console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id} (HITL approved, no-op)`)
+    return
+  }
+
   // Sensors must run locally — BullMQ workers don't have reschedule semantics yet
   if (USE_BULLMQ && ti.is_sensor) {
     await markFailed(db, ti, 'Sensor tasks require local execution mode (REDIS_URL must not be set)')

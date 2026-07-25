@@ -19,6 +19,7 @@ import { hitlRoutes } from './routes/hitl.js'
 import { providersRoutes } from './routes/providers.js'
 import { pluginsRoutes } from './routes/plugins.js'
 import { dagWarningsRoutes } from './routes/dag-warnings.js'
+import { configRoutes } from './routes/config.js'
 import { activeWorkers, queueDepth } from '../scheduler/pool.js'
 import { authHook, AUTH_ENABLED, setDb } from '../auth/index.js'
 
@@ -104,6 +105,7 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
     app.register(providersRoutes)
     app.register(pluginsRoutes)
     app.register(dagWarningsRoutes)
+    app.register(configRoutes)
   })
 
   return app

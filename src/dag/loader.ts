@@ -5,7 +5,8 @@ import type { Db } from 'mongodb'
 import { register, clearRegistry } from './registry.js'
 import { hashDagSource, recordDagVersion } from './version.js'
 import { expandGroups } from './taskgroups.js'
-import { setImportErrors, type ImportError } from './import-errors.js'
+import { setImportErrors, setDagWarnings, type ImportError } from './import-errors.js'
+import { analyzeWarnings, type DagWarning } from './warnings.js'
 import type { DagDefinition } from './types.js'
 
 const DAGS_DIR = resolve(process.cwd(), 'dags')
@@ -29,6 +30,7 @@ export async function loadDags(db?: Db): Promise<void> {
 
   const dagFiles = entries.filter(f => extname(f) === '.ts' || extname(f) === '.js')
   const errors: ImportError[] = []
+  const allWarnings: DagWarning[] = []
   const now = new Date()
 
   for (const file of dagFiles) {
@@ -60,6 +62,13 @@ export async function loadDags(db?: Db): Promise<void> {
         void recordDagVersion(db, dag.id, version, source, Object.keys(dag.tasks))
           .catch(() => {/* stub db in tests — swallow silently */})
       }
+
+      // Analyze soft warnings on the successfully-loaded dag
+      const dagWarnings = analyzeWarnings(expanded, now)
+      allWarnings.push(...dagWarnings)
+      if (dagWarnings.length > 0) {
+        console.warn(`[loader] ${dagWarnings.length} warning(s) in dag '${dag.id}': ${dagWarnings.map(w => w.warning_type).join(', ')}`)
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.error(`[loader] failed to load ${file}:`, err)
@@ -67,8 +76,9 @@ export async function loadDags(db?: Db): Promise<void> {
     }
   }
 
-  // Replace error list atomically — a fixed file will no longer appear here
+  // Replace error and warning lists atomically
   setImportErrors(errors)
+  setDagWarnings(allWarnings)
 
   if (errors.length > 0) {
     console.warn(`[loader] ${errors.length} file(s) failed to import`)

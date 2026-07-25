@@ -198,6 +198,7 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
     try {
       const result = await backfill(app.mongo, dag, { start, end })
       return reply.status(201).send({
+        backfill_id: result.backfill_id,
         dag_id: dag.id,
         created: result.created,
         created_count: result.created.length,

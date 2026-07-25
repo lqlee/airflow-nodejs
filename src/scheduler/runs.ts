@@ -61,6 +61,8 @@ export interface CreateRunOptions {
    * 'dataset' = data-aware scheduling. Defaults to 'manual'.
    */
   triggerType?: 'manual' | 'cron' | 'backfill' | 'dataset'
+  /** Links this run to a backfill entity for lifecycle management. */
+  backfillId?: string
 }
 
 /**
@@ -80,6 +82,7 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
     note: null,
     state: 'queued',
     created_at: now,
+    backfill_id: opts.backfillId ?? null,
   })
   const runId = runResult.insertedId.toString()
 

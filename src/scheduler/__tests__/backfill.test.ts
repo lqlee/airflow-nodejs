@@ -43,6 +43,8 @@ afterAll(async () => {
 afterEach(async () => {
   await db.collection('dag_runs').deleteMany({})
   await db.collection('task_instances').deleteMany({})
+  await db.collection('backfills').deleteMany({})
+  await db.collection('event_logs').deleteMany({})
 })
 
 // ── enumerateDates ──────────────────────────────────────────────────────────

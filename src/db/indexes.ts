@@ -68,6 +68,15 @@ export async function ensureIndexes(db: Db): Promise<void> {
     { key: { key: 1 }, unique: true },
   ])
 
+  // backfills: list by dag, filter by state
+  await db.collection('backfills').createIndexes([
+    { key: { dag_id: 1, created_at: -1 } },
+    { key: { state: 1 } },
+  ])
+
+  // dag_runs: backfill_id for lifecycle gating
+  await db.collection('dag_runs').createIndex({ backfill_id: 1 })
+
   // event_logs: audit trail — query by dag, run, or event type; sorted by time
   await db.collection('event_logs').createIndexes([
     { key: { dag_id: 1, created_at: -1 } },

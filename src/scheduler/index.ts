@@ -10,6 +10,7 @@ import { createRun } from './runs.js'
 import { isDagPaused } from '../dag/pause.js'
 import { fireWebhook, type DeliverOptions } from '../webhooks/index.js'
 import { recordEvent } from '../events/index.js'
+import { getPausedBackfillIds, buildActiveRunFilter } from './backfill-filter.js'
 
 const POLL_INTERVAL_MS = 5_000
 
@@ -60,10 +61,12 @@ async function tick(db: Db): Promise<void> {
     // Check SLA breaches for all active runs
     await checkSlaBreaches(db, dags)
 
-    // Advance any active runs — cancelled/success/failed are excluded
+    // Advance any active runs — cancelled/success/failed are excluded.
+    // Runs belonging to paused backfills are also excluded (resume re-enables them).
+    const pausedBackfillIds = [...(await getPausedBackfillIds(db))]
     const activeRuns = await db
       .collection('dag_runs')
-      .find({ state: { $in: ['queued', 'running'] } })
+      .find(buildActiveRunFilter(pausedBackfillIds))
       .toArray()
 
     for (const run of activeRuns) {

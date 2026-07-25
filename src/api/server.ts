@@ -16,6 +16,8 @@ import { eventLogsRoutes } from './routes/event-logs.js'
 import { backfillsRoutes } from './routes/backfills.js'
 import { poolsRoutes } from './routes/pools.js'
 import { hitlRoutes } from './routes/hitl.js'
+import { providersRoutes } from './routes/providers.js'
+import { pluginsRoutes } from './routes/plugins.js'
 import { activeWorkers, queueDepth } from '../scheduler/pool.js'
 import { authHook, AUTH_ENABLED, setDb } from '../auth/index.js'
 
@@ -98,6 +100,8 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
     app.register(backfillsRoutes)
     app.register(poolsRoutes)
     app.register(hitlRoutes)
+    app.register(providersRoutes)
+    app.register(pluginsRoutes)
   })
 
   return app

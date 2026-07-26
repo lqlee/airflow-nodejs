@@ -106,8 +106,9 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
 export function startWorker(): Worker<TaskJobData> {
   if (bullWorker) return bullWorker
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   bullWorker = new Worker<TaskJobData>(QUEUE_NAME, processJob, {
-    connection: createRedisConnection(),
+    connection: createRedisConnection() as any,
     concurrency: CONCURRENCY,
   })
 

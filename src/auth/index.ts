@@ -72,11 +72,15 @@ const isPublicPath = (path: string) =>
   path.endsWith('.js') ||
   path.endsWith('.css')
 
-// ── FastifyRequest augmentation ────────────────────────────────────────────
+// ── FastifyRequest / FastifyContextConfig augmentation ────────────────────
 declare module 'fastify' {
   interface FastifyRequest {
     /** Role of the authenticated caller. Undefined when auth is disabled. */
     authRole: Role | undefined
+  }
+  interface FastifyContextConfig {
+    /** Override the minimum role required for this route (default: method-based). */
+    requiredRole?: Role
   }
 }
 

@@ -13,8 +13,19 @@ import { sensorOutcome } from './sensor.js'
 import { recordTry } from './tries.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const WORKER_SCRIPT = pathResolve(__dirname, 'worker.ts')
-const TSX_BIN = pathResolve(__dirname, '../../node_modules/.bin/tsx')
+
+// In production (compiled JS), import.meta.url points to dist/scheduler/executor.js
+// and worker.js exists alongside it. In development tsx runs .ts directly.
+// Detect by checking whether the current file ends with .js (compiled) or .ts (dev).
+const IS_COMPILED = import.meta.url.endsWith('.js')
+const WORKER_SCRIPT = IS_COMPILED
+  ? pathResolve(__dirname, 'worker.js')        // production: compiled JS
+  : pathResolve(__dirname, 'worker.ts')        // development: tsx source
+
+// In production use the system node binary; in dev use tsx.
+const EXEC_PATH = IS_COMPILED
+  ? process.execPath                           // production: same node process
+  : pathResolve(__dirname, '../../node_modules/.bin/tsx')  // dev: tsx transpiler
 
 // When REDIS_URL is set, use BullMQ (distributed). Otherwise use local fork.
 const USE_BULLMQ = Boolean(process.env.REDIS_URL)
@@ -58,7 +69,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
 
   return new Promise((done) => {
     const child = fork(WORKER_SCRIPT, [], {
-      execPath: TSX_BIN,
+      execPath: EXEC_PATH,
       env: { ...process.env },
       silent: true,
     })

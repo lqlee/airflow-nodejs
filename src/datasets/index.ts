@@ -200,7 +200,7 @@ async function casWatermark(
 export async function triggerDatasetConsumers(
   db: Db,
   dags: DagDefinition[],
-  createRun: (db: Db, dag: DagDefinition, opts?: { triggerType?: string }) => Promise<string>,
+  createRun: (db: Db, dag: DagDefinition, opts?: Record<string, unknown>) => Promise<string>,
   isDagPaused: (db: Db, dagId: string) => Promise<boolean>,
 ): Promise<number> {
   const consumers = dags.filter(d => d.datasets && d.datasets.length > 0)

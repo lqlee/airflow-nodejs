@@ -11,7 +11,7 @@
 
 import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
 import { promisify } from 'node:util'
-import type { Db } from 'mongodb'
+import type { Db, WithId } from 'mongodb'
 
 const scryptAsync = promisify(scrypt)
 
@@ -86,7 +86,7 @@ export async function validateApiKey(
     if (await verifyKey(raw, k.key_hash)) {
       // Fire-and-forget last_used_at update
       void db.collection('api_keys').updateOne(
-        { _id: (k as { _id: unknown })._id },
+        { _id: (k as WithId<ApiKey>)._id },
         { $set: { last_used_at: new Date() } },
       )
       // Fail-closed: keys created before the role field default to 'viewer'

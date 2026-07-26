@@ -1,4 +1,4 @@
-import type { Db } from 'mongodb'
+import type { Db, Filter } from 'mongodb'
 import type { TaskInstance } from './runs.js'
 
 /**
@@ -60,7 +60,7 @@ export async function claimReadyTasks(db: Db, dagRunId: string): Promise<TaskIns
         ],
       },
     ],
-  }
+  } as Filter<TaskInstance>
 
   // Drain all claimable tasks — each claim is atomic
   const claimed: TaskInstance[] = []

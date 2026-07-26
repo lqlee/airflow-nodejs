@@ -11,8 +11,9 @@ let queue: Queue<TaskJobData> | null = null
 
 export function getQueue(): Queue<TaskJobData> {
   if (!queue) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     queue = new Queue<TaskJobData>(QUEUE_NAME, {
-      connection: createRedisConnection(),
+      connection: createRedisConnection() as any,
       defaultJobOptions: {
         removeOnComplete: 100,   // keep last 100 completed jobs
         removeOnFail: 200,       // keep last 200 failed jobs

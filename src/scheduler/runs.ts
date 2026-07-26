@@ -18,6 +18,8 @@ export interface DagRun {
   note: string | null
   state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled'
   created_at: Date
+  /** ID of the parent backfill entity, or null for non-backfill runs. */
+  backfill_id: string | null
 }
 
 export interface TaskInstance {

@@ -5,9 +5,11 @@
   "scripts": {
     "dev": "tsx watch --ignore 'src/**/__tests__/**' --ignore 'dist/**' src/main.ts",
     "dev:bullmq": "REDIS_URL=redis://localhost:6379 tsx watch --ignore 'src/**/__tests__/**' --ignore 'dist/**' src/main.ts",
-    "start": "tsx src/main.ts",
-    "worker": "tsx src/queue/consumer.ts",
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "start:bullmq": "REDIS_URL=${REDIS_URL} node dist/main.js",
+    "worker": "node dist/queue/consumer.js",
+    "dev:start": "tsx src/main.ts",
     "test": "vitest run"
   },
   "dependencies": {

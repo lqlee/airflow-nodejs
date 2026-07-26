@@ -28,7 +28,17 @@ export async function loadDags(db?: Db): Promise<void> {
     return
   }
 
-  const dagFiles = entries.filter(f => extname(f) === '.ts' || extname(f) === '.js')
+  // In production (compiled, no tsx available) load only .js files.
+  // In development (tsx available) load .ts files; skip .js if a .ts with same basename exists.
+  const IS_COMPILED = import.meta.url.endsWith('.js')
+  const allDagFiles = entries.filter(f => extname(f) === '.ts' || extname(f) === '.js')
+  const tsBasenames = new Set(allDagFiles.filter(f => extname(f) === '.ts').map(f => f.slice(0, -3)))
+  const dagFiles = IS_COMPILED
+    ? allDagFiles.filter(f => extname(f) === '.js')   // prod: .js only
+    : allDagFiles.filter(f =>
+        extname(f) === '.ts' ||                        // dev: prefer .ts
+        (extname(f) === '.js' && !tsBasenames.has(f.slice(0, -3)))  // .js only if no .ts twin
+      )
   const errors: ImportError[] = []
   const allWarnings: DagWarning[] = []
   const now = new Date()
@@ -40,8 +50,11 @@ export async function loadDags(db?: Db): Promise<void> {
       const source = await readFile(filePath, 'utf8')
       const version = hashDagSource(source)
 
-      // Cache-bust so re-loads pick up file changes
-      const mod = await import(`${pathToFileURL(filePath).href}?t=${Date.now()}`)
+      // Cache-bust: append the content hash to the URL so each unique file version
+      // gets a unique module URL — Bun (unlike Node) ignores ?query in file URLs
+      // but treats different full URLs as distinct modules.
+      // Using the version (content hash) ensures a changed file always re-imports.
+      const mod = await import(`${pathToFileURL(filePath).href}?v=${version}`)
       const dag: DagDefinition = mod.default
       if (!dag?.id || !dag?.tasks) {
         const msg = `${file} has no valid default export (expected { id, tasks, schedule })`

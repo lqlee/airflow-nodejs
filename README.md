@@ -341,18 +341,30 @@ docker build --build-arg TARGETPLATFORM=linux/amd64 -t airflow-nodejs .
 
 > **Default platform:** `linux/arm64`. Pass `--platform linux/amd64` if deploying to x86 servers.
 
-### Run with local MongoDB
+### Quick start (local / dev)
+
+A `.env` file ships with simple fixed credentials for local testing:
 
 ```bash
+# .env (already in repo)
+MONGO_URL=mongodb://host.docker.internal:27017
+ENCRYPTION_KEY=0000000000000000000000000000000000000000000000000000000000000000
+ADMIN_KEY=airflow
+```
+
+```bash
+# 1. Start MongoDB
 docker-compose up -d mongo
 
-docker run -p 3000:3000 \
-  -e MONGO_URL=mongodb://host.docker.internal:27017 \
-  -e ENCRYPTION_KEY=$(openssl rand -hex 32) \
-  -e ADMIN_KEY=my-bootstrap-key \
+# 2. Run the app
+docker run -p 3000:3000 --env-file .env \
   -v $(pwd)/dags:/app/dags \
   airflow-nodejs:local
 ```
+
+Open **http://localhost:3000** — use `Authorization: Bearer airflow` for authenticated endpoints.
+
+> **Production:** replace `ENCRYPTION_KEY` with `openssl rand -hex 32` and use a strong `ADMIN_KEY`. The encryption key must be kept stable across restarts — it decrypts stored connections and variables.
 
 ### Full stack (MongoDB + app)
 
@@ -363,10 +375,7 @@ services:
   app:
     image: airflow-nodejs:local
     ports: ["3000:3000"]
-    environment:
-      MONGO_URL: mongodb://mongo:27017
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
-      ADMIN_KEY: ${ADMIN_KEY}
+    env_file: .env   # or set environment vars directly
     volumes:
       - ./dags:/app/dags
     depends_on: [mongo]

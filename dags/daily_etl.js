@@ -1,4 +1,4 @@
-import { dag } from '../src/dag/types.js';
+import { dag } from 'airflow-nodejs/dag/types';
 /**
  * Daily ETL pipeline — runs at midnight.
  * Demonstrates: sequential dependency chain + XCom data passing + retries.
@@ -7,7 +7,7 @@ import { dag } from '../src/dag/types.js';
  */
 export default dag({
     id: 'daily_etl',
-    schedule: '0 0 * * *', // midnight every day
+    schedule: null, // manual trigger only
     tasks: {
         extract_users: {
             retries: 3,

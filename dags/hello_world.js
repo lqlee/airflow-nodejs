@@ -1,7 +1,7 @@
-import { dag } from '../src/dag/types.js';
+import { dag } from 'airflow-nodejs/dag/types';
 export default dag({
     id: 'hello_world',
-    schedule: '* * * * *', // every minute
+    schedule: null, // manual trigger only
     tasks: {
         extract: {
             retries: 2,

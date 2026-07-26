@@ -2,6 +2,11 @@
   "name": "airflow-nodejs",
   "version": "0.1.0",
   "type": "module",
+  "exports": {
+    ".": "./dist/main.js",
+    "./dag": "./dist/dag/types.js",
+    "./dag/types": "./dist/dag/types.js"
+  },
   "scripts": {
     "dev": "tsx watch --ignore 'src/**/__tests__/**' --ignore 'dist/**' src/main.ts",
     "dev:bullmq": "REDIS_URL=redis://localhost:6379 tsx watch --ignore 'src/**/__tests__/**' --ignore 'dist/**' src/main.ts",

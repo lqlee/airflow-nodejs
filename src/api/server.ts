@@ -52,19 +52,22 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
   setDb(db)
 
   // Global rate limit: 120 req/min per IP by default (env: RATE_LIMIT_MAX).
+  // Set RATE_LIMIT_MAX=0 to disable entirely (recommended for local dev).
   // Routes must be registered AFTER this plugin initialises (inside after() cb).
-  app.register(fastifyRateLimit, {
-    global: true,
-    max: rateLimitMax,
-    timeWindow: '1 minute',
-    keyGenerator: (req) => req.ip,
-    errorResponseBuilder: (_req, context) => ({
-      statusCode: 429,
-      error: 'Too Many Requests',
-      message: `Rate limit exceeded. Retry after ${context.after}.`,
-      retryAfter: context.after,
-    }),
-  })
+  if (rateLimitMax > 0) {
+    app.register(fastifyRateLimit, {
+      global: true,
+      max: rateLimitMax,
+      timeWindow: '1 minute',
+      keyGenerator: (req) => req.ip,
+      errorResponseBuilder: (_req, context) => ({
+        statusCode: 429,
+        error: 'Too Many Requests',
+        message: `Rate limit exceeded. Retry after ${context.after}.`,
+        retryAfter: context.after,
+      }),
+    })
+  }
 
   // Auth hook — runs before every API request
   app.addHook('preHandler', authHook)

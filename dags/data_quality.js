@@ -1,4 +1,4 @@
-import { dag } from '../src/dag/types.js';
+import { dag } from 'airflow-nodejs/dag/types';
 /**
  * Data quality checks — runs every 6 hours.
  * Demonstrates: fan-out parallel checks + fan-in aggregation.
@@ -9,7 +9,7 @@ import { dag } from '../src/dag/types.js';
  */
 export default dag({
     id: 'data_quality',
-    schedule: '0 */6 * * *', // every 6 hours
+    schedule: null, // manual trigger only
     tasks: {
         start: {
             run: async (ctx) => {

@@ -1,4 +1,4 @@
-import { dag } from '../src/dag/types.js'
+import { dag } from 'airflow-nodejs/dag/types'
 
 /**
  * Demonstrates parallel task execution.

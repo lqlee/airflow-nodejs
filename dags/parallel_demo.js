@@ -1,4 +1,4 @@
-import { dag } from '../src/dag/types.js';
+import { dag } from 'airflow-nodejs/dag/types';
 /**
  * Demonstrates parallel task execution.
  * fetch_a and fetch_b both depend only on start — they run concurrently.

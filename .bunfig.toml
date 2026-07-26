@@ -1,3 +1,3 @@
 [install]
 # Use Walmart's internal npm registry (required on Walmart network)
-registry = "https://npm.ci.artifacts.walmart.com/artifactory/api/npm/npm-dev-local/"
+registry = "https://npm.ci.artifacts.walmart.com/artifactory/api/npm/npme-npm/"

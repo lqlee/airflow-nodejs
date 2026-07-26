@@ -1,0 +1,38 @@
+# Dependencies — installed fresh by Bun inside the container
+node_modules/
+
+# Source — only dist/ (pre-compiled) is needed at runtime
+src/
+
+# Test artifacts
+coverage/
+vitest.config.ts
+
+# Dev dag files — users mount their own at /app/dags via volume
+dags/
+
+# Git
+.git/
+.gitignore
+
+# Editor / OS
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Secrets / env files (keep .npmrc — needed for Walmart registry inside Docker)
+.env
+.env.*
+!.env.example
+!.npmrc
+
+# Docker build script temp files
+.bun-binary
+.bun-cache/
+
+# Logs
+*.log
+
+# TypeScript source (only compiled dist/ is needed)
+tsconfig*.json

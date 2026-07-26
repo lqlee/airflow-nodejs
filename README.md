@@ -317,12 +317,29 @@ npm test             # run all 618 tests (requires MongoDB at localhost:27017)
 
 ## Docker
 
-### Build the image (56 MB)
+### Build the image (~56 MB)
+
+`docker-build.sh` auto-detects your host CPU architecture and passes it to the Dockerfile.
 
 ```bash
-npm run build        # compile TypeScript first
-./docker-build.sh    # or: docker build -t airflow-nodejs .
+npm run build                              # compile TypeScript → dist/ first
+
+./docker-build.sh                          # auto-detect (arm64 on Apple Silicon, amd64 on x86)
+./docker-build.sh --platform linux/amd64   # x86 / Intel deployment servers
+./docker-build.sh --platform linux/arm64   # ARM (AWS Graviton, Apple Silicon)
 ```
+
+Or build directly with Docker:
+
+```bash
+# ARM (Apple Silicon, AWS Graviton)
+docker build --build-arg TARGETPLATFORM=linux/arm64 -t airflow-nodejs .
+
+# x86 (Intel/AMD servers)
+docker build --build-arg TARGETPLATFORM=linux/amd64 -t airflow-nodejs .
+```
+
+> **Default platform:** `linux/arm64`. Pass `--platform linux/amd64` if deploying to x86 servers.
 
 ### Run with local MongoDB
 

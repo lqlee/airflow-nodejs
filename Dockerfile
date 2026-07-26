@@ -5,9 +5,19 @@
 #   Stage 2 (runtime): oven/bun:1.3-alpine — run with Bun for ESM module resolution
 #
 # Build prerequisites (run on host before `docker build`):
-#   npm run build    (compile TypeScript → dist/, requires Bun-aware shell)
+#   npm run build    (compile TypeScript → dist/)
 #
-FROM node:22-alpine3.21 AS deps
+# Platform:
+#   Default: auto-detected from host (arm64 on Apple Silicon, amd64 on x86)
+#   Override: docker build --build-arg TARGETPLATFORM=linux/amd64 .
+#   Or use docker-build.sh --platform linux/amd64
+#
+# TARGETPLATFORM is a Docker built-in ARG — set automatically when using
+# `docker buildx build --platform` or passed via --build-arg.
+ARG TARGETPLATFORM
+
+# ── Stage 1: Install production deps ──────────────────────────────────────────
+FROM --platform=${TARGETPLATFORM:-linux/arm64} node:22-alpine3.21 AS deps
 
 WORKDIR /app
 
@@ -18,8 +28,8 @@ COPY package.json package-lock.json .npmrc ./
 RUN npm ci --omit=dev
 
 
-# ── Runtime stage ──────────────────────────────────────────────────────────────
-FROM generic.ci.artifacts.walmart.com/hub-docker-release-remote/oven/bun:1.3-alpine AS runtime
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+FROM --platform=${TARGETPLATFORM:-linux/arm64} generic.ci.artifacts.walmart.com/hub-docker-release-remote/oven/bun:1.3-alpine AS runtime
 
 # Security: non-root user
 RUN addgroup -S airflow && adduser -S airflow -G airflow

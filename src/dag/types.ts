@@ -156,6 +156,50 @@ export interface TaskDefinition {
   }
 
   /**
+   * Java task: run a .jar file or a class from a classpath.
+   *
+   * The JRE/JDK must be present in the runtime environment — Java is NOT bundled
+   * in the default airflow-nodejs images due to size (~250 MB). Options:
+   *   1. Use a custom base image that includes Java
+   *   2. Volume-mount a JRE into the container and set `java.binary`
+   *   3. Run the container on a host that has Java installed and set `java.binary`
+   *
+   * JAR example:
+   *   java: { jar: '/app/dags/jobs/my-etl.jar', args: ['--date', '2024-01-01'] }
+   *
+   * Class + classpath example:
+   *   java: { mainClass: 'com.example.MyJob', classpath: ['/app/lib/my-lib.jar', '/app/classes'] }
+   *
+   * Environment variables injected automatically:
+   *   DAG_ID, RUN_ID, TASK_ID  — readable via System.getenv()
+   *
+   * stdout/stderr are captured line-by-line to task logs.
+   * Exit code 0 = success; non-zero = failure.
+   *
+   * Cannot be combined with `run`, `poke`, `shell`, or `python`.
+   */
+  java?: {
+    /** Path to a .jar file to execute (mutually exclusive with mainClass). */
+    jar?: string
+    /** Fully-qualified main class name (mutually exclusive with jar). Requires classpath. */
+    mainClass?: string
+    /** Classpath entries (files or directories) joined with ':'. Used with mainClass. */
+    classpath?: string[]
+    /** Extra arguments passed after the jar/class. */
+    args?: string[]
+    /** JVM flags passed before the jar/class, e.g. ['-Xmx512m', '-Denv=prod'] */
+    jvmArgs?: string[]
+    /** Java binary path. Default: 'java' (must be on PATH or set to absolute path). */
+    binary?: string
+    /** Working directory. Default: process.cwd() */
+    cwd?: string
+    /** Additional environment variables merged with process.env */
+    env?: Record<string, string>
+    /** Timeout in ms. Default: task-level timeout or no timeout. */
+    timeout?: number
+  }
+
+  /**
    * Human-in-the-Loop: when true, the task parks at 'queued' until a human
    * approves or rejects via POST /hitl/:runId/:taskId.
    * Approved → task executes (or succeeds immediately if no `run` body).

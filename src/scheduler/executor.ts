@@ -49,6 +49,11 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     return executePythonTask(db, ti, taskDef.python)
   }
 
+  // Java task — spawn java with -jar or -cp + mainClass
+  if (taskDef.java) {
+    return executeJavaTask(db, ti, taskDef.java)
+  }
+
   // HITL approval-only tasks (no run body) — succeed immediately after approval
   if (ti.is_hitl && !taskDef.run && !taskDef.poke) {
     void recordTry(db, ti, 'success', new Date())
@@ -240,6 +245,7 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
     })
 
     let timedOut = false
+    let errored = false   // set by error handler so close handler doesn't double-process ENOENT
     let killTimer: ReturnType<typeof setTimeout> | null = null
 
     if (opts.timeoutMs > 0) {
@@ -274,6 +280,7 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
 
     child.on('error', async (err) => {
       if (timedOut) return
+      errored = true
       clearKillTimer()
       release()
       if (ti.pool) releasePool(ti.pool)
@@ -286,7 +293,7 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
     })
 
     child.on('close', async (code) => {
-      if (timedOut) return
+      if (timedOut || errored) return   // already handled by error or timeout handler
       clearKillTimer()
       release()
       if (ti.pool) releasePool(ti.pool)
@@ -311,6 +318,42 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
       }
       done()
     })
+  })
+}
+
+// ── Java task ──────────────────────────────────────────────────────────────────
+
+async function executeJavaTask(
+  db: Db,
+  ti: TaskInstance,
+  java: NonNullable<import('../dag/types.js').TaskDefinition['java']>,
+): Promise<void> {
+  const binary = java.binary ?? 'java'
+  const jvmArgs = java.jvmArgs ?? []
+  const taskArgs = java.args ?? []
+
+  let args: string[]
+  if (java.jar) {
+    // java [jvmArgs] -jar my.jar [args]
+    args = [...jvmArgs, '-jar', java.jar, ...taskArgs]
+  } else if (java.mainClass) {
+    // java [jvmArgs] [-cp classpath] MainClass [args]
+    const cp = java.classpath?.join(':') ?? ''
+    args = [...jvmArgs, ...(cp ? ['-cp', cp] : []), java.mainClass, ...taskArgs]
+  } else {
+    await markFailed(db, ti, "Java task requires either 'jar' or 'mainClass'")
+    void recordTry(db, ti, 'failed', new Date(), "Java task requires either 'jar' or 'mainClass'")
+    return
+  }
+
+  return spawnTask(db, ti, {
+    label:     `java(${binary})`,
+    binary,
+    args,
+    cwd:       java.cwd,
+    env:       java.env,
+    timeoutMs: java.timeout ?? (ti.timeout_ms > 0 ? ti.timeout_ms : 0),
+    kind:      'Java',
   })
 }
 

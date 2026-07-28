@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import fastifyStatic from '@fastify/static'
 import fastifyRateLimit from '@fastify/rate-limit'
+import fastifyMultipart from '@fastify/multipart'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { resolve, dirname } from 'node:path'
@@ -21,6 +22,7 @@ import { providersRoutes } from './routes/providers.js'
 import { pluginsRoutes } from './routes/plugins.js'
 import { dagWarningsRoutes } from './routes/dag-warnings.js'
 import { configRoutes } from './routes/config.js'
+import { imagesRoutes } from './routes/images.js'
 import { activeWorkers, queueDepth } from '../scheduler/pool.js'
 import { authHook, AUTH_ENABLED, setDb } from '../auth/index.js'
 
@@ -51,6 +53,12 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
 
   // Wire DB into auth so DB-backed keys are validated
   setDb(db)
+
+  // Multipart support for file uploads (docker image .tar files)
+  // Limit: 2 GB per file (docker images can be large)
+  app.register(fastifyMultipart, {
+    limits: { fileSize: 2 * 1024 * 1024 * 1024 },
+  })
 
   // Global rate limit: 120 req/min per IP by default (env: RATE_LIMIT_MAX).
   // Set RATE_LIMIT_MAX=0 to disable entirely (recommended for local dev).
@@ -122,6 +130,7 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
     app.register(pluginsRoutes)
     app.register(dagWarningsRoutes)
     app.register(configRoutes)
+    app.register(imagesRoutes)
   })
 
   return app

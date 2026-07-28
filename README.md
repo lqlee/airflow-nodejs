@@ -574,6 +574,54 @@ echo json_encode(["status" => "ok", "run" => getenv("RUN_ID")]) . "\n";
 - Images must be pre-pulled or available in your Docker registry
 - XCom is not available in container tasks — use shared volumes or env vars to pass data between tasks
 
+#### Uploading Docker images via the Web UI
+
+Users can upload Docker image `.tar` files directly from the browser — no registry access needed at runtime.
+
+**Workflow (fully offline):**
+
+```bash
+# 1. On a machine with internet access — export the image
+docker pull python:3.13-slim
+docker save python:3.13-slim -o python-3.13-slim.tar
+
+# 2. Upload via the Web UI
+#    Click the 🐳 button in the header → "⬆ Upload .tar"
+#    Or via API:
+curl -X POST http://localhost:3000/images/upload \
+  -H "Authorization: Bearer <key>" \
+  -F "file=@python-3.13-slim.tar"
+
+# 3. Copy the requiredImages snippet from the UI into your DAG file
+```
+
+```js
+export default dag({
+  id: 'my_pipeline',
+  requiredImages: [
+    './images/python-3.13-slim.tar',  // loaded automatically when dag is registered
+  ],
+  tasks: {
+    step: {
+      container: {
+        image: 'python:3.13-slim',
+        command: ['python3', '-c', 'print("hello from container")'],
+      }
+    }
+  }
+});
+```
+
+The server loads the image via `docker load` in the background when the DAG file is registered. Subsequent loads of the same image are instant (idempotent).
+
+**Image management API:**
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/images` | List uploaded `.tar` files with size and `requiredImages` path |
+| `POST` | `/images/upload` | Upload a `.tar` file (multipart/form-data) |
+| `DELETE` | `/images/:name` | Remove a `.tar` file (image stays loaded in Docker) |
+
 ### Full stack (MongoDB + app)
 
 Add the app to `docker-compose.yml`:

@@ -304,6 +304,98 @@ function ApiKeysPanel({ onClose }) {
   );
 }
 
+// ── Docker Images Panel ───────────────────────────────────────────────
+function ImagesPanel({ onClose }) {
+  const [images, setImages] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState('');
+  const [uploadError, setUploadError] = useState('');
+  const [deleting, setDeleting] = useState(null);
+
+  const load = useCallback(() =>
+    apiFetch(`${BASE}/images`).then(r => r.json()).then(d => setImages(Array.isArray(d) ? d : [])).catch(() => {}), []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const upload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.name.endsWith('.tar')) { setUploadError('Only .tar files accepted'); return; }
+    setUploading(true); setUploadMsg(''); setUploadError('');
+    const form = new FormData();
+    form.append('file', file);
+    const res = await apiFetch(`${BASE}/images/upload`, { method: 'POST', body: form });
+    const data = await res.json().catch(() => ({}));
+    setUploading(false);
+    if (res.ok) { setUploadMsg(data.message ?? 'Uploaded'); load(); }
+    else setUploadError(data.error ?? 'Upload failed');
+    e.target.value = '';
+  };
+
+  const del = async (name) => {
+    setDeleting(name);
+    await apiFetch(`${BASE}/images/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    setDeleting(null);
+    load();
+  };
+
+  const fmt = (bytes) => bytes < 1024*1024 ? `${(bytes/1024).toFixed(0)} KB` : `${(bytes/1024/1024).toFixed(1)} MB`;
+
+  return (
+    <div className="panel">
+      <div className="panel-header">
+        <span>🐳 Docker Images</span>
+        <button className="refresh-btn" onClick={onClose}>✕</button>
+      </div>
+      <div style={{marginBottom:12}}>
+        <p style={{fontSize:12,color:'#a0aec0',margin:'0 0 8px'}}>
+          Upload Docker image <code>.tar</code> files exported with <code>docker save</code>.
+          Images are loaded into Docker automatically and can be referenced in DAG <code>requiredImages</code>.
+        </p>
+        <label style={{display:'inline-block',cursor:'pointer'}}>
+          <input type="file" accept=".tar" style={{display:'none'}} onChange={upload} disabled={uploading} />
+          <span className="btn btn-primary" style={{fontSize:12,padding:'4px 12px'}}>
+            {uploading ? '⏳ Uploading...' : '⬆ Upload .tar'}
+          </span>
+        </label>
+        {uploadMsg && <span style={{marginLeft:8,color:'#68d391',fontSize:12}}>✓ {uploadMsg}</span>}
+        {uploadError && <span style={{marginLeft:8,color:'#fc8181',fontSize:12}}>{uploadError}</span>}
+      </div>
+      {images.length === 0
+        ? <p style={{color:'#4a5568',fontSize:12}}>No image tars uploaded yet.</p>
+        : <table style={{width:'100%',fontSize:12,borderCollapse:'collapse'}}>
+            <thead>
+              <tr style={{color:'#718096',textAlign:'left'}}>
+                <th style={{padding:'4px 8px'}}>File</th>
+                <th style={{padding:'4px 8px'}}>Size</th>
+                <th style={{padding:'4px 8px'}}>Use in DAG</th>
+                <th style={{padding:'4px 8px'}}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {images.map(img => (
+                <tr key={img.name} style={{borderTop:'1px solid #2d3748'}}>
+                  <td style={{padding:'6px 8px',fontFamily:'monospace'}}>{img.name}</td>
+                  <td style={{padding:'6px 8px',color:'#a0aec0'}}>{fmt(img.size_bytes)}</td>
+                  <td style={{padding:'6px 8px',color:'#4a5568',fontFamily:'monospace',fontSize:11}}>
+                    requiredImages: ['{img.path}']
+                  </td>
+                  <td style={{padding:'6px 8px'}}>
+                    <button className="btn" style={{fontSize:11,padding:'2px 8px',background:'#4a1515',color:'#fc8181'}}
+                      disabled={deleting === img.name}
+                      onClick={() => del(img.name)}>
+                      {deleting === img.name ? '…' : '✕'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+      }
+    </div>
+  );
+}
+
 // ── SLA Alerts ────────────────────────────────────────────────────────
 function useSlaAlerts() {
   const [alerts, setAlerts] = useState([]);
@@ -1457,6 +1549,7 @@ function App() {
   const [showKeys, setShowKeys] = useState(false);
   const [showVars, setShowVars] = useState(false);
   const [showConns, setShowConns] = useState(false);
+  const [showImages, setShowImages] = useState(false);
   // null = not checked yet, true = authenticated, false = needs login
   const [authed, setAuthed] = useState(null);
 
@@ -1509,6 +1602,8 @@ function App() {
           title="Connections">🔌</button>
         <button className="refresh-btn" onClick={() => setShowKeys(v => !v)}
           title="API Keys">🔑</button>
+        <button className="refresh-btn" onClick={() => setShowImages(v => !v)}
+          title="Docker Images">🐳</button>
         <button className="refresh-btn" onClick={handleLogout}
           title="Sign out">⏻</button>
       </header>
@@ -1518,6 +1613,7 @@ function App() {
         {showVars && <VariablesPanel onClose={() => setShowVars(false)} />}
         {showConns && <ConnectionsPanel onClose={() => setShowConns(false)} />}
         {showKeys && <ApiKeysPanel onClose={() => setShowKeys(false)} />}
+        {showImages && <ImagesPanel onClose={() => setShowImages(false)} />}
         {showAlerts && (
           <SlaPanel alerts={alerts} onAck={ackAlert} onClose={() => setShowAlerts(false)} />
         )}

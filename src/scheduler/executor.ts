@@ -1,4 +1,4 @@
-import { fork } from 'node:child_process'
+import { fork, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { resolve as pathResolve, dirname } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -38,6 +38,11 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
 
   const taskDef = dag.tasks[ti.task_id]
   if (!taskDef) { await markFailed(db, ti, `Task '${ti.task_id}' not found in dag '${ti.dag_id}'`); return }
+
+  // Shell task — spawn interpreter directly, no worker needed
+  if (taskDef.shell) {
+    return executeShellTask(db, ti, taskDef.shell)
+  }
 
   // HITL approval-only tasks (no run body) — succeed immediately after approval
   if (ti.is_hitl && !taskDef.run && !taskDef.poke) {
@@ -184,6 +189,111 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
       if (code !== 0 && code !== null) {
         console.error(`[executor] worker exited with code ${code} for ${ti.task_id}`)
       }
+    })
+  })
+}
+
+/**
+ * Execute a shell task by spawning the interpreter directly.
+ * stdout/stderr are captured to task logs. Exit code 0 = success.
+ */
+async function executeShellTask(
+  db: Db,
+  ti: TaskInstance,
+  shell: NonNullable<import('../dag/types.js').TaskDefinition['shell']>,
+): Promise<void> {
+  await acquire()
+  if (ti.pool) await acquirePool(db, ti.pool)
+
+  const interpreter = shell.interpreter ?? 'sh'
+  const timeoutMs = shell.timeout ?? (ti.timeout_ms > 0 ? ti.timeout_ms : 0)
+
+  console.log(`[executor] shell(${interpreter}) ${ti.dag_id}.${ti.task_id}`)
+
+  return new Promise((done) => {
+    const child = spawn(interpreter, ['-c', shell.command], {
+      cwd: shell.cwd ?? process.cwd(),
+      env: {
+        ...process.env,
+        ...(shell.env ?? {}),
+        DAG_ID:  ti.dag_id,
+        RUN_ID:  ti.dag_run_id,
+        TASK_ID: ti.task_id,
+      },
+    })
+
+    let timedOut = false
+    let killTimer: ReturnType<typeof setTimeout> | null = null
+
+    if (timeoutMs > 0) {
+      killTimer = setTimeout(() => {
+        timedOut = true
+        child.kill('SIGTERM')
+        const msg = `Shell task timed out after ${timeoutMs}ms`
+        console.error(`[executor] ⏱ ${ti.dag_id}.${ti.task_id}: ${msg}`)
+        release()
+        if (ti.pool) releasePool(ti.pool)
+        void recordTry(db, ti, 'failed', new Date(), msg)
+        void markFailed(db, ti, msg).then(() => done())
+      }, timeoutMs)
+    }
+
+    const clearKillTimer = () => {
+      if (killTimer !== null) { clearTimeout(killTimer); killTimer = null }
+    }
+
+    const stderrLines: string[] = []
+
+    createInterface({ input: child.stdout }).on('line', (line) => {
+      process.stdout.write(`${line}\n`)
+      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line)
+    })
+
+    createInterface({ input: child.stderr }).on('line', (line) => {
+      process.stderr.write(`${line}\n`)
+      stderrLines.push(line)
+      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line)
+    })
+
+    child.on('error', async (err) => {
+      if (timedOut) return
+      clearKillTimer()
+      release()
+      if (ti.pool) releasePool(ti.pool)
+      // ENOENT means the interpreter binary is not installed
+      const msg = (err as NodeJS.ErrnoException).code === 'ENOENT'
+        ? `Shell interpreter '${interpreter}' not found — install it or use 'sh'`
+        : err.message
+      void recordTry(db, ti, 'failed', new Date(), msg)
+      await markFailed(db, ti, msg)
+      done()
+    })
+
+    child.on('close', async (code) => {
+      if (timedOut) return
+      clearKillTimer()
+      release()
+      if (ti.pool) releasePool(ti.pool)
+      const endedAt = new Date()
+
+      if (code === 0) {
+        void recordTry(db, ti, 'success', endedAt)
+        await markSuccess(db, ti)
+        console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id} (shell, exit 0)`)
+      } else {
+        const stderr = stderrLines.slice(-5).join('\n')
+        const error = `Shell exited with code ${code}${stderr ? `: ${stderr}` : ''}`
+        if (ti.try_number < ti.max_retries) {
+          void recordTry(db, ti, 'failed', endedAt, error)
+          await scheduleRetry(db, ti, error)
+          console.warn(`[executor] ↩ ${ti.dag_id}.${ti.task_id} retrying (${ti.try_number + 1}/${ti.max_retries + 1})`)
+        } else {
+          void recordTry(db, ti, 'failed', endedAt, error)
+          await markFailed(db, ti, error)
+          console.error(`[executor] ✗ ${ti.dag_id}.${ti.task_id}: ${error}`)
+        }
+      }
+      done()
     })
   })
 }

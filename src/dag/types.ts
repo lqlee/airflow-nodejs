@@ -78,6 +78,38 @@ export interface TaskDefinition {
   sensorTimeout?: number
 
   /**
+   * Shell task: run a shell command instead of a JS function.
+   * The command string is passed to the interpreter via `-c`.
+   *
+   * Supported interpreters (must be installed in the runtime environment):
+   *   'sh'    — default; always available (POSIX shell / busybox on Alpine)
+   *   'bash'  — install via apk/apt; not available on Alpine by default
+   *   'zsh'   — if installed
+   *   'tcsh'  — if installed
+   *   'fish'  — if installed
+   *   Any absolute path, e.g. '/usr/local/bin/python3'
+   *
+   * stdout/stderr are captured and written to task logs.
+   * Exit code 0 = success; non-zero = failure (message includes exit code + stderr).
+   *
+   * Environment variables available inside the command:
+   *   DAG_ID, RUN_ID, TASK_ID  — from the current task context
+   *
+   * Cannot be combined with `run` or `poke`.
+   */
+  shell?: {
+    command: string
+    /** Shell interpreter binary name or absolute path. Default: 'sh' (always available on Alpine) */
+    interpreter?: string
+    /** Working directory for the command. Default: process.cwd() */
+    cwd?: string
+    /** Additional environment variables merged with process.env */
+    env?: Record<string, string>
+    /** Timeout in ms (overrides task-level timeout for shell execution). */
+    timeout?: number
+  }
+
+  /**
    * Human-in-the-Loop: when true, the task parks at 'queued' until a human
    * approves or rejects via POST /hitl/:runId/:taskId.
    * Approved → task executes (or succeeds immediately if no `run` body).

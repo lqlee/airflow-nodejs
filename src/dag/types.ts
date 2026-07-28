@@ -82,8 +82,11 @@ export interface TaskDefinition {
    * The command string is passed to the interpreter via `-c`.
    *
    * Supported interpreters (must be installed in the runtime environment):
-   *   'sh'    — default; always available (POSIX shell / busybox on Alpine)
-   *   'bash'  — install via apk/apt; not available on Alpine by default
+   *   'bash'  — default; pre-installed in the official airflow-nodejs image (Debian slim)
+   *   'sh'    — always available (POSIX shell)
+   *   'zsh'   — install via apt-get if available
+   *   'tcsh'  — install via apt-get if available
+   *   Any absolute path, e.g. '/usr/bin/python3'
    *   'zsh'   — if installed
    *   'tcsh'  — if installed
    *   'fish'  — if installed
@@ -99,7 +102,7 @@ export interface TaskDefinition {
    */
   shell?: {
     command: string
-    /** Shell interpreter binary name or absolute path. Default: 'sh' (always available on Alpine) */
+    /** Shell interpreter binary name or absolute path. Default: 'bash' */
     interpreter?: string
     /** Working directory for the command. Default: process.cwd() */
     cwd?: string

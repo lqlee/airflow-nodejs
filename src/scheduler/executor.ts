@@ -205,7 +205,7 @@ async function executeShellTask(
   await acquire()
   if (ti.pool) await acquirePool(db, ti.pool)
 
-  const interpreter = shell.interpreter ?? 'sh'
+  const interpreter = shell.interpreter ?? 'bash'
   const timeoutMs = shell.timeout ?? (ti.timeout_ms > 0 ? ti.timeout_ms : 0)
 
   console.log(`[executor] shell(${interpreter}) ${ti.dag_id}.${ti.task_id}`)

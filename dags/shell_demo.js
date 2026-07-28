@@ -3,9 +3,10 @@ import { dag } from 'airflow-nodejs/dag/types';
 /**
  * Demonstrates shell tasks — each task runs a shell command instead of JS.
  *
- * Default interpreter: 'sh' (always available on Alpine/any POSIX system).
- * For bash-specific syntax, set interpreter: 'bash' (must be installed).
- * Other shells: 'zsh', 'tcsh', 'fish', or any absolute path like '/usr/bin/python3'.
+ * Default interpreter: 'bash' (pre-installed in the airflow-nodejs Docker image).
+ * Other options: 'sh' (always available), 'zsh', 'tcsh', or any absolute path.
+ *
+ * Context env vars injected automatically: DAG_ID, RUN_ID, TASK_ID
  */
 export default dag({
   id: 'shell_demo',
@@ -13,28 +14,50 @@ export default dag({
   tasks: {
     system_info: {
       shell: {
-        // Context env vars: DAG_ID, RUN_ID, TASK_ID are injected automatically
-        command: 'echo "=== System ===" && uname -a && echo "=== Date ===" && date && echo "DAG=$DAG_ID RUN=$RUN_ID TASK=$TASK_ID"',
-        // interpreter defaults to 'sh' — works on Alpine without extra packages
+        // bash array syntax and [[ ]] — requires bash (default)
+        // Use single quotes to prevent JS template literal substitution.
+        // $DAG_ID etc. are injected at runtime by the executor as env vars.
+        command: String.raw`
+          echo "=== System ==="
+          uname -a
+          echo "=== Bash version ==="
+          bash --version | head -1
+          echo "=== Context ==="
+          echo "DAG=$DAG_ID  RUN=$RUN_ID  TASK=$TASK_ID"
+        `,
       }
     },
     disk_check: {
       dependsOn: ['system_info'],
       shell: {
-        command: 'df -h / && echo "Disk check OK"',
+        command: `
+          df -h /
+          # bash arithmetic
+          FREE=$(df / | awk 'NR==2{print $4}')
+          echo "Free blocks: $FREE"
+          [[ $FREE -gt 0 ]] && echo "Disk OK" || echo "WARNING: disk full"
+        `,
       }
     },
-    env_vars: {
+    custom_env: {
       dependsOn: ['system_info'],
       shell: {
-        command: 'echo "Custom env: GREETING=$GREETING"',
+        command: 'echo "Greeting: $GREETING from run $RUN_ID"',
         env: { GREETING: 'hello from shell task' },
       }
     },
-    summary: {
-      dependsOn: ['disk_check', 'env_vars'],
+    sh_fallback: {
+      dependsOn: ['system_info'],
       shell: {
-        command: 'echo "All shell tasks completed for run: $RUN_ID"',
+        // Use sh explicitly — always available even without bash
+        command: 'echo "POSIX sh works too: $(uname -s)"',
+        interpreter: 'sh',
+      }
+    },
+    summary: {
+      dependsOn: ['disk_check', 'custom_env', 'sh_fallback'],
+      shell: {
+        command: 'echo "All shell tasks completed ✓  run=$RUN_ID"',
       }
     }
   }

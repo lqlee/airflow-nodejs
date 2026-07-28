@@ -29,17 +29,15 @@ RUN npm ci --omit=dev
 
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
-FROM --platform=${TARGETPLATFORM:-linux/arm64} generic.ci.artifacts.walmart.com/hub-docker-release-remote/oven/bun:1.3-alpine AS runtime
+# bun:1.3-slim is Debian-based and ships with bash pre-installed.
+# Shells available for shell tasks:
+#   /bin/sh    — always available (POSIX sh)
+#   /bin/bash  — included in this image (default for shell tasks)
+#   zsh/tcsh   — not included; extend this image with apt-get if a Debian mirror is accessible
+FROM --platform=${TARGETPLATFORM:-linux/arm64} generic.ci.artifacts.walmart.com/hub-docker-release-remote/oven/bun:1.3-slim AS runtime
 
-# Note on shell tasks:
-#   This Alpine image ships with /bin/sh (busybox ash) only.
-#   Shell tasks default to 'bash' — if bash is not available they'll ENOENT.
-#   Use interpreter: 'sh' for guaranteed compatibility on Alpine.
-#   To add bash: extend this image with `RUN apk add --no-cache bash`
-#   (requires access to an Alpine mirror; blocked on Walmart network — use a custom base image).
-
-# Security: non-root user
-RUN addgroup -S airflow && adduser -S airflow -G airflow
+# Security: non-root user (useradd is available on Debian)
+RUN groupadd -r airflow && useradd -r -g airflow airflow
 
 WORKDIR /app
 

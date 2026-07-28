@@ -44,6 +44,11 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     return executeShellTask(db, ti, taskDef.shell)
   }
 
+  // Python task — spawn python3 (or configured interpreter) directly
+  if (taskDef.python) {
+    return executePythonTask(db, ti, taskDef.python)
+  }
+
   // HITL approval-only tasks (no run body) — succeed immediately after approval
   if (ti.is_hitl && !taskDef.run && !taskDef.poke) {
     void recordTry(db, ti, 'success', new Date())
@@ -193,29 +198,41 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
   })
 }
 
+// ── Shared subprocess runner ───────────────────────────────────────────────────
+
+interface SpawnOpts {
+  /** Display label for logs, e.g. 'shell(bash)' or 'python(3.13)' */
+  label: string
+  /** Binary to spawn */
+  binary: string
+  /** Arguments passed to the binary */
+  args: string[]
+  /** Working directory */
+  cwd?: string
+  /** Extra environment variables (merged with process.env + context vars) */
+  env?: Record<string, string>
+  /** Timeout in ms; 0 = no timeout */
+  timeoutMs: number
+  /** Human-readable name for timeout error message, e.g. 'Shell' or 'Python' */
+  kind: string
+}
+
 /**
- * Execute a shell task by spawning the interpreter directly.
- * stdout/stderr are captured to task logs. Exit code 0 = success.
+ * Shared subprocess executor used by shell and python tasks.
+ * Spawns the binary, pipes stdout/stderr to task logs, handles timeout/retries.
  */
-async function executeShellTask(
-  db: Db,
-  ti: TaskInstance,
-  shell: NonNullable<import('../dag/types.js').TaskDefinition['shell']>,
-): Promise<void> {
+async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<void> {
   await acquire()
   if (ti.pool) await acquirePool(db, ti.pool)
 
-  const interpreter = shell.interpreter ?? 'bash'
-  const timeoutMs = shell.timeout ?? (ti.timeout_ms > 0 ? ti.timeout_ms : 0)
-
-  console.log(`[executor] shell(${interpreter}) ${ti.dag_id}.${ti.task_id}`)
+  console.log(`[executor] ${opts.label} ${ti.dag_id}.${ti.task_id}`)
 
   return new Promise((done) => {
-    const child = spawn(interpreter, ['-c', shell.command], {
-      cwd: shell.cwd ?? process.cwd(),
+    const child = spawn(opts.binary, opts.args, {
+      cwd: opts.cwd ?? process.cwd(),
       env: {
         ...process.env,
-        ...(shell.env ?? {}),
+        ...(opts.env ?? {}),
         DAG_ID:  ti.dag_id,
         RUN_ID:  ti.dag_run_id,
         TASK_ID: ti.task_id,
@@ -225,17 +242,17 @@ async function executeShellTask(
     let timedOut = false
     let killTimer: ReturnType<typeof setTimeout> | null = null
 
-    if (timeoutMs > 0) {
+    if (opts.timeoutMs > 0) {
       killTimer = setTimeout(() => {
         timedOut = true
         child.kill('SIGTERM')
-        const msg = `Shell task timed out after ${timeoutMs}ms`
+        const msg = `${opts.kind} task timed out after ${opts.timeoutMs}ms`
         console.error(`[executor] ⏱ ${ti.dag_id}.${ti.task_id}: ${msg}`)
         release()
         if (ti.pool) releasePool(ti.pool)
         void recordTry(db, ti, 'failed', new Date(), msg)
         void markFailed(db, ti, msg).then(() => done())
-      }, timeoutMs)
+      }, opts.timeoutMs)
     }
 
     const clearKillTimer = () => {
@@ -260,9 +277,8 @@ async function executeShellTask(
       clearKillTimer()
       release()
       if (ti.pool) releasePool(ti.pool)
-      // ENOENT means the interpreter binary is not installed
       const msg = (err as NodeJS.ErrnoException).code === 'ENOENT'
-        ? `Shell interpreter '${interpreter}' not found — install it or use 'sh'`
+        ? `${opts.kind} binary '${opts.binary}' not found — is it installed in the runtime image?`
         : err.message
       void recordTry(db, ti, 'failed', new Date(), msg)
       await markFailed(db, ti, msg)
@@ -279,10 +295,10 @@ async function executeShellTask(
       if (code === 0) {
         void recordTry(db, ti, 'success', endedAt)
         await markSuccess(db, ti)
-        console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id} (shell, exit 0)`)
+        console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id} (${opts.label}, exit 0)`)
       } else {
         const stderr = stderrLines.slice(-5).join('\n')
-        const error = `Shell exited with code ${code}${stderr ? `: ${stderr}` : ''}`
+        const error = `${opts.kind} exited with code ${code}${stderr ? `: ${stderr}` : ''}`
         if (ti.try_number < ti.max_retries) {
           void recordTry(db, ti, 'failed', endedAt, error)
           await scheduleRetry(db, ti, error)
@@ -295,6 +311,48 @@ async function executeShellTask(
       }
       done()
     })
+  })
+}
+
+// ── Shell task ─────────────────────────────────────────────────────────────────
+
+async function executeShellTask(
+  db: Db,
+  ti: TaskInstance,
+  shell: NonNullable<import('../dag/types.js').TaskDefinition['shell']>,
+): Promise<void> {
+  const interpreter = shell.interpreter ?? 'bash'
+  return spawnTask(db, ti, {
+    label:     `shell(${interpreter})`,
+    binary:    interpreter,
+    args:      ['-c', shell.command],
+    cwd:       shell.cwd,
+    env:       shell.env,
+    timeoutMs: shell.timeout ?? (ti.timeout_ms > 0 ? ti.timeout_ms : 0),
+    kind:      'Shell',
+  })
+}
+
+// ── Python task ────────────────────────────────────────────────────────────────
+
+async function executePythonTask(
+  db: Db,
+  ti: TaskInstance,
+  python: NonNullable<import('../dag/types.js').TaskDefinition['python']>,
+): Promise<void> {
+  const binary = python.interpreter ?? 'python3'
+  // Inline code runs via `python3 -c <code>`; script file runs via `python3 <path>`
+  const args = python.script
+    ? [python.script, ...(python.args ?? [])]
+    : ['-c', python.code!]
+  return spawnTask(db, ti, {
+    label:     `python(${binary})`,
+    binary,
+    args,
+    cwd:       python.cwd,
+    env:       python.env,
+    timeoutMs: python.timeout ?? (ti.timeout_ms > 0 ? ti.timeout_ms : 0),
+    kind:      'Python',
   })
 }
 

@@ -113,6 +113,49 @@ export interface TaskDefinition {
   }
 
   /**
+   * Python task: run inline Python code or a .py script file.
+   *
+   * Provide exactly one of `code` (inline) or `script` (file path).
+   *
+   * Inline code example:
+   *   python: { code: 'print("hello from python")' }
+   *
+   * Script file example (path relative to cwd or absolute):
+   *   python: { script: '/app/dags/scripts/my_job.py', args: ['--env', 'prod'] }
+   *
+   * Environment variables injected automatically:
+   *   DAG_ID, RUN_ID, TASK_ID  — readable via os.environ
+   *
+   * Interpreter defaults to 'python3'. Use 'python' or an absolute path to
+   * target a specific installation.
+   *
+   * stdout/stderr are captured line-by-line to task logs.
+   * Exit code 0 = success; non-zero = failure.
+   *
+   * NOTE: python3 is NOT included in the default airflow-nodejs image.
+   * Use the python variant image: docker build -f Dockerfile.python -t airflow-nodejs:python .
+   * Or set interpreter to any python binary already present in your runtime.
+   *
+   * Cannot be combined with `run`, `poke`, or `shell`.
+   */
+  python?: {
+    /** Inline Python code string — passed via `python3 -c`. Mutually exclusive with `script`. */
+    code?: string
+    /** Path to a .py script file — passed as positional arg. Mutually exclusive with `code`. */
+    script?: string
+    /** Extra positional arguments appended after the script path (ignored for inline code). */
+    args?: string[]
+    /** Python interpreter binary name or absolute path. Default: 'python3' */
+    interpreter?: string
+    /** Working directory for the Python process. Default: process.cwd() */
+    cwd?: string
+    /** Additional environment variables merged with process.env */
+    env?: Record<string, string>
+    /** Timeout in ms. Default: task-level timeout or no timeout. */
+    timeout?: number
+  }
+
+  /**
    * Human-in-the-Loop: when true, the task parks at 'queued' until a human
    * approves or rejects via POST /hitl/:runId/:taskId.
    * Approved → task executes (or succeeds immediately if no `run` body).

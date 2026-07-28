@@ -48,8 +48,8 @@ export function analyzeWarnings(dag: DagDefinition, now = new Date()): DagWarnin
   }
 
   for (const [taskId, task] of Object.entries(dag.tasks)) {
-    // Task has no executable logic (shell tasks count as run logic)
-    if (!task.run && !task.poke && !task.shell && !Array.isArray(task.expand)) {
+    // Task has no executable logic (shell and python tasks count as run logic)
+    if (!task.run && !task.poke && !task.shell && !task.python && !Array.isArray(task.expand)) {
       warn('no_run_logic',
         `Task '${taskId}' has no run, poke, or expand — it will succeed immediately`,
         [taskId])

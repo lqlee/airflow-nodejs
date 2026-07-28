@@ -7,3 +7,4 @@ dist/
 .bun-binary
 .bun-cache/
 .docker-debs/
+.docker-debs-python/

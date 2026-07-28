@@ -462,45 +462,78 @@ Comparison against the Apache Airflow 3.x web UI. Items are grouped by priority.
 
 ---
 
-## Docker Images — Offline Pull Reference
+## Shell Task Support
 
-All images used by airflow-nodejs and the side-by-side Apache Airflow stack.
-Pull these on a public network, then retag for use on Walmart network.
+Shell tasks run a command string via a configurable interpreter instead of a JavaScript function.
 
-### Pull (public network)
+### Usage
 
-```bash
-docker pull node:22-alpine3.21      # Stage 1: npm install / deps
-docker pull oven/bun:1.3-slim       # Stage 2: runtime (Debian slim, bash included)
-docker pull mongo:7                 # MongoDB — local dev datastore
-docker pull redis:7-alpine          # Redis — optional, only for BullMQ distributed mode
-docker pull apache/airflow:3.0.0    # Apache Airflow 3.x — side-by-side comparison only
+```js
+export default dag({
+  id: 'my_dag',
+  schedule: null,
+  tasks: {
+    greet: {
+      shell: {
+        command: 'echo "Hello from $TASK_ID in run $RUN_ID"',
+        interpreter: 'bash',   // optional — defaults to 'bash'
+        cwd: '/tmp',           // optional working directory
+        env: { FOO: 'bar' },   // optional extra env vars
+        timeout: 10000,        // optional ms timeout
+      }
+    }
+  }
+});
 ```
 
-One-liner:
+### Injected environment variables
+
+Every shell task receives these env vars automatically:
+
+| Variable | Value |
+|---|---|
+| `DAG_ID` | The DAG id |
+| `RUN_ID` | The current run id (MongoDB ObjectId hex) |
+| `TASK_ID` | The task id within the DAG |
+
+### Supported interpreters
+
+All four shells are pre-installed in the official `airflow-nodejs:local` Docker image (90 MB, Debian slim base):
+
+| Interpreter | Binary | Version | Notes |
+|---|---|---|---|
+| `sh` | `/usr/bin/sh` | POSIX sh (dash) | Always available; use for maximum portability |
+| `bash` | `/usr/bin/bash` | 5.2.37 | **Default** — used when `interpreter` is omitted |
+| `zsh` | `/usr/bin/zsh` | 5.9 | Z shell; supports arrays, globbing extensions |
+| `tcsh` | `/usr/bin/tcsh` | 6.24.13 | C shell variant |
+
+Any absolute path also works (e.g. `interpreter: '/usr/bin/python3'`).
+
+### How shells are installed (offline / Walmart network)
+
+`bash` is pre-installed in `oven/bun:1.3-slim`. `zsh` and `tcsh` are installed via
+pre-downloaded `.deb` packages copied into the image at build time — no network access
+needed during `docker build`.
+
+**`.docker-debs/`** — local folder (git-ignored) that holds the `.deb` files used by the
+Dockerfile. Must exist on the build machine before running `docker-build.sh`.
+Download it once on a public network with:
+
 ```bash
-docker pull node:22-alpine3.21 && \
-docker pull oven/bun:1.3-slim && \
-docker pull mongo:7 && \
-docker pull redis:7-alpine && \
-docker pull apache/airflow:3.0.0
+./scripts/download-shell-debs.sh           # auto-detects host arch (arm64 / amd64)
+./scripts/download-shell-debs.sh amd64     # force x86 debs
+./scripts/download-shell-debs.sh arm64     # force ARM debs
 ```
 
-### Retag for Walmart network
+Re-run whenever the base image Debian version changes or packages need updating.
 
-After pulling on public WiFi, retag so the Dockerfile and docker-compose files work
-unchanged on the Walmart network (they reference the internal mirror URLs):
+### Exit codes and retries
 
-```bash
-docker tag node:22-alpine3.21   generic.ci.artifacts.walmart.com/hub-docker-release-remote/node:22-alpine3.21
-docker tag oven/bun:1.3-slim    generic.ci.artifacts.walmart.com/hub-docker-release-remote/oven/bun:1.3-slim
-docker tag mongo:7              generic.ci.artifacts.walmart.com/hub-docker-release-remote/mongo:7
-docker tag redis:7-alpine       generic.ci.artifacts.walmart.com/hub-docker-release-remote/redis:7-alpine
-docker tag apache/airflow:3.0.0 generic.ci.artifacts.walmart.com/hub-docker-release-remote/apache/airflow:3.0.0
-```
+- Exit `0` → task marked **success**
+- Non-zero exit → task marked **failed** (last 5 lines of stderr included in error message)
+- Retries and timeouts work the same as JS tasks — set `retries` and `timeout` on the task definition
+- `ENOENT` (interpreter not found) surfaces as: `Shell interpreter 'zsh' not found — install it or use 'sh'`
 
-### Notes
+### stdout / stderr
 
-- `oven/bun:1.3-slim` (Debian slim) ships with `bash` — required for shell tasks with `interpreter: 'bash'`.
-- `redis` is only needed when `REDIS_URL` is set in `.env` (BullMQ distributed mode). Local dev uses in-process execution with no Redis.
-- `apache/airflow:3.0.0` is only used by `apache-airflow/docker-compose.local.yml` for comparison testing.
+Both streams are captured line-by-line and written to task logs, visible in the UI **Log** panel.

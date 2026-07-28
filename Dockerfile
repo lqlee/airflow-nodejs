@@ -29,12 +29,26 @@ RUN npm ci --omit=dev
 
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
-# bun:1.3-slim is Debian-based and ships with bash pre-installed.
-# Shells available for shell tasks:
-#   /bin/sh    — always available (POSIX sh)
-#   /bin/bash  — included in this image (default for shell tasks)
-#   zsh/tcsh   — not included; extend this image with apt-get if a Debian mirror is accessible
+# bun:1.3-slim is Debian-based. Shells available for shell tasks:
+#   sh    — always available (POSIX sh)
+#   bash  — default interpreter, pre-installed in bun:1.3-slim
+#   zsh   — installed from pre-downloaded .deb (no network needed)
+#   tcsh  — installed from pre-downloaded .deb (no network needed)
+#
+# .deb files in .docker-debs/ were downloaded from snapshot.debian.org on a
+# public network and committed to the repo for offline builds.
+# To refresh: scripts/download-shell-debs.sh
 FROM --platform=${TARGETPLATFORM:-linux/arm64} generic.ci.artifacts.walmart.com/hub-docker-release-remote/oven/bun:1.3-slim AS runtime
+
+# Install extra shells via pre-downloaded .deb packages (no apt/network needed)
+COPY .docker-debs/ /tmp/debs/
+RUN dpkg -i \
+      /tmp/debs/libtinfo6_*.deb \
+      /tmp/debs/libncursesw6_*.deb \
+      /tmp/debs/zsh-common_*.deb \
+      /tmp/debs/zsh_*.deb \
+      /tmp/debs/tcsh_*.deb && \
+    rm -rf /tmp/debs
 
 # Security: non-root user (useradd is available on Debian)
 RUN groupadd -r airflow && useradd -r -g airflow airflow

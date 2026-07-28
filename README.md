@@ -424,3 +424,38 @@ The server handles `SIGTERM` and `SIGINT` with a bounded drain sequence:
 5. Exit 0
 
 Timeout: 20s (`DRAIN_TIMEOUT_MS`). Second signal forces exit 1.
+
+---
+
+## UI TODO — Feature Gaps vs Apache Airflow 3.x
+
+Comparison against the Apache Airflow 3.x web UI. Items are grouped by priority.
+
+### 🔴 High value
+
+| Feature | Airflow 3.x | Status |
+|---|---|---|
+| **DAG search / filter bar** | Search + tag + owner filters on DAG list | ❌ not implemented |
+| **Grid view** | Per-task color grid across historical runs (run × task heatmap) | ❌ not implemented |
+| **Task instance actions** | Re-run, clear, mark success/failed per task | ❌ click shows logs only |
+| **Run clear / re-run** | Clear whole run or subset of tasks | ❌ cancel only |
+| **Last run badge on DAG card** | Colored last-run state badge directly on each DAG card | ❌ shown only inside runs list |
+| **DAG tags display** | Tags shown on DAG card, filterable | ❌ stored in DB, not shown in UI |
+
+### 🟡 Medium value
+
+| Feature | Airflow 3.x | Status |
+|---|---|---|
+| **Event log page** | Searchable audit log of all Airflow events | ❌ API exists (`/event-logs`), no UI page |
+| **Dataset/Asset lineage view** | Visual dependency graph across datasets | ❌ API exists (`/datasets`), no UI |
+| **DAG code viewer** | Show raw DAG source file in UI | ❌ not exposed |
+| **Calendar view** | Run frequency heatmap calendar per DAG | ❌ not implemented |
+| **Gantt chart** | Task duration Gantt chart per run | ❌ not implemented |
+
+### 🟢 Nice-to-have
+
+| Feature | Airflow 3.x | Status |
+|---|---|---|
+| **Dark / light theme toggle** | User-selectable theme | ❌ dark only |
+| **Cluster activity panel** | Live breakdown of scheduler / worker health | ⚠️ partial (workers badge in header) |
+| **DAG owner column** | Owner shown on DAG list and card | ❌ not shown |

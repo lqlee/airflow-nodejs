@@ -323,12 +323,13 @@ A single `Dockerfile` produces all variants via the `--variant` flag:
 
 | Image tag | `--variant` | Runtimes | Size |
 |---|---|---|---|
-| `airflow-nodejs:local` | *(default)* | sh, bash, zsh, tcsh | ~90 MB |
+| `airflow-nodejs:local` | *(default)* | sh, bash, zsh, tcsh, docker CLI | ~105 MB |
 | `airflow-nodejs:python` | `python` | + Python 3.13 | ~114 MB |
 | `airflow-nodejs:java21` | `java` | + Python 3.13 + JDK 21 LTS | ~225 MB |
 | `airflow-nodejs:java25` | `java --jdk 25` | + Python 3.13 + JDK 25 | ~249 MB |
 
-> **JDK 25** runs JARs compiled for any Java version (8/11/17/21/25) — use it as a universal Java image.
+> **All variants include the Docker CLI** — container tasks (`container:` field) work in any variant as long as the Docker socket is mounted.
+> **JDK 25** runs JARs compiled for any Java version (8/11/17/21/25).
 
 ### Prerequisites (one-time, on public WiFi)
 
@@ -409,15 +410,169 @@ ADMIN_KEY=airflow
 # 1. Start MongoDB
 docker-compose up -d mongo
 
-# 2. Run the app
+# 2. Run the app (shell/python/java tasks only)
 docker run -p 3000:3000 --env-file .env \
   -v $(pwd)/dags:/app/dags \
+  airflow-nodejs:local
+
+# 3. Run with container task support (mounts Docker socket)
+DOCKER_GID=$(stat -c %g /var/run/docker.sock 2>/dev/null || stat -f %g /var/run/docker.sock)
+docker run -p 3000:3000 --env-file .env \
+  -v $(pwd)/dags:/app/dags \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --group-add $DOCKER_GID \
   airflow-nodejs:local
 ```
 
 Open **http://localhost:3000** — use `Authorization: Bearer airflow` for authenticated endpoints.
 
 > **Production:** replace `ENCRYPTION_KEY` with `openssl rand -hex 32` and use a strong `ADMIN_KEY`. The encryption key must be kept stable across restarts — it decrypts stored connections and variables.
+
+### Container tasks
+
+Container tasks run each task in its own Docker container — any language, any image, zero changes to the server. The server image stays lean; each task brings its own runtime.
+
+`DAG_ID`, `RUN_ID`, and `TASK_ID` are injected as environment variables into every container. stdout/stderr are captured line-by-line to task logs.
+
+#### Language examples
+
+```js
+export default dag({
+  id: 'polyglot_pipeline',
+  tasks: {
+
+    // ── Python ──────────────────────────────────────────────────────────────
+    python_step: {
+      container: {
+        image: 'python:3.13-slim',
+        command: ['python3', '-c', `
+import os, json
+print(f"Python task: DAG={os.environ['DAG_ID']} RUN={os.environ['RUN_ID']}")
+result = {"rows": 42, "status": "ok"}
+print(json.dumps(result))
+        `.trim()],
+      }
+    },
+
+    // ── Ruby ────────────────────────────────────────────────────────────────
+    ruby_step: {
+      dependsOn: ['python_step'],
+      container: {
+        image: 'ruby:3.3-slim',
+        command: ['ruby', '-e', `
+require 'json'
+puts "Ruby #{RUBY_VERSION} — task=#{ENV['TASK_ID']}"
+puts JSON.generate({status: 'processed', run: ENV['RUN_ID']})
+        `.trim()],
+      }
+    },
+
+    // ── Perl ────────────────────────────────────────────────────────────────
+    perl_step: {
+      dependsOn: ['python_step'],
+      container: {
+        image: 'perl:5.40-slim',
+        command: ['perl', '-e', `
+use strict; use warnings; use JSON::PP;
+printf "Perl %s — task=%s\\n", $], $ENV{TASK_ID};
+print encode_json({status => 'ok', run => $ENV{RUN_ID}}), "\\n";
+        `.trim()],
+      }
+    },
+
+    // ── Rust (pre-compiled binary in dags/jobs/) ─────────────────────────
+    // Build: GOOS=linux GOARCH=arm64 cargo build --release
+    rust_step: {
+      dependsOn: ['ruby_step'],
+      container: {
+        image: 'alpine:3.20',               // musl-linked binary runs on Alpine
+        command: ['/jobs/my-rust-tool', '--run-id', '$RUN_ID'],
+        volumes: ['$(pwd)/dags/jobs:/jobs'], // mount compiled binary
+      }
+    },
+
+    // ── Go (pre-compiled binary) ─────────────────────────────────────────
+    go_step: {
+      dependsOn: ['perl_step'],
+      container: {
+        image: 'alpine:3.20',
+        command: ['/jobs/my-go-tool', '--dag', '$DAG_ID'],
+        volumes: ['$(pwd)/dags/jobs:/jobs'],
+      }
+    },
+
+    // ── R ───────────────────────────────────────────────────────────────────
+    r_step: {
+      dependsOn: ['ruby_step'],
+      container: {
+        image: 'r-base:4.4',
+        command: ['Rscript', '-e', `
+cat("R", R.version$major, ".", R.version$minor, "\\n", sep="")
+cat("task:", Sys.getenv("TASK_ID"), "\\n")
+        `.trim()],
+      }
+    },
+
+    // ── Node.js (different version than server) ──────────────────────────
+    node_step: {
+      dependsOn: ['go_step'],
+      container: {
+        image: 'node:22-alpine',
+        command: ['node', '-e', `
+const {DAG_ID, RUN_ID, TASK_ID} = process.env;
+console.log('Node', process.version, '— task:', TASK_ID);
+console.log(JSON.stringify({dagId: DAG_ID, runId: RUN_ID}));
+        `.trim()],
+      }
+    },
+
+    // ── PHP ──────────────────────────────────────────────────────────────────
+    php_step: {
+      dependsOn: ['node_step'],
+      container: {
+        image: 'php:8.3-cli-alpine',
+        command: ['php', '-r', `
+echo "PHP " . PHP_VERSION . " — task=" . getenv("TASK_ID") . "\n";
+echo json_encode(["status" => "ok", "run" => getenv("RUN_ID")]) . "\n";
+        `.trim()],
+      }
+    },
+
+    // ── With custom env vars and shared volume ───────────────────────────
+    final_step: {
+      dependsOn: ['r_step', 'php_step'],
+      container: {
+        image: 'alpine:3.20',
+        command: ['sh', '-c', 'echo "All done. DB=$DB_HOST ENV=$APP_ENV RUN=$RUN_ID"'],
+        env: { DB_HOST: 'prod-db.internal', APP_ENV: 'production' },
+        volumes: ['/shared/output:/output'],   // share results with host
+        timeout: 30000,                         // 30s timeout
+      }
+    },
+
+  }
+});
+```
+
+> **On Walmart network:** public registries (`python:3.13-slim`, `ruby:3.3-slim`, etc.) are blocked.
+> Prefix images with the internal mirror: `generic.ci.artifacts.walmart.com/hub-docker-release-remote/<image>`.
+> Pull images on public WiFi first, then retag.
+
+> **Compiled binaries (Rust/Go/C):** cross-compile for the container's CPU arch and drop in `dags/jobs/`.
+> The `dags/` volume is already mounted — binaries are available immediately without a server rebuild.
+> ```bash
+> # Rust for ARM64 (Apple Silicon host → ARM container)
+> cargo build --release --target aarch64-unknown-linux-musl
+> cp target/aarch64-unknown-linux-musl/release/my-tool dags/jobs/
+>
+> # Go for ARM64
+> GOOS=linux GOARCH=arm64 go build -o dags/jobs/my-tool ./cmd/tool
+> ```
+
+**Requirements for container tasks:**
+- Server started with Docker socket mounted and `--group-add $(stat -c %g /var/run/docker.sock)`
+- Images must be pre-pulled or available in your Docker registry
+- XCom is not available in container tasks — use shared volumes or env vars to pass data between tasks
 
 ### Full stack (MongoDB + app)
 

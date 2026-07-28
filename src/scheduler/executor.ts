@@ -54,6 +54,11 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     return executeJavaTask(db, ti, taskDef.java)
   }
 
+  // Container task — run in an isolated Docker container via Docker socket
+  if (taskDef.container) {
+    return executeContainerTask(db, ti, taskDef.container)
+  }
+
   // HITL approval-only tasks (no run body) — succeed immediately after approval
   if (ti.is_hitl && !taskDef.run && !taskDef.poke) {
     void recordTry(db, ti, 'success', new Date())
@@ -220,6 +225,12 @@ interface SpawnOpts {
   timeoutMs: number
   /** Human-readable name for timeout error message, e.g. 'Shell' or 'Python' */
   kind: string
+  /**
+   * Optional callback invoked when the timeout fires, before SIGTERM.
+   * Used by container tasks to `docker kill` the running container by name,
+   * since killing the `docker run` client process alone doesn't stop the container.
+   */
+  onTimeout?: () => void
 }
 
 /**
@@ -251,6 +262,7 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
     if (opts.timeoutMs > 0) {
       killTimer = setTimeout(() => {
         timedOut = true
+        opts.onTimeout?.()   // e.g. docker kill <container-name> for container tasks
         child.kill('SIGTERM')
         const msg = `${opts.kind} task timed out after ${opts.timeoutMs}ms`
         console.error(`[executor] ⏱ ${ti.dag_id}.${ti.task_id}: ${msg}`)
@@ -318,6 +330,70 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
       }
       done()
     })
+  })
+}
+
+// ── Container task ────────────────────────────────────────────────────────────
+
+async function executeContainerTask(
+  db: Db,
+  ti: TaskInstance,
+  container: NonNullable<import('../dag/types.js').TaskDefinition['container']>,
+): Promise<void> {
+  // Unique container name — allows `docker kill <name>` on timeout
+  const containerName = `airflow-${ti.dag_run_id}-${ti.task_id}`.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 64)
+
+  const args: string[] = [
+    'run', '--rm',
+    '--name', containerName,
+    // Inject context env vars
+    '-e', `DAG_ID=${ti.dag_id}`,
+    '-e', `RUN_ID=${ti.dag_run_id}`,
+    '-e', `TASK_ID=${ti.task_id}`,
+  ]
+
+  // Extra env vars
+  for (const [k, v] of Object.entries(container.env ?? {})) {
+    args.push('-e', `${k}=${v}`)
+  }
+
+  // Volume mounts
+  for (const vol of container.volumes ?? []) {
+    args.push('-v', vol)
+  }
+
+  // Working directory
+  if (container.workdir) {
+    args.push('-w', container.workdir)
+  }
+
+  // Network
+  if (container.network) {
+    args.push('--network', container.network)
+  }
+
+  // Image
+  args.push(container.image)
+
+  // Command override
+  if (container.command?.length) {
+    args.push(...container.command)
+  }
+
+  const timeoutMs = container.timeout ?? (ti.timeout_ms > 0 ? ti.timeout_ms : 0)
+
+  // For container tasks, timeout kills the container by name (not just the `docker run` client process)
+  const killContainer = () => {
+    spawn('docker', ['kill', containerName], { stdio: 'ignore' })
+  }
+
+  return spawnTask(db, ti, {
+    label:     `container(${container.image})`,
+    binary:    'docker',
+    args,
+    timeoutMs,
+    kind:      'Container',
+    onTimeout: killContainer,
   })
 }
 

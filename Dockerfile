@@ -50,7 +50,10 @@ RUN npm ci --omit=dev
 # ══════════════════════════════════════════════════════════════════════════════
 FROM --platform=${TARGETPLATFORM:-linux/arm64} generic.ci.artifacts.walmart.com/hub-docker-release-remote/oven/bun:1.3-slim AS stage-base
 
-# bash is pre-installed in bun:1.3-slim; install zsh + tcsh from .docker-debs/
+# bash is pre-installed in bun:1.3-slim.
+# Install from .docker-debs/:
+#   zsh, tcsh          — shell task interpreters
+#   docker-cli         — required for container tasks (docker run per task)
 COPY .docker-debs/ /tmp/debs/
 RUN dpkg -i --force-depends /tmp/debs/*.deb && dpkg --configure -a && rm -rf /tmp/debs
 
@@ -83,7 +86,19 @@ RUN java -version 2>&1 | head -1
 # ══════════════════════════════════════════════════════════════════════════════
 FROM stage-${VARIANT} AS runtime
 
-RUN groupadd -r airflow && useradd -r -g airflow airflow
+# DOCKER_GID: GID of the docker socket on the host (/var/run/docker.sock).
+# Set this to enable container tasks (docker run per task).
+# Find it with: stat -c %g /var/run/docker.sock   (Linux)
+#               stat -f %g /var/run/docker.sock   (macOS)
+# Leave as 0 if container tasks are not needed (socket not mounted).
+ARG DOCKER_GID=0
+
+# Create airflow user; optionally add to the docker socket group.
+RUN groupadd -r airflow && useradd -r -g airflow airflow && \
+    if [ "${DOCKER_GID}" != "0" ]; then \
+      groupadd -g "${DOCKER_GID}" docker-socket 2>/dev/null || true && \
+      usermod -aG "docker-socket" airflow; \
+    fi
 
 WORKDIR /app
 

@@ -25,15 +25,18 @@ set -e
 PLATFORM=""
 VARIANT=""
 JDK_VER="21"
+DOCKER_GID="0"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --platform)     PLATFORM="$2";  shift 2 ;;
+    --platform)     PLATFORM="$2";    shift 2 ;;
     --platform=*)   PLATFORM="${1#--platform=}"; shift ;;
-    --variant)      VARIANT="$2";   shift 2 ;;
+    --variant)      VARIANT="$2";     shift 2 ;;
     --variant=*)    VARIANT="${1#--variant=}"; shift ;;
-    --jdk)          JDK_VER="$2";   shift 2 ;;
+    --jdk)          JDK_VER="$2";     shift 2 ;;
     --jdk=*)        JDK_VER="${1#--jdk=}"; shift ;;
+    --docker-gid)   DOCKER_GID="$2";  shift 2 ;;
+    --docker-gid=*) DOCKER_GID="${1#--docker-gid=}"; shift ;;
     *)              echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -106,6 +109,7 @@ docker build \
   --build-arg TARGETPLATFORM="$PLATFORM" \
   --build-arg VARIANT="${VARIANT:-base}" \
   --build-arg JDK_VER="$JDK_VER" \
+  --build-arg DOCKER_GID="$DOCKER_GID" \
   -t "$TAG" \
   .
 
@@ -123,10 +127,11 @@ echo "    -e ADMIN_KEY=my-bootstrap-key \\"
 echo "    -v \$(pwd)/dags:/app/dags \\"
 echo "    $TAG"
 echo ""
-echo "To build for a different platform or variant:"
-echo "  ./docker-build.sh --platform linux/amd64                   # x86 servers"
-echo "  ./docker-build.sh --platform linux/arm64                   # ARM (Apple Silicon / Graviton)"
-echo "  ./docker-build.sh --variant python                         # adds python3.13 (~114 MB)"
-echo "  ./docker-build.sh --variant java                           # python3 + JDK 21 (~225 MB)"
-echo "  ./docker-build.sh --variant java --jdk 25                  # python3 + JDK 25 (~240 MB)"
-echo "  ./docker-build.sh --variant java --jdk 25 --platform linux/amd64"
+echo "To build for a different platform, variant, or with container task support:"
+echo "  ./docker-build.sh --platform linux/amd64                              # x86 servers"
+echo "  ./docker-build.sh --platform linux/arm64                              # ARM (Apple Silicon / Graviton)"
+echo "  ./docker-build.sh --variant python                                    # adds python3.13 (~114 MB)"
+echo "  ./docker-build.sh --variant java                                      # python3 + JDK 21 (~225 MB)"
+echo "  ./docker-build.sh --variant java --jdk 25                             # python3 + JDK 25 (~249 MB)"
+echo "  ./docker-build.sh --docker-gid \$(stat -c %g /var/run/docker.sock)     # enable container tasks (Linux)"
+echo "  ./docker-build.sh --docker-gid \$(stat -f %g /var/run/docker.sock)     # enable container tasks (macOS)"

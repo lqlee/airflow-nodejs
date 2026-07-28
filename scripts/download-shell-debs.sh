@@ -77,8 +77,8 @@ download() {
 # ── Shells ──────────────────────────────────────────────────────────────────────
 SHELL_DEST="$ROOT/.docker-debs"
 mkdir -p "$SHELL_DEST"
-echo "==> Downloading shell packages → $SHELL_DEST"
-for pkg in zsh zsh-common tcsh libncursesw6 libtinfo6; do
+echo "==> Downloading shell + docker-cli packages → $SHELL_DEST"
+for pkg in zsh zsh-common tcsh libncursesw6 libtinfo6 docker-cli; do
   download "$pkg" "$SHELL_DEST"
 done
 

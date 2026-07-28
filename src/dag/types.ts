@@ -200,6 +200,56 @@ export interface TaskDefinition {
   }
 
   /**
+   * Container task: run the task inside a Docker container.
+   * The server must have access to the Docker socket:
+   *   docker run -v /var/run/docker.sock:/var/run/docker.sock \
+   *              --group-add $(stat -c %g /var/run/docker.sock) \
+   *              airflow-nodejs:local
+   *
+   * The container is ephemeral (--rm). It exits when the command finishes.
+   * Exit code 0 = success; non-zero = failure.
+   * stdout/stderr are captured line-by-line to task logs.
+   *
+   * Environment variables injected automatically:
+   *   DAG_ID, RUN_ID, TASK_ID  — same as shell/python/java tasks
+   *
+   * Example:
+   *   container: {
+   *     image: 'python:3.13-slim',
+   *     command: ['python', '-c', 'print("hello from container")'],
+   *   }
+   *
+   * XCom between container tasks: not supported (container has no MongoDB access).
+   * Use shared volumes or environment variables to pass data between tasks.
+   *
+   * Cannot be combined with `run`, `poke`, `shell`, `python`, or `java`.
+   */
+  container?: {
+    /**
+     * Docker image to run. Must be pullable in the runtime environment.
+     * On Walmart network use the internal mirror prefix:
+     *   generic.ci.artifacts.walmart.com/hub-docker-release-remote/<image>
+     */
+    image: string
+    /** Command + args passed to the container. Overrides the image's default CMD. */
+    command?: string[]
+    /** Additional environment variables merged with DAG_ID/RUN_ID/TASK_ID. */
+    env?: Record<string, string>
+    /**
+     * Volume mounts: host-path:container-path pairs, e.g.
+     *   ['/data/input:/input', '/data/output:/output']
+     * The dags/ volume is NOT automatically mounted — add it here if needed.
+     */
+    volumes?: string[]
+    /** Working directory inside the container. */
+    workdir?: string
+    /** docker run --network value. Default: 'bridge'. */
+    network?: string
+    /** Timeout in ms. Default: task-level timeout or no timeout. */
+    timeout?: number
+  }
+
+  /**
    * Human-in-the-Loop: when true, the task parks at 'queued' until a human
    * approves or rejects via POST /hitl/:runId/:taskId.
    * Approved → task executes (or succeeds immediately if no `run` body).
@@ -241,6 +291,25 @@ export interface DagDefinition {
    * A dag with `datasets` keeps `schedule: null` — cron scheduling is ignored.
    */
   datasets?: string[]
+
+  /**
+   * Docker images required by container tasks in this dag.
+   * Each entry is either:
+   *   - A path to a .tar file (relative to dags/ or absolute):
+   *       './images/python-3.13-slim.tar'
+   *     The server runs `docker load -i <path>` when the dag is loaded.
+   *     Users export images offline: docker save python:3.13-slim -o python-3.13-slim.tar
+   *
+   *   - A plain image name (must already be present in the local Docker daemon):
+   *       'python:3.13-slim'
+   *     No action taken — the image is expected to exist at task execution time.
+   *
+   * Loading is idempotent — if the image from the tar is already present,
+   * docker load is a no-op (fast check, no re-extraction).
+   *
+   * If the Docker socket is not available, load is skipped with a warning.
+   */
+  requiredImages?: string[]
 
   /**
    * URL to POST to when a run completes successfully.

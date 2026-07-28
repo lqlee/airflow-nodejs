@@ -7,6 +7,7 @@ import { hashDagSource, recordDagVersion } from './version.js'
 import { expandGroups } from './taskgroups.js'
 import { setImportErrors, setDagWarnings, type ImportError } from './import-errors.js'
 import { analyzeWarnings, type DagWarning } from './warnings.js'
+import { ensureImages } from './images.js'
 import type { DagDefinition } from './types.js'
 
 const DAGS_DIR = resolve(process.cwd(), 'dags')
@@ -74,6 +75,11 @@ export async function loadDags(db?: Db): Promise<void> {
       if (db) {
         void recordDagVersion(db, dag.id, version, source, Object.keys(dag.tasks))
           .catch(() => {/* stub db in tests — swallow silently */})
+      }
+
+      // Load any user-supplied Docker image tarballs declared in requiredImages
+      if (dag.requiredImages?.length) {
+        void ensureImages(dag.id, dag.requiredImages)
       }
 
       // Analyze soft warnings on the successfully-loaded dag

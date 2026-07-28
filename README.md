@@ -459,3 +459,48 @@ Comparison against the Apache Airflow 3.x web UI. Items are grouped by priority.
 | **Dark / light theme toggle** | User-selectable theme | ❌ dark only |
 | **Cluster activity panel** | Live breakdown of scheduler / worker health | ⚠️ partial (workers badge in header) |
 | **DAG owner column** | Owner shown on DAG list and card | ❌ not shown |
+
+---
+
+## Docker Images — Offline Pull Reference
+
+All images used by airflow-nodejs and the side-by-side Apache Airflow stack.
+Pull these on a public network, then retag for use on Walmart network.
+
+### Pull (public network)
+
+```bash
+docker pull node:22-alpine3.21      # Stage 1: npm install / deps
+docker pull oven/bun:1.3-slim       # Stage 2: runtime (Debian slim, bash included)
+docker pull mongo:7                 # MongoDB — local dev datastore
+docker pull redis:7-alpine          # Redis — optional, only for BullMQ distributed mode
+docker pull apache/airflow:3.0.0    # Apache Airflow 3.x — side-by-side comparison only
+```
+
+One-liner:
+```bash
+docker pull node:22-alpine3.21 && \
+docker pull oven/bun:1.3-slim && \
+docker pull mongo:7 && \
+docker pull redis:7-alpine && \
+docker pull apache/airflow:3.0.0
+```
+
+### Retag for Walmart network
+
+After pulling on public WiFi, retag so the Dockerfile and docker-compose files work
+unchanged on the Walmart network (they reference the internal mirror URLs):
+
+```bash
+docker tag node:22-alpine3.21   generic.ci.artifacts.walmart.com/hub-docker-release-remote/node:22-alpine3.21
+docker tag oven/bun:1.3-slim    generic.ci.artifacts.walmart.com/hub-docker-release-remote/oven/bun:1.3-slim
+docker tag mongo:7              generic.ci.artifacts.walmart.com/hub-docker-release-remote/mongo:7
+docker tag redis:7-alpine       generic.ci.artifacts.walmart.com/hub-docker-release-remote/redis:7-alpine
+docker tag apache/airflow:3.0.0 generic.ci.artifacts.walmart.com/hub-docker-release-remote/apache/airflow:3.0.0
+```
+
+### Notes
+
+- `oven/bun:1.3-slim` (Debian slim) ships with `bash` — required for shell tasks with `interpreter: 'bash'`.
+- `redis` is only needed when `REDIS_URL` is set in `.env` (BullMQ distributed mode). Local dev uses in-process execution with no Redis.
+- `apache/airflow:3.0.0` is only used by `apache-airflow/docker-compose.local.yml` for comparison testing.

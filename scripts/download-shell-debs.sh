@@ -3,27 +3,45 @@
 # Run this on a machine with public internet access.
 #
 # Usage:
-#   ./scripts/download-shell-debs.sh                # shells only (zsh, tcsh)
-#   ./scripts/download-shell-debs.sh --python       # also download python3.13
-#   ./scripts/download-shell-debs.sh arm64          # force arch
-#   ./scripts/download-shell-debs.sh amd64 --python
+#   ./scripts/download-shell-debs.sh                           # shells only (zsh, tcsh)
+#   ./scripts/download-shell-debs.sh --python                  # + python3.13
+#   ./scripts/download-shell-debs.sh --python --java           # + python3.13 + JRE 21 (default)
+#   ./scripts/download-shell-debs.sh --python --java --jdk 25  # + python3.13 + JRE 25
+#   ./scripts/download-shell-debs.sh arm64                     # force arch
+#   ./scripts/download-shell-debs.sh amd64 --python --java --jdk 25
+#
+# Supported JDK versions (Debian trixie): 21 (LTS), 25 (latest)
+# JDK 25 is backwards-compatible — runs JARs compiled for Java 8/11/17/21/25.
+# Use --jdk 25 for a single image that covers all Java target versions.
 #
 # Output:
-#   .docker-debs/         — shell debs (used by Dockerfile)
-#   .docker-debs-python/  — python3.13 debs (used by Dockerfile.python)
+#   .docker-debs/            — shell debs              (used by Dockerfile)
+#   .docker-debs-python/     — python3.13 debs         (used by Dockerfile.python)
+#   .docker-debs-java/       — OpenJDK JRE debs        (used by Dockerfile.java)
 
 set -e
 
 ARCH=""
 PYTHON=0
+JAVA=0
+JDK_VER="21"
 
 for arg in "$@"; do
   case "$arg" in
-    --python) PYTHON=1 ;;
+    --python)    PYTHON=1 ;;
+    --java)      JAVA=1; PYTHON=1 ;;   # java variant also needs python debs
+    --jdk)       shift ;;               # handled by next iteration
+    21|25)       JDK_VER="$arg" ;;
     arm64|aarch64) ARCH="arm64" ;;
     amd64|x86_64)  ARCH="amd64" ;;
     *) echo "Unknown argument: $arg" >&2; exit 1 ;;
   esac
+done
+
+# Handle --jdk <version> by re-parsing positional
+for i in "$@"; do
+  if [ "$PREV" = "--jdk" ]; then JDK_VER="$i"; fi
+  PREV="$i"
 done
 
 if [ -z "$ARCH" ]; then
@@ -33,6 +51,12 @@ if [ -z "$ARCH" ]; then
     x86_64|amd64)  ARCH="amd64" ;;
     *) echo "Unsupported arch: $HOST" >&2; exit 1 ;;
   esac
+fi
+
+if [ "$JDK_VER" != "21" ] && [ "$JDK_VER" != "25" ]; then
+  echo "ERROR: Unsupported JDK version '$JDK_VER'. Debian trixie only ships 21 and 25." >&2
+  echo "       For JDK 8/11/17 use an older Debian release (bullseye/bookworm)." >&2
+  exit 1
 fi
 
 BASE="http://snapshot.debian.org/archive/debian/20260505T000000Z"
@@ -46,7 +70,7 @@ download() {
   path=$(echo "$PKG_DATA" | awk "/^Package: $pkg$/{found=1} found && /^Filename:/{print \$2; exit}")
   if [ -z "$path" ]; then echo "  WARNING: $pkg not found in index"; return; fi
   fname=$(basename "$path")
-  printf "  %-55s" "$fname"
+  printf "  %-65s" "$fname"
   curl -sL "$BASE/$path" -o "$dest/$fname" && du -sh "$dest/$fname" | cut -f1 || echo "FAILED"
 }
 
@@ -58,7 +82,7 @@ for pkg in zsh zsh-common tcsh libncursesw6 libtinfo6; do
   download "$pkg" "$SHELL_DEST"
 done
 
-# ── Python ──────────────────────────────────────────────────────────────────────
+# ── Python 3.13 ──────────────────────────────────────────────────────────────────
 if [ "$PYTHON" = "1" ]; then
   PY_DEST="$ROOT/.docker-debs-python"
   mkdir -p "$PY_DEST"
@@ -74,9 +98,29 @@ if [ "$PYTHON" = "1" ]; then
   done
 fi
 
+# ── OpenJDK JRE headless ──────────────────────────────────────────────────────────
+if [ "$JAVA" = "1" ]; then
+  JAVA_DEST="$ROOT/.docker-debs-java"
+  mkdir -p "$JAVA_DEST"
+  echo "==> Downloading OpenJDK $JDK_VER JRE packages → $JAVA_DEST"
+  # Shared deps (same for JDK 21 and 25)
+  for pkg in \
+    ca-certificates ca-certificates-java java-common \
+    libjpeg62-turbo liblcms2-2 libnspr4 libnss3 \
+    libpcsclite1 libstdc++6 openssl util-linux; do
+    download "$pkg" "$JAVA_DEST"
+  done
+  # JDK-version-specific JRE package
+  download "openjdk-${JDK_VER}-jre-headless" "$JAVA_DEST"
+  echo "  JDK version: $JDK_VER"
+fi
+
 echo ""
 echo "==> Done."
 echo "    .docker-debs/:        $(ls "$SHELL_DEST"/*.deb 2>/dev/null | wc -l | tr -d ' ') files"
 if [ "$PYTHON" = "1" ]; then
   echo "    .docker-debs-python/: $(ls "$PY_DEST"/*.deb 2>/dev/null | wc -l | tr -d ' ') files"
+fi
+if [ "$JAVA" = "1" ]; then
+  echo "    .docker-debs-java/:   $(ls "$JAVA_DEST"/*.deb 2>/dev/null | wc -l | tr -d ' ') files  (JDK $JDK_VER)"
 fi

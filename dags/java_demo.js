@@ -3,42 +3,39 @@ import { dag } from 'airflow-nodejs/dag/types';
 /**
  * Demonstrates Java tasks — run a .jar file or a class from a classpath.
  *
- * IMPORTANT: Java is NOT bundled in any airflow-nodejs image (JRE is ~250 MB).
- * Options to provide Java:
- *   1. Build a custom image FROM airflow-nodejs:python with Java installed
- *   2. Volume-mount a JRE and set java.binary to its absolute path
- *   3. Run on a host that has Java on PATH
+ * Requires the java variant image:
+ *   ./docker-build.sh --variant java
+ *   docker run ... airflow-nodejs:java
  *
- * To test locally without a jar, use a shell task with javac + java:
- *   shell: { command: 'javac Hello.java && java Hello' }
+ * The java variant bundles OpenJDK 21 JRE headless.
+ * To compile .java source, you need a JDK (javac) — the JRE only runs .jar files.
  *
- * These examples assume 'java' is on PATH in the runtime environment.
+ * dags/jobs/hello.jar is a pre-compiled demo jar (run: javac Hello.java && jar cfe hello.jar Hello Hello.class)
+ *
+ * Context env vars available via System.getenv(): DAG_ID, RUN_ID, TASK_ID
  */
 export default dag({
   id: 'java_demo',
   schedule: null,  // manual trigger only
   tasks: {
 
-    // Run a pre-built jar
-    run_jar: {
+    // Run a pre-built jar — simplest and most common usage
+    hello_jar: {
       java: {
-        jar: '/app/dags/jobs/my-etl.jar',       // absolute path inside container
-        args: ['--date', '2024-01-01'],
-        jvmArgs: ['-Xmx512m', '-Denv=prod'],
-        // java.binary defaults to 'java' — set if JRE is not on PATH:
-        // binary: '/opt/jre/bin/java',
+        jar: '/app/dags/jobs/hello.jar',
+        args: ['--mode', 'demo', '--run', 'test'],
+        jvmArgs: ['-Xmx128m'],
       }
     },
 
-    // Run a class from a classpath
-    run_class: {
-      dependsOn: ['run_jar'],
+    // Run a class from an explicit classpath (same jar, different invocation style)
+    hello_class: {
+      dependsOn: ['hello_jar'],
       java: {
-        mainClass: 'com.example.MyJob',
-        classpath: ['/app/dags/jobs/my-lib.jar', '/app/dags/jobs/classes'],
-        args: ['--mode', 'batch'],
-        jvmArgs: ['-Xmx256m'],
-        env: { APP_ENV: 'production', REGION: 'us-central1' },
+        mainClass: 'Hello',
+        classpath: ['/app/dags/jobs/hello.jar'],
+        args: ['from-classpath'],
+        env: { APP_ENV: 'demo' },
       }
     },
 

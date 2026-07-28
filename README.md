@@ -509,23 +509,97 @@ All four shells are pre-installed in the official `airflow-nodejs:local` Docker 
 
 Any absolute path also works (e.g. `interpreter: '/usr/bin/python3'`).
 
-### How shells are installed (offline / Walmart network)
+### How runtime packages are installed (offline / Walmart network)
 
-`bash` is pre-installed in `oven/bun:1.3-slim`. `zsh` and `tcsh` are installed via
-pre-downloaded `.deb` packages copied into the image at build time — no network access
-needed during `docker build`.
+`docker build` runs on the **Walmart network where `apt-get` and Alpine `apk` are blocked**.
+The workaround: download the required Debian `.deb` files on a public network first,
+commit them into local git-ignored folders, then `COPY` + `dpkg -i` them during the build.
 
-**`.docker-debs/`** — local folder (git-ignored) that holds the `.deb` files used by the
-Dockerfile. Must exist on the build machine before running `docker-build.sh`.
-Download it once on a public network with:
+#### Folder layout
+
+| Folder | Contents | Used by |
+|---|---|---|
+| `.docker-debs/` | zsh, tcsh + libs | `Dockerfile` (base) |
+| `.docker-debs-python/` | Python 3.13 + libs | `Dockerfile.python` |
+| `.docker-debs-java/` | OpenJDK 21 JRE + libs | `Dockerfile.java` |
+
+All three folders are **git-ignored** — they must exist locally before building.
+
+#### Step-by-step: populate the folders (run on public WiFi)
 
 ```bash
-./scripts/download-shell-debs.sh           # auto-detects host arch (arm64 / amd64)
-./scripts/download-shell-debs.sh amd64     # force x86 debs
-./scripts/download-shell-debs.sh arm64     # force ARM debs
+# Step 1 — shells only (needed for ALL image variants)
+./scripts/download-shell-debs.sh
+
+# Step 2 — also download Python 3.13 (needed for :python and :java variants)
+./scripts/download-shell-debs.sh --python
+
+# Step 3 — also download OpenJDK JRE (needed for :java variant)
+./scripts/download-shell-debs.sh --java              # JDK 21 LTS (default)
+./scripts/download-shell-debs.sh --java --jdk 25     # JDK 25 (latest)
+
+# Or download everything in one shot:
+./scripts/download-shell-debs.sh --python --java             # JDK 21
+./scripts/download-shell-debs.sh --python --java --jdk 25    # JDK 25
+
+# Force a specific CPU architecture (default: auto-detect from host):
+./scripts/download-shell-debs.sh --python --java arm64   # ARM (Apple Silicon, Graviton)
+./scripts/download-shell-debs.sh --python --java amd64   # x86 servers
 ```
 
-Re-run whenever the base image Debian version changes or packages need updating.
+> **JDK version compatibility:** JDK 25 is fully backwards-compatible — the `:java25` image
+> can run JARs compiled for any earlier Java version (8, 11, 17, 21, 25).
+> Use `:java21` for LTS stability; use `:java25` if you need the latest features or want a
+> single image that covers all Java versions. Both images have identical dependency closures —
+> only the JRE binary itself differs.
+
+#### What `download-shell-debs.sh` does internally
+
+1. Fetches the Debian trixie package index from `snapshot.debian.org` (pinned snapshot date).
+2. Looks up the `.deb` filename for each required package by exact name.
+3. Downloads each `.deb` file into the appropriate local folder.
+4. Prints a summary of downloaded files and sizes.
+
+The pinned snapshot URL (`20260505T000000Z`) ensures reproducible builds — the same `.deb`
+versions are always downloaded regardless of when the script runs.
+
+#### Step-by-step: build an image after populating the folders
+
+```bash
+# Base image — shells only (sh, bash, zsh, tcsh)
+./docker-build.sh                          # arm64 (auto-detected)
+./docker-build.sh --platform linux/amd64   # x86
+
+# Python variant — adds python3.13
+./docker-build.sh --variant python
+./docker-build.sh --variant python --platform linux/amd64
+
+# Java variant — adds python3.13 + OpenJDK JRE
+./docker-build.sh --variant java                           # JDK 21 LTS → airflow-nodejs:java21
+./docker-build.sh --variant java --jdk 25                  # JDK 25     → airflow-nodejs:java25
+./docker-build.sh --variant java --platform linux/amd64    # x86 + JDK 21
+./docker-build.sh --variant java --jdk 25 --platform linux/amd64  # x86 + JDK 25
+```
+
+#### How to add a new package (e.g. `curl`, `git`, `ruby`)
+
+1. Find the package name in the Debian trixie index:
+   ```bash
+   BASE="http://snapshot.debian.org/archive/debian/20260505T000000Z"
+   curl -sL "$BASE/dists/trixie/main/binary-arm64/Packages.gz" | gunzip | grep "^Package: curl$" -A10
+   ```
+
+2. Add the package name to the appropriate `for pkg in ...` loop in `scripts/download-shell-debs.sh`.
+
+3. Add the corresponding `COPY` + `dpkg -i` line in the relevant `Dockerfile*`.
+
+4. Run the download script on public WiFi, then rebuild the image.
+
+#### Re-running after a base image update
+
+If `oven/bun:1.3-slim` is updated to a newer Debian version, some packages may already be
+present in the new base (or their versions may change). Re-run the download script with
+the new arch and rebuild to pick up compatible `.deb` versions.
 
 ### Exit codes and retries
 

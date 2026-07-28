@@ -8,3 +8,5 @@ dist/
 .bun-cache/
 .docker-debs/
 .docker-debs-python/
+.docker-debs-java/
+.docker-debs-java25/

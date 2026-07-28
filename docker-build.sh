@@ -40,12 +40,9 @@ else
   echo "==> Platform: $PLATFORM (explicit)"
 fi
 
-# ── Check compiled output ──────────────────────────────────────────────────────
-echo "==> Checking compiled output..."
-if [ ! -f "dist/main.js" ]; then
-  echo "ERROR: dist/main.js not found. Run 'npm run build' first." >&2
-  exit 1
-fi
+# ── Compile TypeScript ─────────────────────────────────────────────────────────
+echo "==> Compiling TypeScript (npm run build)..."
+npm run build
 echo "   dist/ ready ($(ls dist/ | wc -l | tr -d ' ') entries)"
 
 # ── Build ──────────────────────────────────────────────────────────────────────

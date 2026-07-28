@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import fastifyStatic from '@fastify/static'
 import fastifyRateLimit from '@fastify/rate-limit'
+import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { resolve, dirname } from 'node:path'
 import type { Db } from 'mongodb'
@@ -72,8 +73,20 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
   // Auth hook — runs before every API request
   app.addHook('preHandler', authHook)
 
-  // Serve web UI from public/
-  app.register(fastifyStatic, { root: PUBLIC_DIR, prefix: '/' })
+  // Serve static assets; disable automatic Cache-Control so we control it via onSend.
+  app.register(fastifyStatic, { root: PUBLIC_DIR, prefix: '/', cacheControl: false })
+
+  // Set cache headers per resource type:
+  // - index.html: no-store so browsers always fetch fresh HTML after image rebuild
+  // - everything else: 1 hour (assets are content-addressed or versioned by the browser)
+  app.addHook('onSend', async (req, reply, payload) => {
+    if (req.url === '/' || req.url === '/index.html') {
+      reply.header('Cache-Control', 'no-store, no-cache, must-revalidate')
+    } else if (!req.url.startsWith('/api/') && !req.url.startsWith('/dags')) {
+      reply.header('Cache-Control', 'public, max-age=3600')
+    }
+    return payload
+  })
 
   // All routes are registered inside after() so the rate-limit plugin
   // decorators are present when per-route config is evaluated.

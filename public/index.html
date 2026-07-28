@@ -77,8 +77,18 @@
     .xcom-key { color:#fbd38d; min-width:80px; flex-shrink:0; }
     .xcom-val { color:#e2e8f0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .xcom-ts { color:#4a5568; font-size:10px; flex-shrink:0; }
-    .dag-graph-wrap { overflow-x:auto; margin-top:4px; }
+    .dag-graph-wrap { position:relative; overflow:hidden; margin-top:4px; background:#0d1117; border-radius:6px; border:1px solid #2d3748; user-select:none; cursor:grab; }
+    .dag-graph-wrap.dragging { cursor:grabbing; }
     .dag-graph-wrap svg { display:block; }
+    .dag-graph-controls { position:absolute; top:8px; right:8px; display:flex; flex-direction:column; gap:4px; z-index:10; }
+    .dag-graph-controls button { width:28px; height:28px; background:#1a1d27; border:1px solid #2d3748; color:#a0aec0; font-size:14px; border-radius:4px; cursor:pointer; display:flex; align-items:center; justify-content:center; line-height:1; }
+    .dag-graph-controls button:hover { background:#2d3748; color:#e2e8f0; }
+    .dag-node { cursor:pointer; }
+    .dag-node:hover rect { filter:brightness(1.25); }
+    .dag-edge { transition:stroke 0.1s; }
+    .dag-edge:hover { stroke:#63b3ed !important; stroke-width:2.5 !important; }
+    @keyframes dag-dash { to { stroke-dashoffset: -20; } }
+    .edge-running { animation: dag-dash 0.8s linear infinite; stroke-dasharray: 6 4; }
     .dag-node { cursor:pointer; }
     .dag-node rect { rx:6; ry:6; stroke-width:2; }
     .dag-node text { font-family:monospace; font-size:11px; pointer-events:none; }
@@ -136,7 +146,7 @@
   .login-error { color:#fc8181; font-size:12px; margin-top:8px; }
 </style>
 <script type="text/babel">
-const { useState, useEffect, useCallback } = React;
+const { useState, useEffect, useCallback, useRef } = React;
 
 const BASE = '';
 const LS_KEY = 'airflow_api_key';
@@ -574,37 +584,131 @@ function topoLayers(tasks) {
 const GROUP_PALETTE = ['#1a2744','#1a2f1a','#2f1a2f','#2f2a1a','#1a2f2f','#2a1a1f'];
 const GROUP_LABEL_COLOR = ['#90cdf4','#68d391','#d6bcfa','#f6ad55','#81e6d9','#fc8181'];
 
-function DagGraph({ tasks, onClickTask }) {
-  const NODE_W = 130, NODE_H = 44, GAP_X = 70, GAP_Y = 16, PAD = 20;
-  const GROUP_PAD = 10, GROUP_LABEL_H = 16;
+// ── State icons (Unicode, no dependencies) ────────────────────────────
+const STATE_ICON = {
+  success:   '✓',
+  failed:    '✗',
+  running:   '▶',
+  queued:    '◷',
+  cancelled: '⊘',
+  skipped:   '↷',
+};
 
-  // Expand mapped tasks to unique node_ids before layout
+function DagGraph({ tasks, onClickTask }) {
+  const NODE_W = 148, NODE_H = 52, GAP_X = 80, GAP_Y = 20, PAD = 28;
+  const GROUP_PAD = 12, GROUP_LABEL_H = 18;
+
+  // ── Zoom / pan state ────────────────────────────────────────────────
+  const [vp, setVp] = useState({ tx: 0, ty: 0, k: 1 });
+  const wrapRef = useRef(null);
+  const dragRef = useRef(null);   // { startX, startY, startTx, startTy } | null
+
+  // ── Layout (unchanged) ──────────────────────────────────────────────
   const expanded = expandForGraph(tasks);
   const layers = topoLayers(expanded);
 
-  // Assign positions keyed by node_id (unique per instance)
   const pos = {};
+  const maxRows = layers.reduce((m, l) => Math.max(m, l.length), 0);
   layers.forEach((layer, col) => {
     const totalH = layer.length * NODE_H + (layer.length - 1) * GAP_Y;
     layer.forEach((nodeId, row) => {
       pos[nodeId] = {
         x: PAD + col * (NODE_W + GAP_X),
-        y: PAD + GROUP_LABEL_H + row * (NODE_H + GAP_Y) + (layers.reduce((m, l) => Math.max(m, l.length), 0) * (NODE_H + GAP_Y) - totalH) / 2,
+        y: PAD + GROUP_LABEL_H + row * (NODE_H + GAP_Y) + (maxRows * (NODE_H + GAP_Y) - totalH) / 2,
       };
     });
   });
 
-  const svgW = PAD * 2 + layers.length * NODE_W + (layers.length - 1) * GAP_X;
-  const maxRows = layers.reduce((m, l) => Math.max(m, l.length), 0);
-  const svgH = PAD * 2 + GROUP_LABEL_H + maxRows * NODE_H + (maxRows - 1) * GAP_Y;
+  const graphW = PAD * 2 + layers.length * NODE_W + Math.max(0, layers.length - 1) * GAP_X;
+  const graphH = PAD * 2 + GROUP_LABEL_H + maxRows * NODE_H + Math.max(0, maxRows - 1) * GAP_Y;
 
+  // ── Fit-to-viewport helper ──────────────────────────────────────────
+  // Use refs for graphW/graphH to avoid stale closure in the timeout
+  const graphSizeRef = useRef({ graphW, graphH });
+  graphSizeRef.current = { graphW, graphH };
+
+  const fitView = useCallback(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const { width: W, height: H } = wrap.getBoundingClientRect();
+    if (W === 0 || H === 0) return;
+    const { graphW: gW, graphH: gH } = graphSizeRef.current;
+    const k = Math.min(1, Math.min(W / gW, H / gH)) * 0.92;
+    setVp({ tx: (W - gW * k) / 2, ty: (H - gH * k) / 2, k });
+  }, []);
+
+  // Auto-fit on first render and when tasks change
+  useEffect(() => { const t = setTimeout(fitView, 80); return () => clearTimeout(t); }, [tasks, fitView]);
+
+  // ── Wheel zoom (anchored to cursor) ─────────────────────────────────
+  const onWheel = useCallback((e) => {
+    e.preventDefault();
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const rect = wrap.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const delta = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    setVp(prev => {
+      const k = Math.max(0.15, Math.min(4, prev.k * delta));
+      // Keep the point under the cursor fixed: solve for new tx,ty
+      const tx = mx - (mx - prev.tx) * (k / prev.k);
+      const ty = my - (my - prev.ty) * (k / prev.k);
+      return { tx, ty, k };
+    });
+  }, []);
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [onWheel]);
+
+  // ── Pointer drag (pan) ───────────────────────────────────────────────
+  const onPointerDown = useCallback((e) => {
+    if (e.button !== 0) return;
+    wrapRef.current?.classList.add('dragging');
+    dragRef.current = { startX: e.clientX, startY: e.clientY, startTx: vp.tx, startTy: vp.ty };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }, [vp.tx, vp.ty]);
+
+  const onPointerMove = useCallback((e) => {
+    if (!dragRef.current) return;
+    const dx = e.clientX - dragRef.current.startX;
+    const dy = e.clientY - dragRef.current.startY;
+    setVp(prev => ({ ...prev, tx: dragRef.current.startTx + dx, ty: dragRef.current.startTy + dy }));
+  }, []);
+
+  const onPointerUp = useCallback((e) => {
+    wrapRef.current?.classList.remove('dragging');
+    dragRef.current = null;
+  }, []);
+
+  // ── Click vs drag discrimination ────────────────────────────────────
+  // Store pointer-down position; if moved > 4px it was a drag, not a click
+  const clickOrigin = useRef(null);
+  const onNodePointerDown = useCallback((e, taskId) => {
+    clickOrigin.current = { x: e.clientX, y: e.clientY, taskId };
+  }, []);
+  const onNodePointerUp = useCallback((e) => {
+    if (!clickOrigin.current) return;
+    const dx = Math.abs(e.clientX - clickOrigin.current.x);
+    const dy = Math.abs(e.clientY - clickOrigin.current.y);
+    if (dx < 5 && dy < 5) onClickTask(clickOrigin.current.taskId);
+    clickOrigin.current = null;
+  }, [onClickTask]);
+
+  // ── Duration formatting ─────────────────────────────────────────────
   const dur = (t) => {
     if (!t.started_at) return '';
     const ms = new Date(t.ended_at ?? Date.now()) - new Date(t.started_at);
-    return ms < 1000 ? `${ms}ms` : `${(ms/1000).toFixed(1)}s`;
+    if (ms < 1000) return `${ms}ms`;
+    if (ms < 60000) return `${(ms/1000).toFixed(1)}s`;
+    return `${Math.floor(ms/60000)}m ${Math.round((ms%60000)/1000)}s`;
   };
 
-  // Compute group bounding boxes for background rects (keyed by node_id)
+  // ── Group bounding boxes ────────────────────────────────────────────
   const groups = {};
   expanded.forEach(t => {
     if (!t.group_id) return;
@@ -619,59 +723,113 @@ function DagGraph({ tasks, onClickTask }) {
   });
   const groupIds = Object.keys(groups);
 
+  const WRAP_H = Math.max(220, Math.min(520, graphH + 60));
+
   return (
-    <div className="dag-graph-wrap">
-      <svg width={svgW} height={svgH} style={{minWidth: svgW}}>
+    <div ref={wrapRef} className="dag-graph-wrap" style={{ height: WRAP_H }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+    >
+      {/* Zoom controls */}
+      <div className="dag-graph-controls" onPointerDown={e => e.stopPropagation()}>
+        <button title="Zoom in"  onClick={() => setVp(p => ({ ...p, k: Math.min(4, p.k * 1.2) }))}>+</button>
+        <button title="Zoom out" onClick={() => setVp(p => ({ ...p, k: Math.max(0.15, p.k / 1.2) }))}>−</button>
+        <button title="Fit to view" onClick={fitView}>⤢</button>
+      </div>
+
+      <svg width="100%" height="100%" style={{ overflow: 'visible' }}>
         <defs>
-          <marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-            <path d="M0,0 L6,3 L0,6 Z" fill="#4a5568" />
+          <marker id="arr" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+            <path d="M0,0 L7,3.5 L0,7 Z" fill="#4a5568" />
+          </marker>
+          <marker id="arr-hi" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+            <path d="M0,0 L7,3.5 L0,7 Z" fill="#63b3ed" />
           </marker>
         </defs>
-        {/* Group background rects (drawn before edges/nodes) */}
-        {groupIds.map((gid, i) => {
-          const { minX, minY, maxX, maxY } = groups[gid];
-          const rx = minX - GROUP_PAD, ry = minY - GROUP_LABEL_H - GROUP_PAD;
-          const rw = maxX - minX + GROUP_PAD * 2, rh = maxY - minY + GROUP_LABEL_H + GROUP_PAD * 2;
-          const fill = GROUP_PALETTE[i % GROUP_PALETTE.length];
-          const labelColor = GROUP_LABEL_COLOR[i % GROUP_LABEL_COLOR.length];
-          return (
-            <g key={gid}>
-              <rect x={rx} y={ry} width={rw} height={rh}
-                fill={fill} stroke={labelColor} strokeWidth="1" rx="8" ry="8" opacity="0.6" />
-              <text x={rx + 8} y={ry + 12} fill={labelColor} fontSize="10" fontFamily="monospace">{gid}</text>
-            </g>
-          );
-        })}
-        {/* Edges — use resolved_deps (expanded fan-out for mapped upstreams) */}
-        {expanded.map(t =>
-          (t.resolved_deps ?? []).map(dep => {
-            if (!pos[dep] || !pos[t.node_id]) return null;
-            const x1 = pos[dep].x + NODE_W, y1 = pos[dep].y + NODE_H / 2;
-            const x2 = pos[t.node_id].x,   y2 = pos[t.node_id].y + NODE_H / 2;
-            const cx = (x1 + x2) / 2;
+
+        <g transform={`translate(${vp.tx},${vp.ty}) scale(${vp.k})`}>
+
+          {/* Group background rects */}
+          {groupIds.map((gid, i) => {
+            const { minX, minY, maxX, maxY } = groups[gid];
+            const rx = minX - GROUP_PAD, ry = minY - GROUP_LABEL_H - GROUP_PAD;
+            const rw = maxX - minX + GROUP_PAD * 2, rh = maxY - minY + GROUP_LABEL_H + GROUP_PAD * 2;
+            const fill = GROUP_PALETTE[i % GROUP_PALETTE.length];
+            const lc   = GROUP_LABEL_COLOR[i % GROUP_LABEL_COLOR.length];
             return (
-              <path key={`${dep}->${t.node_id}`}
-                d={`M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}`}
-                fill="none" stroke="#4a5568" strokeWidth="1.5" markerEnd="url(#arr)" />
+              <g key={gid}>
+                <rect x={rx} y={ry} width={rw} height={rh}
+                  fill={fill} stroke={lc} strokeWidth="1" rx="10" opacity="0.55" />
+                <text x={rx + 10} y={ry + 13} fill={lc} fontSize="11" fontFamily="monospace" fontWeight="600">{gid}</text>
+              </g>
             );
-          })
-        )}
-        {/* Nodes — keyed by node_id, labelled with display_label */}
-        {expanded.map(t => {
-          const { x, y } = pos[t.node_id] ?? { x: 0, y: 0 };
-          const c = STATE_COLORS[t.state] ?? STATE_COLORS.queued;
-          const d = dur(t);
-          return (
-            <g key={t.node_id} className="dag-node" onClick={() => onClickTask(t.task_id)}
-              transform={`translate(${x},${y})`}>
-              <rect width={NODE_W} height={NODE_H} fill={c.fill} stroke={c.stroke} rx="6" ry="6" />
-              <text x={NODE_W/2} y={d ? 17 : NODE_H/2 + 4} textAnchor="middle" fill={c.text}>
-                {t.display_label.length > 14 ? t.display_label.slice(0, 13) + '…' : t.display_label}
-              </text>
-              {d && <text className="dur" x={NODE_W/2} y={30} textAnchor="middle">{d}</text>}
-            </g>
-          );
-        })}
+          })}
+
+          {/* Edges */}
+          {expanded.map(t =>
+            (t.resolved_deps ?? []).map(dep => {
+              if (!pos[dep] || !pos[t.node_id]) return null;
+              const x1 = pos[dep].x + NODE_W,     y1 = pos[dep].y + NODE_H / 2;
+              const x2 = pos[t.node_id].x,         y2 = pos[t.node_id].y + NODE_H / 2;
+              const cx = (x1 + x2) / 2;
+              const isRunning = t.state === 'running' || expanded.find(n => n.node_id === dep)?.state === 'running';
+              return (
+                <path key={`${dep}->${t.node_id}`}
+                  className={`dag-edge${isRunning ? ' edge-running' : ''}`}
+                  d={`M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}`}
+                  fill="none"
+                  stroke={isRunning ? '#4299e1' : '#4a5568'}
+                  strokeWidth={isRunning ? 2 : 1.5}
+                  markerEnd={isRunning ? 'url(#arr-hi)' : 'url(#arr)'}
+                />
+              );
+            })
+          )}
+
+          {/* Nodes */}
+          {expanded.map(t => {
+            const { x, y } = pos[t.node_id] ?? { x: 0, y: 0 };
+            const c = STATE_COLORS[t.state] ?? STATE_COLORS.queued;
+            const icon = STATE_ICON[t.state] ?? '';
+            const d = dur(t);
+            // Truncate label to fit node width
+            const maxChars = 14;
+            const label = t.display_label.length > maxChars
+              ? t.display_label.slice(0, maxChars - 1) + '…'
+              : t.display_label;
+            return (
+              <g key={t.node_id} className="dag-node"
+                transform={`translate(${x},${y})`}
+                onPointerDown={e => { e.stopPropagation(); onNodePointerDown(e, t.task_id); }}
+                onPointerUp={e => { e.stopPropagation(); onNodePointerUp(e); }}
+              >
+                {/* Drop shadow */}
+                <rect x="2" y="3" width={NODE_W} height={NODE_H} fill="rgba(0,0,0,0.35)" rx="8" />
+                {/* Main rect */}
+                <rect width={NODE_W} height={NODE_H}
+                  fill={c.fill} stroke={c.stroke} strokeWidth="1.5" rx="8" />
+                {/* Left state bar */}
+                <rect width="4" height={NODE_H} fill={c.stroke} rx="2" />
+                {/* Icon */}
+                <text x="14" y={NODE_H/2 + 5} fill={c.stroke} fontSize="13" fontWeight="bold">{icon}</text>
+                {/* Task label */}
+                <text x={NODE_W/2 + 6} y={d ? 18 : NODE_H/2 + 5}
+                  textAnchor="middle" fill={c.text} fontSize="12" fontFamily="monospace" fontWeight="600">
+                  {label}
+                </text>
+                {/* Duration */}
+                {d && (
+                  <text x={NODE_W/2 + 6} y={NODE_H - 9}
+                    textAnchor="middle" fill="#718096" fontSize="10" fontFamily="monospace">
+                    {d}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+
+        </g>
       </svg>
     </div>
   );
@@ -1317,13 +1475,16 @@ function App() {
     }).catch(() => setAuthed(true));
   }, []);
 
+  const fetchDags = useCallback(() =>
+    apiFetch(`${BASE}/dags`).then(r=>r.json()).then(d=>setDags(Array.isArray(d)?d:(d.items??[]))).catch(()=>{}), []);
+
+  useInterval(fetchDags, 5000);
+
   const handleLogin = () => setAuthed(true);
   const handleLogout = () => { localStorage.removeItem(LS_KEY); setAuthed(false); };
 
-  const fetchDags = useCallback(() =>
-    apiFetch(`${BASE}/dags`).then(r=>r.json()).then(setDags).catch(()=>{}), []);
-
-  useInterval(fetchDags, 5000);
+  // Fetch DAGs immediately when auth state becomes true (after login or on startup)
+  useEffect(() => { if (authed === true) fetchDags(); }, [authed]);
 
   const handleTrigger = () => { if (selectedDag) fetchDags(); };
   const handleTogglePause = () => fetchDags();

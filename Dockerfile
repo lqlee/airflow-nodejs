@@ -1,73 +1,97 @@
 # ── airflow-nodejs Dockerfile ─────────────────────────────────────────────────
 #
-# Multi-stage build:
-#   Stage 1 (deps): node:22-alpine — install production deps via npm + Walmart Artifactory
-#   Stage 2 (runtime): oven/bun:1.3-alpine — run with Bun for ESM module resolution
+# Single Dockerfile for all image variants — controlled by VARIANT build arg.
 #
-# Build prerequisites (run on host before `docker build`):
-#   npm run build    (compile TypeScript → dist/)
+# ┌────────────────┬────────────────────────────────────┬──────────┐
+# │ VARIANT        │ Runtimes included                  │ Size     │
+# ├────────────────┼────────────────────────────────────┼──────────┤
+# │ base (default) │ sh, bash, zsh, tcsh                │ ~90 MB   │
+# │ python         │ base + python 3.13                 │ ~114 MB  │
+# │ java           │ base + python 3.13 + JRE 21 (LTS)  │ ~225 MB  │
+# │ java (JDK 25)  │ base + python 3.13 + JRE 25       │ ~249 MB  │
+# └────────────────┴────────────────────────────────────┴──────────┘
 #
-# Platform:
-#   Default: auto-detected from host (arm64 on Apple Silicon, amd64 on x86)
-#   Override: docker build --build-arg TARGETPLATFORM=linux/amd64 .
-#   Or use docker-build.sh --platform linux/amd64
+# JDK 25 is backwards-compatible — runs JARs compiled for Java 8/11/17/21/25.
 #
-# TARGETPLATFORM is a Docker built-in ARG — set automatically when using
-# `docker buildx build --platform` or passed via --build-arg.
+# Build via docker-build.sh (recommended):
+#   ./docker-build.sh                            # base
+#   ./docker-build.sh --variant python           # python
+#   ./docker-build.sh --variant java             # java JDK 21
+#   ./docker-build.sh --variant java --jdk 25    # java JDK 25
+#
+# Or directly:
+#   docker build --build-arg VARIANT=base   -t airflow-nodejs:base .
+#   docker build --build-arg VARIANT=python -t airflow-nodejs:python .
+#   docker build --build-arg VARIANT=java   --build-arg JDK_VER=21 -t airflow-nodejs:java21 .
+#   docker build --build-arg VARIANT=java   --build-arg JDK_VER=25 -t airflow-nodejs:java25 .
+#
+# Prerequisites (.docker-debs-*/ folders are git-ignored, populate on public WiFi):
+#   ./scripts/download-shell-debs.sh                      # always required
+#   ./scripts/download-shell-debs.sh --python             # for python + java variants
+#   ./scripts/download-shell-debs.sh --java               # for java variant (JDK 21)
+#   ./scripts/download-shell-debs.sh --java --jdk 25      # for java variant (JDK 25)
+#
 ARG TARGETPLATFORM
+ARG VARIANT=base
+ARG JDK_VER=21
 
-# ── Stage 1: Install production deps ──────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Stage: npm deps (shared by all variants)
+# ══════════════════════════════════════════════════════════════════════════════
 FROM --platform=${TARGETPLATFORM:-linux/arm64} node:22-alpine3.21 AS deps
-
 WORKDIR /app
-
-# Copy package manifest, lockfile, and Walmart registry config
 COPY package.json package-lock.json .npmrc ./
-
-# Install production-only deps via Walmart's internal Artifactory npm registry
 RUN npm ci --omit=dev
 
 
-# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
-# bun:1.3-slim is Debian-based. Shells available for shell tasks:
-#   sh    — always available (POSIX sh)
-#   bash  — default interpreter, pre-installed in bun:1.3-slim
-#   zsh   — installed from pre-downloaded .deb (no network needed)
-#   tcsh  — installed from pre-downloaded .deb (no network needed)
-#
-# .deb files in .docker-debs/ were downloaded from snapshot.debian.org on a
-# public network and committed to the repo for offline builds.
-# To refresh: scripts/download-shell-debs.sh
-FROM --platform=${TARGETPLATFORM:-linux/arm64} generic.ci.artifacts.walmart.com/hub-docker-release-remote/oven/bun:1.3-slim AS runtime
+# ══════════════════════════════════════════════════════════════════════════════
+# Stage: base — shells only (sh/bash/zsh/tcsh)
+# ══════════════════════════════════════════════════════════════════════════════
+FROM --platform=${TARGETPLATFORM:-linux/arm64} generic.ci.artifacts.walmart.com/hub-docker-release-remote/oven/bun:1.3-slim AS stage-base
 
-# Install extra shells via pre-downloaded .deb packages (no apt/network needed)
+# bash is pre-installed in bun:1.3-slim; install zsh + tcsh from .docker-debs/
 COPY .docker-debs/ /tmp/debs/
-RUN dpkg -i \
-      /tmp/debs/libtinfo6_*.deb \
-      /tmp/debs/libncursesw6_*.deb \
-      /tmp/debs/zsh-common_*.deb \
-      /tmp/debs/zsh_*.deb \
-      /tmp/debs/tcsh_*.deb && \
-    rm -rf /tmp/debs
+RUN dpkg -i --force-depends /tmp/debs/*.deb && dpkg --configure -a && rm -rf /tmp/debs
 
-# Security: non-root user (useradd is available on Debian)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Stage: python — base + python 3.13
+# ══════════════════════════════════════════════════════════════════════════════
+FROM stage-base AS stage-python
+
+COPY .docker-debs-python/ /tmp/pydebs/
+RUN dpkg -i --force-depends /tmp/pydebs/*.deb && dpkg --configure -a && rm -rf /tmp/pydebs
+RUN python3 --version
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Stage: java — base + python 3.13 + OpenJDK JRE
+# JDK_VER=21 → LTS (runs Java 8–21 bytecode)
+# JDK_VER=25 → latest (runs Java 8–25 bytecode, backwards-compatible)
+# ══════════════════════════════════════════════════════════════════════════════
+FROM stage-python AS stage-java
+
+ARG JDK_VER=21
+COPY .docker-debs-java/ /tmp/javadebs/
+RUN dpkg -i --force-depends /tmp/javadebs/*.deb && dpkg --configure -a && rm -rf /tmp/javadebs
+RUN java -version 2>&1 | head -1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Final stage — select the right stage via VARIANT arg
+# ══════════════════════════════════════════════════════════════════════════════
+FROM stage-${VARIANT} AS runtime
+
 RUN groupadd -r airflow && useradd -r -g airflow airflow
 
 WORKDIR /app
 
-# Copy production node_modules from the deps stage
 COPY --from=deps /app/node_modules ./node_modules
-
-# Copy package.json (needed for Bun ESM module resolution)
 COPY package.json ./
-
-# Copy pre-compiled JavaScript (built on host with npm run build)
 COPY dist/ ./dist/
-
-# Copy static UI assets
 COPY public/ ./public/
 
-# Volume mount point for user dag files
 RUN mkdir -p /app/dags && chown -R airflow:airflow /app
 
 USER airflow

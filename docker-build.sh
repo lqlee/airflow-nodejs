@@ -66,56 +66,46 @@ echo "==> Compiling TypeScript (npm run build)..."
 npm run build
 echo "   dist/ ready ($(ls dist/ | wc -l | tr -d ' ') entries)"
 
-# ── Validate prerequisites & select Dockerfile ─────────────────────────────────
-if [ "$VARIANT" = "python" ]; then
-  TAG="airflow-nodejs:python"
-  DOCKERFILE="Dockerfile.python"
-  echo "==> Building Python variant: $TAG ..."
-  if [ ! -d ".docker-debs-python" ]; then
-    echo "ERROR: .docker-debs-python/ not found." >&2
-    echo "       Run: ./scripts/download-shell-debs.sh --python" >&2
-    exit 1
-  fi
-
-elif [ "$VARIANT" = "java" ]; then
-  TAG="airflow-nodejs:java${JDK_VER}"
-  DOCKERFILE="Dockerfile.java"
-  echo "==> Building Java variant: $TAG (python3 + JDK $JDK_VER) ..."
-  if [ ! -d ".docker-debs-python" ]; then
-    echo "ERROR: .docker-debs-python/ not found." >&2
-    echo "       Run: ./scripts/download-shell-debs.sh --python" >&2
-    exit 1
-  fi
-  if [ ! -d ".docker-debs-java" ]; then
-    echo "ERROR: .docker-debs-java/ not found." >&2
-    echo "       Run: ./scripts/download-shell-debs.sh --java [--jdk $JDK_VER]" >&2
-    exit 1
-  fi
-  # Verify the right JRE .deb is present
-  if ! ls .docker-debs-java/openjdk-${JDK_VER}-jre-headless_*.deb >/dev/null 2>&1; then
-    echo "ERROR: .docker-debs-java/ does not contain openjdk-${JDK_VER}-jre-headless_*.deb" >&2
-    echo "       Run: ./scripts/download-shell-debs.sh --java --jdk $JDK_VER" >&2
-    exit 1
-  fi
-
-else
-  TAG="airflow-nodejs:local"
-  DOCKERFILE="Dockerfile"
-  echo "==> Building base image: $TAG ..."
-fi
-
-# ── Check shell debs ───────────────────────────────────────────────────────────
+# ── Validate prerequisites ─────────────────────────────────────────────────────
 if [ ! -d ".docker-debs" ] || [ -z "$(ls .docker-debs/*.deb 2>/dev/null)" ]; then
   echo "ERROR: .docker-debs/ is missing or empty." >&2
   echo "       Run: ./scripts/download-shell-debs.sh" >&2
   exit 1
 fi
 
-# ── Build ──────────────────────────────────────────────────────────────────────
+if [ "$VARIANT" = "python" ] || [ "$VARIANT" = "java" ]; then
+  if [ ! -d ".docker-debs-python" ] || [ -z "$(ls .docker-debs-python/*.deb 2>/dev/null)" ]; then
+    echo "ERROR: .docker-debs-python/ is missing or empty." >&2
+    echo "       Run: ./scripts/download-shell-debs.sh --python" >&2
+    exit 1
+  fi
+fi
+
+if [ "$VARIANT" = "java" ]; then
+  if [ ! -d ".docker-debs-java" ] || [ -z "$(ls .docker-debs-java/*.deb 2>/dev/null)" ]; then
+    echo "ERROR: .docker-debs-java/ is missing or empty." >&2
+    echo "       Run: ./scripts/download-shell-debs.sh --java [--jdk $JDK_VER]" >&2
+    exit 1
+  fi
+  if ! ls ".docker-debs-java/openjdk-${JDK_VER}-jre-headless_"*.deb >/dev/null 2>&1; then
+    echo "ERROR: .docker-debs-java/ does not contain openjdk-${JDK_VER}-jre-headless_*.deb" >&2
+    echo "       Run: ./scripts/download-shell-debs.sh --java --jdk $JDK_VER" >&2
+    exit 1
+  fi
+fi
+
+# ── Select tag ─────────────────────────────────────────────────────────────────
+case "$VARIANT" in
+  python) TAG="airflow-nodejs:python";         echo "==> Building: $TAG (base + python 3.13)" ;;
+  java)   TAG="airflow-nodejs:java${JDK_VER}"; echo "==> Building: $TAG (base + python 3.13 + JDK $JDK_VER)" ;;
+  *)      TAG="airflow-nodejs:local";          echo "==> Building: $TAG (base — shells only)" ;;
+esac
+
+# ── Build (single Dockerfile, variant selected via --build-arg VARIANT) ────────
 docker build \
   --build-arg TARGETPLATFORM="$PLATFORM" \
+  --build-arg VARIANT="${VARIANT:-base}" \
   --build-arg JDK_VER="$JDK_VER" \
-  -f "$DOCKERFILE" \
   -t "$TAG" \
   .
 

@@ -317,29 +317,82 @@ npm test             # run all 618 tests (requires MongoDB at localhost:27017)
 
 ## Docker
 
-### Build the image (~56 MB)
+### Image variants
 
-`docker-build.sh` auto-detects your host CPU architecture and passes it to the Dockerfile.
+A single `Dockerfile` produces all variants via the `--variant` flag:
+
+| Image tag | `--variant` | Runtimes | Size |
+|---|---|---|---|
+| `airflow-nodejs:local` | *(default)* | sh, bash, zsh, tcsh | ~90 MB |
+| `airflow-nodejs:python` | `python` | + Python 3.13 | ~114 MB |
+| `airflow-nodejs:java21` | `java` | + Python 3.13 + JDK 21 LTS | ~225 MB |
+| `airflow-nodejs:java25` | `java --jdk 25` | + Python 3.13 + JDK 25 | ~249 MB |
+
+> **JDK 25** runs JARs compiled for any Java version (8/11/17/21/25) — use it as a universal Java image.
+
+### Prerequisites (one-time, on public WiFi)
+
+The Dockerfile copies pre-downloaded `.deb` packages instead of running `apt-get` (blocked on Walmart network). Download them once and they stay locally in git-ignored folders:
 
 ```bash
-npm run build                              # compile TypeScript → dist/ first
+# Required for ALL variants
+./scripts/download-shell-debs.sh
 
-./docker-build.sh                          # auto-detect (arm64 on Apple Silicon, amd64 on x86)
-./docker-build.sh --platform linux/amd64   # x86 / Intel deployment servers
-./docker-build.sh --platform linux/arm64   # ARM (AWS Graviton, Apple Silicon)
+# Required for python + java variants
+./scripts/download-shell-debs.sh --python
+
+# Required for java variant — choose JDK version:
+./scripts/download-shell-debs.sh --java            # JDK 21 LTS (default)
+./scripts/download-shell-debs.sh --java --jdk 25   # JDK 25 (runs Java 8–25 bytecode)
+
+# Download everything at once:
+./scripts/download-shell-debs.sh --python --java --jdk 25
 ```
 
-Or build directly with Docker:
+### Build the image
+
+`docker-build.sh` compiles TypeScript, validates prerequisites, and runs `docker build`:
 
 ```bash
-# ARM (Apple Silicon, AWS Graviton)
-docker build --build-arg TARGETPLATFORM=linux/arm64 -t airflow-nodejs .
+# Base image — shells only
+./docker-build.sh                               # arm64 (auto-detected from host)
+./docker-build.sh --platform linux/amd64        # x86 / Intel deployment servers
 
-# x86 (Intel/AMD servers)
-docker build --build-arg TARGETPLATFORM=linux/amd64 -t airflow-nodejs .
+# Python variant
+./docker-build.sh --variant python
+./docker-build.sh --variant python --platform linux/amd64
+
+# Java variant — JDK 21 LTS (default)
+./docker-build.sh --variant java
+./docker-build.sh --variant java --platform linux/amd64
+
+# Java variant — JDK 25 (backwards-compatible with Java 8–25)
+./docker-build.sh --variant java --jdk 25
+./docker-build.sh --variant java --jdk 25 --platform linux/amd64
 ```
 
-> **Default platform:** `linux/arm64`. Pass `--platform linux/amd64` if deploying to x86 servers.
+`docker-build.sh` handles TypeScript compilation automatically (`npm run build`) — no need to run it separately.
+
+> **Flags:**
+> - `--variant base|python|java` — runtime stack to include (default: `base`)
+> - `--jdk 21|25` — JDK version for the java variant (default: `21`)
+> - `--platform linux/arm64|linux/amd64` — target CPU (default: auto-detect from host)
+
+### Build directly with Docker (advanced)
+
+```bash
+# Base
+docker build --build-arg VARIANT=base --build-arg TARGETPLATFORM=linux/arm64 -t airflow-nodejs:local .
+
+# Python
+docker build --build-arg VARIANT=python --build-arg TARGETPLATFORM=linux/amd64 -t airflow-nodejs:python .
+
+# Java JDK 21
+docker build --build-arg VARIANT=java --build-arg JDK_VER=21 --build-arg TARGETPLATFORM=linux/arm64 -t airflow-nodejs:java21 .
+
+# Java JDK 25
+docker build --build-arg VARIANT=java --build-arg JDK_VER=25 --build-arg TARGETPLATFORM=linux/arm64 -t airflow-nodejs:java25 .
+```
 
 ### Quick start (local / dev)
 
@@ -520,8 +573,8 @@ commit them into local git-ignored folders, then `COPY` + `dpkg -i` them during 
 | Folder | Contents | Used by |
 |---|---|---|
 | `.docker-debs/` | zsh, tcsh + libs | `Dockerfile` (base) |
-| `.docker-debs-python/` | Python 3.13 + libs | `Dockerfile.python` |
-| `.docker-debs-java/` | OpenJDK 21 JRE + libs | `Dockerfile.java` |
+| `.docker-debs-python/` | Python 3.13 + libs | `Dockerfile` (`--build-arg VARIANT=python`) |
+| `.docker-debs-java/` | OpenJDK JRE + libs | `Dockerfile` (`--build-arg VARIANT=java`) |
 
 All three folders are **git-ignored** — they must exist locally before building.
 

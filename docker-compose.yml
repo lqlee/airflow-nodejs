@@ -1,4 +1,9 @@
 services:
+  app:
+    image: airflow-nodejs:local
+    mem_limit: 512m
+    cpus: 1.0
+
   mongo:
     image: mongo:7
     ports:

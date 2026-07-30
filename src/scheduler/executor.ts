@@ -59,6 +59,11 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     return executeContainerTask(db, ti, taskDef.container)
   }
 
+  // Kubernetes task — run as an ephemeral Pod on a K8s cluster via kubectl
+  if (taskDef.kubernetes) {
+    return executeKubernetesTask(db, ti, taskDef.kubernetes)
+  }
+
   // HITL approval-only tasks (no run body) — succeed immediately after approval
   if (ti.is_hitl && !taskDef.run && !taskDef.poke) {
     void recordTry(db, ti, 'success', new Date())
@@ -405,6 +410,98 @@ async function executeContainerTask(
     timeoutMs,
     kind:      'Container',
     onTimeout: killContainer,
+  })
+}
+
+// ── Kubernetes task ───────────────────────────────────────────────────────────
+
+/**
+ * Build a valid RFC-1123 pod name from dag/run/task IDs.
+ * Rules: lowercase alphanumeric + '-', max 63 chars, start and end alphanumeric.
+ *
+ * docker-style container names allow uppercase, '_', '.' and slice to 64 —
+ * none of those are valid for K8s pod names.
+ */
+export function buildPodName(
+  prefix: string | undefined,
+  dagId: string,
+  runId: string,
+  taskId: string,
+): string {
+  const base = prefix ?? `airflow-${dagId}-${taskId}`
+  // Lowercase, replace anything not alphanumeric or hyphen with '-'
+  const safe = base.toLowerCase().replace(/[^a-z0-9-]/g, '-')
+  // Use last 8 chars of runId as a unique suffix
+  const suffix = runId.replace(/[^a-z0-9]/g, '').slice(-8) || 'run'
+  const name = `${safe}-${suffix}`
+  // Strip leading/trailing hyphens and enforce ≤63 chars
+  return name.replace(/^-+|-+$/g, '').slice(0, 63).replace(/-+$/, '')
+}
+
+async function executeKubernetesTask(
+  db: Db,
+  ti: TaskInstance,
+  k8s: NonNullable<import('../dag/types.js').TaskDefinition['kubernetes']>,
+): Promise<void> {
+  const namespace = k8s.namespace ?? process.env.KUBECTL_NAMESPACE ?? 'default'
+  const podName = buildPodName(k8s.podName, ti.dag_id, ti.dag_run_id, ti.task_id)
+
+  const args: string[] = [
+    'run', podName,
+    '--image', k8s.image,
+    '--namespace', namespace,
+    '--restart', 'Never',
+    '--rm',
+    '--attach',
+    '--quiet',
+  ]
+
+  // kubeconfig / context
+  if (k8s.kubeconfig) args.push('--kubeconfig', k8s.kubeconfig)
+  if (k8s.context)    args.push('--context',    k8s.context)
+
+  // Service account
+  if (k8s.serviceAccount) args.push('--serviceaccount', k8s.serviceAccount)
+
+  // Resource limits — kubectl uses --limits=cpu=…,memory=… and --requests=…
+  // We set request = limit (guaranteed QoS) which is the right default for batch tasks.
+  const limits: string[] = []
+  const requests: string[] = []
+  if (k8s.cpu)    { limits.push(`cpu=${k8s.cpu}`);       requests.push(`cpu=${k8s.cpu}`) }
+  if (k8s.memory) { limits.push(`memory=${k8s.memory}`); requests.push(`memory=${k8s.memory}`) }
+  if (limits.length)   args.push(`--limits=${limits.join(',')}`)
+  if (requests.length) args.push(`--requests=${requests.join(',')}`)
+
+  // Env vars — DAG_ID/RUN_ID/TASK_ID + user-supplied
+  const envVars: Record<string, string> = {
+    DAG_ID:  ti.dag_id,
+    RUN_ID:  ti.dag_run_id,
+    TASK_ID: ti.task_id,
+    ...(k8s.env ?? {}),
+  }
+  for (const [k, v] of Object.entries(envVars)) {
+    args.push('--env', `${k}=${v}`)
+  }
+
+  // Command override — must come after `--` separator
+  if (k8s.command?.length) {
+    args.push('--', ...k8s.command)
+  }
+
+  const timeoutMs = k8s.timeout ?? (ti.timeout_ms > 0 ? ti.timeout_ms : 0)
+
+  // On timeout, force-delete the pod so it doesn't linger in the cluster
+  const killPod = () => {
+    spawn('kubectl', ['delete', 'pod', podName, '--namespace', namespace, '--force', '--grace-period=0'], { stdio: 'ignore' })
+  }
+
+  return spawnTask(db, ti, {
+    label:     `kubernetes(${k8s.image})`,
+    binary:    'kubectl',
+    args,
+    timeoutMs,
+    kind:      'Kubernetes',
+    onTimeout: killPod,
   })
 }
 

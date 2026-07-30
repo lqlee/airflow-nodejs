@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-618 tests · 16 API route modules · multi-user RBAC · Docker-ready
+730 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -691,6 +691,86 @@ The server loads the image via `docker load` in the background when the DAG file
 | `GET` | `/images` | List uploaded `.tar` files with size and `requiredImages` path |
 | `POST` | `/images/upload` | Upload a `.tar` file (multipart/form-data) |
 | `DELETE` | `/images/:name` | Remove a `.tar` file (image stays loaded in Docker) |
+
+### Kubernetes tasks
+
+Kubernetes tasks run as ephemeral Pods — any cluster, any language. kubectl blocks until the Pod exits (stdout/stderr streamed to task logs), then auto-deletes the Pod.
+
+**Supported clusters:** minikube, kind, k3d, Rancher Desktop (local) · EKS, GKE, AKS (cloud) · any cluster with a valid kubeconfig.
+
+```js
+export default dag({
+  id: 'k8s_pipeline',
+  tasks: {
+
+    // ── Simple task ──────────────────────────────────────────────────────────
+    hello: {
+      kubernetes: {
+        image: 'alpine:latest',
+        command: ['sh', '-c', 'echo "Hello from $DAG_ID on Kubernetes"'],
+        namespace: 'default',   // optional — default: 'default'
+      },
+    },
+
+    // ── Resource-limited Python job ──────────────────────────────────────────
+    ml_job: {
+      dependsOn: ['hello'],
+      kubernetes: {
+        image: 'python:3.13-slim',
+        command: ['python3', '-c', 'print("ML job done")'],
+        memory: '2Gi',    // request AND limit (guaranteed QoS)
+        cpu: '1',         // 1 full core
+        namespace: 'airflow',
+      },
+    },
+
+    // ── Cloud IAM via IRSA (AWS) or Workload Identity (GCP) ─────────────────
+    s3_export: {
+      dependsOn: ['ml_job'],
+      kubernetes: {
+        image: 'amazon/aws-cli:latest',
+        command: ['aws', 's3', 'cp', '/data/output.csv', 's3://my-bucket/'],
+        namespace: 'airflow',
+        serviceAccount: 'airflow-sa',    // bound to IAM role via IRSA
+        context: 'arn:aws:eks:us-east-1:123456789:cluster/prod',
+      },
+    },
+
+  },
+});
+```
+
+**Field reference:**
+
+| Field | Description |
+|---|---|
+| `image` | Container image (required) |
+| `command` | Command + args override — placed after `--` separator |
+| `namespace` | Kubernetes namespace. Default: `'default'` |
+| `memory` | Memory request + limit. K8s format: `'512Mi'`, `'2Gi'` |
+| `cpu` | CPU request + limit. K8s format: `'500m'`, `'1'` |
+| `serviceAccount` | Pod service account (for IRSA / Workload Identity) |
+| `env` | Extra env vars merged with `DAG_ID`/`RUN_ID`/`TASK_ID` |
+| `kubeconfig` | Path to kubeconfig file. Default: `~/.kube/config` |
+| `context` | kubectl context override |
+| `podName` | Pod name prefix (RFC-1123). Default: `airflow-<dag>-<task>` |
+| `timeout` | ms timeout — on expiry the Pod is force-deleted |
+
+**Note on ports:** `kubectl run` does not support host-port mapping (`-p host:container`). Use a Kubernetes `Service` or `kubectl port-forward` separately if you need port access to a running Pod.
+
+**Quick start (local):**
+```bash
+minikube start
+# or: kind create cluster --name airflow
+kubectl config use-context minikube
+# Trigger the dag — kubectl must be on PATH
+curl -X POST http://localhost:3000/dags/kubernetes_demo/trigger \
+  -H "Authorization: Bearer <key>" -d '{}'
+```
+
+See `dags/kubernetes_demo.js` for a full working example.
+
+---
 
 ### Full stack (MongoDB + app)
 

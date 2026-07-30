@@ -302,6 +302,86 @@ export interface TaskDefinition {
   }
 
   /**
+   * Kubernetes task: run the task as an ephemeral Pod on a Kubernetes cluster.
+   *
+   * Requires `kubectl` on PATH, configured with a valid kubeconfig.
+   * The Pod is created with `--restart=Never --rm --attach` so kubectl blocks
+   * until the Pod exits, streams stdout/stderr to task logs, and auto-deletes.
+   *
+   * Exit code 0 = success; non-zero = failure.
+   *
+   * Supported clusters (anything kubectl can reach):
+   *   - Local:  minikube, kind, k3d, Rancher Desktop
+   *   - AWS:    EKS  (aws eks update-kubeconfig)
+   *   - GCP:    GKE  (gcloud container clusters get-credentials)
+   *   - Azure:  AKS  (az aks get-credentials)
+   *   - Anywhere with a valid kubeconfig / in-cluster service account
+   *
+   * Environment variables injected automatically (same as container tasks):
+   *   DAG_ID, RUN_ID, TASK_ID
+   *
+   * NOTE: `ports` is intentionally NOT supported — kubectl does not have a
+   * host-port mapping flag equivalent to `docker run -p`. Use a Service or
+   * port-forward separately if you need port access to a long-running Pod.
+   *
+   * Example:
+   *   kubernetes: {
+   *     image: 'python:3.13-slim',
+   *     command: ['python3', '-c', 'print("hello from k8s")'],
+   *     namespace: 'airflow',
+   *     memory: '512Mi',
+   *     cpu: '500m',
+   *   }
+   *
+   * Cannot be combined with `run`, `poke`, `shell`, `python`, `java`, or `container`.
+   */
+  kubernetes?: {
+    /** Container image to run. */
+    image: string
+    /**
+     * Command + args override (equivalent to container's `command`).
+     * Passed after `--` to kubectl run.
+     */
+    command?: string[]
+    /**
+     * Kubernetes namespace. Default: 'default'.
+     * Override via KUBECTL_NAMESPACE env var or set here.
+     */
+    namespace?: string
+    /**
+     * Pod name prefix. RFC-1123 safe characters only (lowercase, hyphens).
+     * The executor appends a unique suffix automatically.
+     * Default: 'airflow-task'.
+     */
+    podName?: string
+    /**
+     * Memory request AND limit (same value for both).
+     * Kubernetes memory format: '512Mi', '2Gi', '256Mi'.
+     * Maps to --requests=memory=<value> --limits=memory=<value>.
+     */
+    memory?: string
+    /**
+     * CPU request AND limit (same value for both).
+     * Kubernetes CPU format: '500m' (millicores) or '1' (cores).
+     * Maps to --requests=cpu=<value> --limits=cpu=<value>.
+     */
+    cpu?: string
+    /**
+     * Service account name to bind to the Pod.
+     * Useful for granting AWS/GCP IAM via IRSA/Workload Identity.
+     */
+    serviceAccount?: string
+    /** Additional environment variables merged with DAG_ID/RUN_ID/TASK_ID. */
+    env?: Record<string, string>
+    /** kubeconfig file path. Default: ~/.kube/config (kubectl default). */
+    kubeconfig?: string
+    /** kubectl context to use. Default: current context in kubeconfig. */
+    context?: string
+    /** Timeout in ms. Default: task-level timeout or no timeout. */
+    timeout?: number
+  }
+
+  /**
    * Human-in-the-Loop: when true, the task parks at 'queued' until a human
    * approves or rejects via POST /hitl/:runId/:taskId.
    * Approved → task executes (or succeeds immediately if no `run` body).

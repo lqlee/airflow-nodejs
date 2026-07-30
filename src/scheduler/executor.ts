@@ -377,6 +377,12 @@ async function executeContainerTask(
     args.push('--network', container.network)
   }
 
+  // Resource limits
+  if (container.memory)      args.push('--memory',      container.memory)
+  if (container.memorySwap)  args.push('--memory-swap', container.memorySwap)
+  if (container.cpus)        args.push('--cpus',        container.cpus)
+  if (container.storageSize) args.push('--storage-opt', `size=${container.storageSize}`)
+
   // Image
   args.push(container.image)
 

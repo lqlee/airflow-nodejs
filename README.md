@@ -428,6 +428,37 @@ Open **http://localhost:3000** — use `Authorization: Bearer airflow` for authe
 
 > **Production:** replace `ENCRYPTION_KEY` with `openssl rand -hex 32` and use a strong `ADMIN_KEY`. The encryption key must be kept stable across restarts — it decrypts stored connections and variables.
 
+#### Server resource limits
+
+The server itself is lightweight (scheduler + HTTP API). Set limits at `docker run` time:
+
+```bash
+docker run -p 3000:3000 --env-file .env \
+  -v $(pwd)/dags:/app/dags \
+  --memory 512m \       # server hard memory cap (OOM-killed if exceeded)
+  --cpus 1.0 \          # max CPU cores the server may use
+  airflow-nodejs:local
+```
+
+Or in `docker-compose.yml`:
+```yaml
+services:
+  app:
+    image: airflow-nodejs:local
+    mem_limit: 512m
+    cpus: 1.0
+```
+
+> These limits apply to the **server process only**. Each task container has its own independent limits set in the DAG file (see [Container task resource limits](#container-task-resource-limits) below).
+
+Suggested sizing:
+
+| Component | Suggested limit |
+|---|---|
+| `airflow-nodejs` server | `--memory 512m --cpus 1.0` |
+| MongoDB | `--memory 1g` |
+| Task containers | set per-task in DAG (workload-dependent) |
+
 ### Container tasks
 
 Container tasks run each task in its own Docker container — any language, any image, zero changes to the server. The server image stays lean; each task brings its own runtime.
@@ -568,6 +599,45 @@ echo json_encode(["status" => "ok", "run" => getenv("RUN_ID")]) . "\n";
 > # Go for ARM64
 > GOOS=linux GOARCH=arm64 go build -o dags/jobs/my-tool ./cmd/tool
 > ```
+
+#### Container task resource limits
+
+Each container task can declare its own memory, CPU, and disk limits independently of the server:
+
+```js
+tasks: {
+  ml_training: {
+    container: {
+      image: 'pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime',
+      command: ['python3', 'train.py'],
+
+      memory: '8g',       // hard limit — OOM-killed if exceeded. Formats: '512m', '2g', '8g'
+      memorySwap: '8g',   // memory + swap total. '8g' = same as memory → no swap (recommended)
+      cpus: '4.0',        // max CPU cores (fractional ok: '0.5', '2.0', '4.0')
+      storageSize: '20g', // writable layer cap — requires dm/xfs Docker storage driver
+    }
+  },
+
+  // Lightweight task — small limits to prevent runaway processes
+  data_check: {
+    container: {
+      image: 'alpine:3.20',
+      command: ['sh', '-c', 'echo "ok"'],
+      memory: '64m',
+      cpus: '0.1',
+    }
+  },
+}
+```
+
+| Field | Docker flag | Notes |
+|---|---|---|
+| `memory` | `--memory` | Hard limit. OOM-kills process if exceeded. |
+| `memorySwap` | `--memory-swap` | Total of RAM + swap. Set equal to `memory` to disable swap. |
+| `cpus` | `--cpus` | Fractional CPUs allowed (`0.5` = half a core). |
+| `storageSize` | `--storage-opt size=` | Writable layer. Requires overlay2+xfs quota on Docker daemon. |
+
+> **Server vs task limits:** `--memory` on `docker run airflow-nodejs:local` limits the server. `memory:` in the DAG limits individual task containers. They are completely independent.
 
 **Requirements for container tasks:**
 - Server started with Docker socket mounted and `--group-add $(stat -c %g /var/run/docker.sock)`

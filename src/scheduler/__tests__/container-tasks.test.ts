@@ -331,6 +331,120 @@ describe('container tasks', () => {
     expect(lines.join(' ')).toContain('/tmp/mydir')
   })
 
+  // ── resource limits ───────────────────────────────────────────────────────
+
+  it('memory limit — container runs within the limit', async () => {
+    if (!dockerAvailable) return
+
+    const dag: DagDefinition = {
+      id: 'ct_memory',
+      schedule: null,
+      tasks: {
+        step: {
+          container: {
+            image: TEST_IMAGE,
+            command: ['sh', '-c', 'echo "running with 256m memory limit"'],
+            memory: '256m',
+          }
+        }
+      },
+    }
+    await runDag(dag)
+    expect((await taskState('ct_memory', 'step'))?.state).toBe('success')
+  })
+
+  it('memory + swap limit accepted by docker', async () => {
+    if (!dockerAvailable) return
+
+    const dag: DagDefinition = {
+      id: 'ct_memory_swap',
+      schedule: null,
+      tasks: {
+        step: {
+          container: {
+            image: TEST_IMAGE,
+            command: ['sh', '-c', 'echo "memory+swap limited"'],
+            memory: '128m',
+            memorySwap: '256m',  // total = memory + swap
+          }
+        }
+      },
+    }
+    await runDag(dag)
+    expect((await taskState('ct_memory_swap', 'step'))?.state).toBe('success')
+  })
+
+  it('cpu limit — container runs within the cpu quota', async () => {
+    if (!dockerAvailable) return
+
+    const dag: DagDefinition = {
+      id: 'ct_cpus',
+      schedule: null,
+      tasks: {
+        step: {
+          container: {
+            image: TEST_IMAGE,
+            command: ['sh', '-c', 'echo "running with 0.5 cpu limit"'],
+            cpus: '0.5',
+          }
+        }
+      },
+    }
+    await runDag(dag)
+    expect((await taskState('ct_cpus', 'step'))?.state).toBe('success')
+  })
+
+  it('all resource limits combined — memory + cpus', async () => {
+    if (!dockerAvailable) return
+
+    const dag: DagDefinition = {
+      id: 'ct_resources_all',
+      schedule: null,
+      tasks: {
+        step: {
+          container: {
+            image: TEST_IMAGE,
+            command: ['sh', '-c', 'echo "fully resource-limited container"'],
+            memory: '512m',
+            memorySwap: '512m',  // no swap
+            cpus: '1.0',
+          }
+        }
+      },
+    }
+    await runDag(dag)
+    const ti = await taskState('ct_resources_all', 'step')
+    expect(ti?.state).toBe('success')
+    const runId = await getRunId('ct_resources_all')
+    const lines = await taskLogs(runId, 'step')
+    expect(lines.join(' ')).toContain('fully resource-limited container')
+  })
+
+  it('memory OOM → container exits non-zero → task fails', async () => {
+    if (!dockerAvailable) return
+
+    // Allocate more memory than the limit — should be killed by OOM
+    const dag: DagDefinition = {
+      id: 'ct_oom',
+      schedule: null,
+      tasks: {
+        step: {
+          container: {
+            image: TEST_IMAGE,
+            // Try to allocate ~200 MB in a 4 MB container — OOM kill
+            command: ['sh', '-c', 'dd if=/dev/zero bs=1M count=200 | cat > /dev/null'],
+            memory: '4m',
+            memorySwap: '4m',
+          }
+        }
+      },
+    }
+    await runDag(dag, 15)
+    // Container should be OOM-killed → non-zero exit → task fails
+    const ti = await taskState('ct_oom', 'step')
+    expect(ti?.state).toBe('failed')
+  })
+
   // ── ports ─────────────────────────────────────────────────────────────────
 
   it('container with ports mapping succeeds — docker run -p flag is accepted', async () => {

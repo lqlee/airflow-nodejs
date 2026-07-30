@@ -259,6 +259,44 @@ export interface TaskDefinition {
      *             '--NotebookApp.token=', '--NotebookApp.password=']
      */
     ports?: string[]
+    /**
+     * Memory limit for the container.
+     * Accepts Docker memory strings: '512m', '2g', '1024m', etc.
+     * Maps to `docker run --memory`.
+     * Default: no limit (uses host available memory).
+     *
+     * Example: memory: '2g'   → container OOMs and exits if it exceeds 2 GB
+     */
+    memory?: string
+    /**
+     * Memory + swap limit. Must be >= memory.
+     * '0' disables swap. Default: 2× memory (Docker default).
+     * Maps to `docker run --memory-swap`.
+     *
+     * Example: memorySwap: '2g'  → same as memory, effectively disables swap
+     */
+    memorySwap?: string
+    /**
+     * Number of CPUs the container may use (fractional allowed).
+     * Maps to `docker run --cpus`.
+     * Default: no limit (uses all available CPUs).
+     *
+     * Example: cpus: '0.5'  → container gets at most half a CPU
+     */
+    cpus?: string
+    /**
+     * Writable layer (disk) size limit for the container filesystem.
+     * Only supported on overlay2 storage driver with dm or xfs quota.
+     * Accepts Docker size strings: '10g', '500m'.
+     * Maps to `docker run --storage-opt size=<value>`.
+     * Default: no limit.
+     *
+     * Note: requires the Docker daemon to be configured with storage quotas.
+     * On most dev setups this is a no-op; use volumes for reliable disk limits.
+     *
+     * Example: storageSize: '10g'
+     */
+    storageSize?: string
     /** Timeout in ms. Default: task-level timeout or no timeout. */
     timeout?: number
   }

@@ -245,6 +245,20 @@ export interface TaskDefinition {
     workdir?: string
     /** docker run --network value. Default: 'bridge'. */
     network?: string
+    /**
+     * Port mappings: host-port:container-port pairs, e.g.
+     *   ['8888:8888', '5000:5000']
+     *   ['127.0.0.1:8888:8888']   — bind to localhost only (more secure)
+     *
+     * Mapped ports are accessible on the host while the container is running.
+     * Useful for Jupyter notebooks, web servers, debuggers, etc.
+     *
+     * Example — Jupyter session accessible at http://localhost:8888:
+     *   ports: ['8888:8888']
+     *   command: ['jupyter', 'notebook', '--ip=0.0.0.0', '--no-browser',
+     *             '--NotebookApp.token=', '--NotebookApp.password=']
+     */
+    ports?: string[]
     /** Timeout in ms. Default: task-level timeout or no timeout. */
     timeout?: number
   }

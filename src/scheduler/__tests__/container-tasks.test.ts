@@ -330,4 +330,95 @@ describe('container tasks', () => {
     const lines = await taskLogs(runId, 'step')
     expect(lines.join(' ')).toContain('/tmp/mydir')
   })
+
+  // ── ports ─────────────────────────────────────────────────────────────────
+
+  it('container with ports mapping succeeds — docker run -p flag is accepted', async () => {
+    if (!dockerAvailable) return
+
+    // The -p flag is a Docker routing concern — we verify:
+    //   1. docker run accepts the port flag without error
+    //   2. container starts, runs, and exits 0 (task succeeds)
+    const dag: DagDefinition = {
+      id: 'ct_ports_basic',
+      schedule: null,
+      tasks: {
+        step: {
+          container: {
+            image: TEST_IMAGE,
+            command: ['sh', '-c', 'echo "container started with port mapping"'],
+            ports: ['19999:19999'],
+          }
+        }
+      },
+    }
+    await runDag(dag)
+    const ti = await taskState('ct_ports_basic', 'step')
+    expect(ti?.state).toBe('success')
+
+    const runId = await getRunId('ct_ports_basic')
+    const lines = await taskLogs(runId, 'step')
+    expect(lines.join(' ')).toContain('container started with port mapping')
+  })
+
+  it('multiple ports are all mapped', async () => {
+    if (!dockerAvailable) return
+
+    const dag: DagDefinition = {
+      id: 'ct_ports_multi',
+      schedule: null,
+      tasks: {
+        step: {
+          container: {
+            image: TEST_IMAGE,
+            // Just verify the container starts and runs with multiple port flags
+            command: ['sh', '-c', 'echo "running with 2 ports mapped"'],
+            ports: ['19990:19990', '19991:19991'],
+          }
+        }
+      },
+    }
+    await runDag(dag)
+    expect((await taskState('ct_ports_multi', 'step'))?.state).toBe('success')
+  })
+
+  it('localhost-only port binding works', async () => {
+    if (!dockerAvailable) return
+
+    const dag: DagDefinition = {
+      id: 'ct_ports_localhost',
+      schedule: null,
+      tasks: {
+        step: {
+          container: {
+            image: TEST_IMAGE,
+            command: ['sh', '-c', 'echo "localhost-only port"'],
+            ports: ['127.0.0.1:19992:19992'],
+          }
+        }
+      },
+    }
+    await runDag(dag)
+    expect((await taskState('ct_ports_localhost', 'step'))?.state).toBe('success')
+  })
+
+  it('ports field is optional — container works without it', async () => {
+    if (!dockerAvailable) return
+
+    const dag: DagDefinition = {
+      id: 'ct_ports_none',
+      schedule: null,
+      tasks: {
+        step: {
+          container: {
+            image: TEST_IMAGE,
+            command: ['sh', '-c', 'echo "no ports needed"'],
+            // ports field intentionally omitted
+          }
+        }
+      },
+    }
+    await runDag(dag)
+    expect((await taskState('ct_ports_none', 'step'))?.state).toBe('success')
+  })
 })

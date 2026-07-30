@@ -362,6 +362,11 @@ async function executeContainerTask(
     args.push('-v', vol)
   }
 
+  // Port mappings (host:container)
+  for (const port of container.ports ?? []) {
+    args.push('-p', port)
+  }
+
   // Working directory
   if (container.workdir) {
     args.push('-w', container.workdir)

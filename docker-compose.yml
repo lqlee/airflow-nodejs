@@ -1,8 +1,19 @@
 services:
   app:
     image: airflow-nodejs:local
+    ports:
+      - "3000:3000"
     mem_limit: 512m
     cpus: 1.0
+    environment:
+      MONGO_URL: mongodb://mongo:27017/airflow
+      PORT: "3000"
+    volumes:
+      - ./dags:/app/dags
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
 
   mongo:
     image: mongo:7
@@ -12,6 +23,12 @@ services:
       - mongo_data:/data/db
     environment:
       MONGO_INITDB_DATABASE: airflow
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   redis:
     image: redis:7-alpine

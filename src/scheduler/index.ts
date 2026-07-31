@@ -1,7 +1,7 @@
 import { ObjectId, type Db } from 'mongodb'
 import { loadDags } from '../dag/loader.js'
 import { getDag, listDags } from '../dag/registry.js'
-import { claimReadyTasks, skipUnsatisfiableTasks, applyBranchDecisions } from './claim.js'
+import { claimReadyTasks, skipUnsatisfiableTasks, applyBranchDecisions, expandDynamicMapped } from './claim.js'
 import { executeTask } from './executor.js'
 import { syncCronJobs, stopAllCronJobs, tickTimetables } from './cron.js'
 import { checkSlaBreaches } from '../sla/index.js'
@@ -113,8 +113,13 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
     await Promise.all(claimed.map(ti => executeTask(db, ti)))
 
     // Apply branch decisions: skip non-selected direct dependents of branch tasks.
-    // Must run before skipUnsatisfiableTasks so the cascade picks up branch-skips.
+    // Must run before expandDynamicMapped so the cascade picks up branch-skips.
     await applyBranchDecisions(db, dagRunId)
+
+    // Expand dynamic-mapped tasks: replace placeholders with real instances once
+    // the source XCom is available. Must run before skipUnsatisfiableTasks so
+    // the cascade can process newly-created instances.
+    await expandDynamicMapped(db, dagRunId)
 
     // After tasks complete, skip any queued tasks whose rule is now unsatisfiable.
     // Cascades until stable (e.g. skipping A may make B unsatisfiable too).
@@ -123,8 +128,9 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
     claimed = await claimReadyTasks(db, dagRunId)
   }
 
-  // Final skip pass: handles tasks that were unsatisfiable from the start
-  // (e.g. all upstreams succeeded but task has trigger_rule: 'all_failed')
+  // Final passes: handle tasks that were unsatisfiable from the start or
+  // dynamic tasks whose source just succeeded in the last wave.
+  await expandDynamicMapped(db, dagRunId)
   await skipUnsatisfiableTasks(db, dagRunId)
 
   // Check overall run completion — skipped counts as terminal (not failed)

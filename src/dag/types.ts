@@ -70,6 +70,18 @@ export type TriggerRule =
   | 'one_failed'    // at least one upstream failed
   | 'none_failed'   // no upstream failed (success or skipped only)
 
+/**
+ * XCom-driven dynamic expand source.
+ * The scheduler reads `key` from the XCom of task `from` after it succeeds,
+ * and creates one mapped instance per element of the returned array.
+ */
+export interface DynamicExpand {
+  /** Task id of the upstream task that pushed the list to XCom. */
+  from: string
+  /** XCom key holding the array to fan out over. */
+  key: string
+}
+
 export interface TaskDefinition {
   dependsOn?: string[]
   group?: string           // optional TaskGroup membership — label only, no scheduler impact
@@ -91,9 +103,21 @@ export interface TaskDefinition {
    * ctx.mapIndex (0-based) and ctx.mapValue are injected into each instance.
    * Downstream tasks that depend_on a mapped task wait for ALL instances to succeed.
    *
-   * Branch B (XCom-driven dynamic expand) is a planned future extension.
+   * Example:
+   *   expand: ['us-east-1', 'us-west-2', 'eu-west-1']
+   *
+   * XCom-driven (Branch B): fan out over a list produced at runtime by an upstream task.
+   * The upstream task must push a JSON array to XCom before this task runs.
+   * The scheduler reads the XCom value after the source task succeeds and creates
+   * one instance per element. If the source pushes an empty array, this task is skipped.
+   *
+   * Example:
+   *   // Upstream task pushes: await ctx.xcom.push('files', ['/a.csv', '/b.csv'])
+   *   expand: { from: 'upstream_task', key: 'files' }
+   *
+   * Cannot be combined with literal expand (array form).
    */
-  expand?: unknown[]
+  expand?: unknown[] | DynamicExpand
 
   /**
    * Branch task: run a function that returns the task_id(s) to continue with.

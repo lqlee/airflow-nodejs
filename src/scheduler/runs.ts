@@ -1,6 +1,6 @@
 import type { Db, WithId } from 'mongodb'
 import type { DagDefinition } from '../dag/types.js'
-import { planExpansion, isMappedTask } from './mapping.js'
+import { planExpansion, isLiteralMapped, isDynamicMapped, isMappedTask } from './mapping.js'
 import { recordEvent } from '../events/index.js'
 
 export interface DagRun {
@@ -56,6 +56,17 @@ export interface TaskInstance {
   poke_count: number        // number of poke() calls made so far
   /** true if this task is a branch task (has a branch: fn) */
   is_branch: boolean
+  /**
+   * true if this instance is a placeholder for a dynamic-expand task.
+   * Placeholder blocks run completion until the source XCom is available;
+   * replaced by real instances when the source task succeeds.
+   */
+  is_dynamic_placeholder: boolean
+  /**
+   * For dynamic-expand tasks: the source XCom reference { from, key }.
+   * Null for literal-expand and non-mapped tasks.
+   */
+  dynamic_expand_source: { from: string; key: string } | null
   // HITL fields
   is_hitl: boolean                              // true = task requires human approval before executing
   hitl_state: 'pending' | 'approved' | 'rejected' | null  // null for non-HITL tasks
@@ -113,9 +124,22 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
   for (const [taskId, task] of Object.entries(dag.tasks)) {
     const isSensor = typeof task.poke === 'function'
     const isBranch = typeof task.branch === 'function'
-    const instances = isMappedTask(task.expand)
-      ? planExpansion(task.expand)
-      : [{ map_index: null as number | null, map_value: null as unknown }]
+    const isDynamic = isDynamicMapped(task.expand)
+
+    // For dynamic-expand tasks: insert one placeholder instance to block run completion.
+    // The placeholder is replaced by real instances when the source XCom is available.
+    // For literal expand: insert N instances immediately.
+    // For non-mapped tasks: insert one instance.
+    const instances = isDynamic
+      ? [{ map_index: null as number | null, map_value: null as unknown }]  // placeholder
+      : isLiteralMapped(task.expand)
+        ? planExpansion(task.expand)
+        : [{ map_index: null as number | null, map_value: null as unknown }]
+
+    // dynamic_expand_source: only set for the placeholder instance
+    const dynamicExpandSource = isDynamic
+      ? { from: (task.expand as { from: string; key: string }).from, key: (task.expand as { from: string; key: string }).key }
+      : null
 
     for (const { map_index, map_value } of instances) {
       taskDocs.push({
@@ -146,6 +170,8 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
         next_poke_at: null,
         poke_count: 0,
         is_branch: isBranch,
+        is_dynamic_placeholder: isDynamic,
+        dynamic_expand_source: dynamicExpandSource,
         is_hitl: task.requiresApproval === true,
         hitl_state: task.requiresApproval === true ? 'pending' : null,
         hitl_prompt: task.hitlPrompt ?? null,

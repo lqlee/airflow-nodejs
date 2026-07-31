@@ -100,6 +100,9 @@ export async function claimReadyTasks(
   for (const inst of allInstances) {
     if (inst.state !== 'queued') continue
 
+    // Dynamic placeholder gate — never execute; only expandDynamicMapped handles these
+    if (inst.is_dynamic_placeholder) continue
+
     // Sensor poke gate
     if (inst.next_poke_at !== null && inst.next_poke_at > now) continue
 
@@ -251,6 +254,120 @@ export async function applyBranchDecisions(db: Db, dagRunId: string): Promise<nu
   }
 
   return totalSkipped
+}
+
+/**
+ * Expand dynamic-mapped tasks once their source XCom is available.
+ *
+ * For each placeholder instance (is_dynamic_placeholder=true) whose source
+ * task has succeeded:
+ *   - Read the XCom array from the source task
+ *   - If array is non-empty: delete placeholder + insert real instances
+ *   - If array is empty or not an array: mark placeholder as 'skipped'
+ *   - If source task failed: the skipUnsatisfiableTasks cascade handles the
+ *     placeholder (all_success dep on source → skipped automatically)
+ *
+ * Called from advanceRun after applyBranchDecisions, before skipUnsatisfiableTasks.
+ * Returns the number of new instances created (0 for empty/skip cases).
+ */
+export async function expandDynamicMapped(db: Db, dagRunId: string): Promise<number> {
+  // Find all placeholder instances for this run
+  const placeholders = await db.collection<TaskInstance>('task_instances').find({
+    dag_run_id: dagRunId,
+    is_dynamic_placeholder: true,
+    state: 'queued',
+  }).toArray()
+
+  if (placeholders.length === 0) return 0
+
+  // Build aggregate state map for dependency checking
+  const allInstances = await db.collection<TaskInstance>('task_instances')
+    .find({ dag_run_id: dagRunId })
+    .toArray()
+
+  const byTaskId = new Map<string, string[]>()
+  for (const inst of allInstances) {
+    const arr = byTaskId.get(inst.task_id) ?? []
+    arr.push(inst.state)
+    byTaskId.set(inst.task_id, arr)
+  }
+
+  const aggState = new Map<string, 'success' | 'failed' | 'skipped' | 'pending'>()
+  for (const [taskId, states] of byTaskId) {
+    // Simplified: success = all success; otherwise check terminals
+    if (states.every(s => s === 'success')) aggState.set(taskId, 'success')
+    else if (states.some(s => s === 'failed')) aggState.set(taskId, 'failed')
+    else if (states.every(s => TERMINAL.has(s))) aggState.set(taskId, 'skipped')
+    else aggState.set(taskId, 'pending')
+  }
+
+  let totalCreated = 0
+
+  for (const placeholder of placeholders) {
+    const src = placeholder.dynamic_expand_source
+    if (!src) continue
+
+    // Check if source task succeeded
+    const sourceState = aggState.get(src.from)
+    if (sourceState !== 'success') continue  // still waiting or not yet terminal
+
+    // Read XCom from source task
+    const xcomDoc = await db.collection('xcoms').findOne({
+      dag_run_id: dagRunId,
+      task_id: src.from,
+      key: src.key,
+    })
+
+    const rawValue = xcomDoc?.value
+    const isValidArray = Array.isArray(rawValue)
+
+    if (!isValidArray || rawValue.length === 0) {
+      // Empty or non-array → skip the mapped task
+      await db.collection<TaskInstance>('task_instances').updateOne(
+        { dag_run_id: dagRunId, task_id: placeholder.task_id, map_index: null, is_dynamic_placeholder: true, state: 'queued' },
+        { $set: { state: 'skipped', ended_at: new Date() } },
+      )
+      console.log(`[dynamic-map] '${placeholder.task_id}': source '${src.from}.${src.key}' is ${isValidArray ? 'empty' : 'not an array'} — skipped`)
+      continue
+    }
+
+    // Non-empty array — replace placeholder with real instances
+    // First delete the placeholder atomically
+    const deleted = await db.collection<TaskInstance>('task_instances').deleteOne({
+      dag_run_id: dagRunId,
+      task_id: placeholder.task_id,
+      map_index: null,
+      is_dynamic_placeholder: true,
+      state: 'queued',
+    })
+
+    if (!deleted.deletedCount) continue  // race: another tick already handled it
+
+    // Insert N real instances
+    const now = new Date()
+    const realInstances: TaskInstance[] = rawValue.map((value: unknown, index: number) => {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { _id, ...rest } = placeholder as TaskInstance & { _id?: unknown }
+      return {
+        ...rest,                  // inherit all fields EXCEPT _id (let MongoDB generate new ones)
+        map_index: index,
+        map_value: value,
+        state: 'queued' as const,
+        is_dynamic_placeholder: false,
+        dynamic_expand_source: null,
+        started_at: null,
+        ended_at: null,
+        error: null,
+        created_at: now,
+      } as TaskInstance
+    })
+
+    await db.collection<TaskInstance>('task_instances').insertMany(realInstances)
+    totalCreated += realInstances.length
+    console.log(`[dynamic-map] '${placeholder.task_id}': expanded to ${realInstances.length} instances from '${src.from}.${src.key}'`)
+  }
+
+  return totalCreated
 }
 
 // Keep old single-claim export for backward compatibility with tests

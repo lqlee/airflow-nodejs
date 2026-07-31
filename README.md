@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-805 tests · 16 API route modules · multi-user RBAC · Docker-ready
+818 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -972,6 +972,58 @@ export default dag({
 **Note:** `run:` JS tasks don't need templating — use `ctx.conf.key`, `ctx.xcom.pull()`, and `new Date()` directly in the function body. Templating is for static string fields that can't be closures.
 
 See `dags/templating_demo.js` for a full working example.
+
+---
+
+## Dynamic Task Mapping
+
+Fan out a task over an array — one instance per element. Two forms:
+
+**Literal (static):** array known at authoring time.
+```js
+tasks: {
+  process: {
+    expand: ['us-east-1', 'us-west-2', 'eu-west-1'],
+    run: async (ctx) => deploy(ctx.mapValue),   // ctx.mapIndex = 0/1/2
+  }
+}
+```
+
+**XCom-driven (dynamic):** list produced at runtime by an upstream task.
+```js
+tasks: {
+  // Step 1: discover items
+  discover: {
+    run: async (ctx) => {
+      const files = await listS3Files(ctx.conf.bucket)
+      await ctx.xcom.push('files', files)   // push the list
+    }
+  },
+
+  // Step 2: process each file — instances created after discover succeeds
+  process: {
+    dependsOn: ['discover'],
+    expand: { from: 'discover', key: 'files' },  // ← XCom-driven
+    run: async (ctx) => processFile(ctx.mapValue),
+  },
+
+  // Step 3: join — runs after ALL instances complete
+  summarize: {
+    dependsOn: ['process'],
+    run: async (ctx) => {
+      const results = await ctx.xcom.pull('process', 'return_value')  // array of all instances
+      return { total: results.length }
+    }
+  }
+}
+```
+
+**Behaviors:**
+- Source pushes N items → N instances run in parallel; downstream waits for all
+- Source pushes `[]` → mapped task auto-skipped; run terminates cleanly
+- Source fails → mapped task skipped via cascade; run terminates cleanly
+
+See `dags/dynamic_mapping_demo.js` for a working example.
 
 ---
 

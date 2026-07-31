@@ -47,11 +47,40 @@ export interface TaskContext {
   variables: VariableHelper
 }
 
+/**
+ * Controls when a task is allowed to run based on the states of its upstream tasks.
+ *
+ * | Rule          | Run when upstreams are…                          |
+ * |---------------|--------------------------------------------------|
+ * | `all_success` | **Default.** All succeeded.                      |
+ * | `all_failed`  | All failed (or skipped).                         |
+ * | `all_done`    | All finished (any terminal: success/failed/skip). |
+ * | `one_success` | At least one succeeded.                          |
+ * | `one_failed`  | At least one failed.                             |
+ * | `none_failed` | None failed (all success or skipped).            |
+ *
+ * Tasks whose rule can never be satisfied are automatically marked `skipped`
+ * so the run can still reach a terminal state.
+ */
+export type TriggerRule =
+  | 'all_success'   // default — all upstreams succeeded
+  | 'all_failed'    // all upstreams failed (or skipped)
+  | 'all_done'      // all upstreams finished (any terminal state)
+  | 'one_success'   // at least one upstream succeeded
+  | 'one_failed'    // at least one upstream failed
+  | 'none_failed'   // no upstream failed (success or skipped only)
+
 export interface TaskDefinition {
   dependsOn?: string[]
   group?: string           // optional TaskGroup membership — label only, no scheduler impact
   /** Resource pool name — limits concurrency for this task across all runs. */
   pool?: string
+  /**
+   * Trigger rule — controls when this task runs based on upstream states.
+   * Default: 'all_success' (all upstream tasks must succeed).
+   * See TriggerRule type for all options.
+   */
+  triggerRule?: TriggerRule
   retries?: number        // max retry attempts (default: 0 = no retries)
   retryDelay?: number     // ms to wait before requeuing (default: 0)
   timeout?: number        // ms before worker is killed and task marked failed (default: no timeout)

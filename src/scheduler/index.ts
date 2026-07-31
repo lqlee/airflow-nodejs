@@ -1,7 +1,7 @@
 import { ObjectId, type Db } from 'mongodb'
 import { loadDags } from '../dag/loader.js'
 import { getDag, listDags } from '../dag/registry.js'
-import { claimReadyTasks } from './claim.js'
+import { claimReadyTasks, skipUnsatisfiableTasks } from './claim.js'
 import { executeTask } from './executor.js'
 import { syncCronJobs, stopAllCronJobs, tickTimetables } from './cron.js'
 import { checkSlaBreaches } from '../sla/index.js'
@@ -100,6 +100,7 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
   )
 
   // Claim all currently-ready tasks and execute in parallel.
+  // After each wave, skip any tasks whose trigger rule can never be satisfied.
   // Re-check cancellation and shutdown flag before each wave.
   // On shutdown: bail without forking new children — recoverOrphanedRuns()
   // will re-claim any queued/running rows on next boot.
@@ -110,12 +111,22 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
     if (current?.state === 'cancelled') return
 
     await Promise.all(claimed.map(ti => executeTask(db, ti)))
+
+    // After tasks complete, skip any queued tasks whose rule is now unsatisfiable.
+    // Cascades until stable (e.g. skipping A may make B unsatisfiable too).
+    await skipUnsatisfiableTasks(db, dagRunId)
+
     claimed = await claimReadyTasks(db, dagRunId)
   }
 
-  // Check overall run completion
+  // Final skip pass: handles tasks that were unsatisfiable from the start
+  // (e.g. all upstreams succeeded but task has trigger_rule: 'all_failed')
+  await skipUnsatisfiableTasks(db, dagRunId)
+
+  // Check overall run completion — skipped counts as terminal (not failed)
   const tasks = await db.collection('task_instances').find({ dag_run_id: dagRunId }).toArray()
-  const allDone = tasks.every(t => t.state === 'success' || t.state === 'failed' || t.state === 'cancelled')
+  const TERMINAL_STATES = new Set(['success', 'failed', 'cancelled', 'skipped'])
+  const allDone = tasks.every(t => TERMINAL_STATES.has(t.state))
   const anyFailed = tasks.some(t => t.state === 'failed')
 
   if (allDone) {

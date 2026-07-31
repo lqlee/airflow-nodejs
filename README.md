@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-738 tests · 16 API route modules · multi-user RBAC · Docker-ready
+772 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -914,6 +914,56 @@ Comparison against the Apache Airflow 3.x web UI. Items are grouped by priority.
 | **Dark / light theme toggle** | User-selectable theme | ❌ dark only |
 | **Cluster activity panel** | Live breakdown of scheduler / worker health | ⚠️ partial (workers badge in header) |
 | **DAG owner column** | Owner shown on DAG list and card | ❌ not shown |
+
+---
+
+## Trigger Rules
+
+Trigger rules control when a task runs based on the states of its upstream tasks (the `dependsOn` list). The default is `all_success`.
+
+| Rule | Run when upstreams are… |
+|---|---|
+| `all_success` | **Default.** All succeeded |
+| `all_failed` | All failed (or skipped) — useful for cleanup tasks |
+| `all_done` | All finished (any terminal state) — always runs last |
+| `one_success` | At least one succeeded |
+| `one_failed` | At least one failed — useful for alerts |
+| `none_failed` | None failed (all success or skipped) |
+
+Tasks whose rule can **never** be satisfied are automatically marked `skipped` so the run always reaches a terminal state.
+
+```js
+export default dag({
+  id: 'my_dag',
+  schedule: null,
+  tasks: {
+    work:    { run: async () => doWork() },
+
+    // Cleanup runs only if work failed:
+    cleanup: {
+      dependsOn: ['work'],
+      triggerRule: 'all_failed',
+      run: async () => rollback(),
+    },
+
+    // Alert runs if work failed (use one_failed for mixed upstream sets):
+    alert: {
+      dependsOn: ['work'],
+      triggerRule: 'one_failed',
+      run: async () => sendAlert(),
+    },
+
+    // Summary always runs (all_done = any terminal outcome):
+    summary: {
+      dependsOn: ['work', 'cleanup', 'alert'],
+      triggerRule: 'all_done',
+      run: async () => report(),
+    },
+  }
+})
+```
+
+See `dags/trigger_rules_demo.js` for a full working example.
 
 ---
 

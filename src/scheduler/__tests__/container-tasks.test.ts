@@ -281,7 +281,7 @@ describe('container tasks', () => {
     await runDag(dag, 10)
     expect((await taskState('ct_chain_fail', 'a'))?.state).toBe('failed')
     const bState = (await taskState('ct_chain_fail', 'b'))?.state
-    expect(['queued', 'cancelled', undefined]).toContain(bState)
+    expect(['queued', 'cancelled', 'skipped', undefined]).toContain(bState)
   })
 
   it('mixed: shell task → container task in same DAG', async () => {

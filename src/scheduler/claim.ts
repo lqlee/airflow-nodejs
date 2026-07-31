@@ -1,23 +1,86 @@
-import type { Db, Filter } from 'mongodb'
+import type { Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
+
+// Terminal states — a task is done once it reaches one of these
+const TERMINAL = new Set(['success', 'failed', 'cancelled', 'skipped'])
+
+/**
+ * Per-task-id aggregate state, computed from all mapped instances.
+ * Non-mapped tasks have exactly 1 instance.
+ * Mapped tasks: success iff all instances succeeded; failed iff any terminal-failed.
+ */
+function taskAggState(states: string[]): 'success' | 'failed' | 'skipped' | 'pending' {
+  if (states.length === 0) return 'pending'
+  if (states.every(s => s === 'success')) return 'success'
+  if (states.every(s => s === 'skipped')) return 'skipped'
+  if (states.some(s => s === 'failed')) return 'failed'
+  if (states.every(s => TERMINAL.has(s))) return 'skipped'  // all done but not success/failed
+  return 'pending'  // at least one not yet terminal
+}
+
+/**
+ * Returns true if this task's trigger_rule is satisfied by the upstream aggregate states.
+ * "satisfied" means → claim and run.
+ */
+export function isSatisfied(
+  triggerRule: string,
+  upstreamStates: Array<'success' | 'failed' | 'skipped' | 'pending'>,
+): boolean {
+  // If any upstream is still pending, rule cannot be evaluated yet — not satisfied
+  if (upstreamStates.some(s => s === 'pending')) return false
+
+  switch (triggerRule) {
+    case 'all_success':
+      return upstreamStates.every(s => s === 'success')
+    case 'all_failed':
+      return upstreamStates.every(s => s === 'failed' || s === 'skipped')
+    case 'all_done':
+      return true  // all upstreams are terminal (pending check above)
+    case 'one_success':
+      return upstreamStates.some(s => s === 'success')
+    case 'one_failed':
+      return upstreamStates.some(s => s === 'failed')
+    case 'none_failed':
+      return upstreamStates.every(s => s === 'success' || s === 'skipped')
+    default:
+      return upstreamStates.every(s => s === 'success')  // unknown rule → all_success
+  }
+}
+
+/**
+ * Returns true if this task's trigger_rule can NEVER be satisfied given current upstream states.
+ * When unsatisfiable, the task should be marked 'skipped' so the run can terminate.
+ *
+ * A rule is unsatisfiable when all upstreams are terminal AND satisfied() returned false.
+ */
+export function isUnsatisfiable(
+  triggerRule: string,
+  upstreamStates: Array<'success' | 'failed' | 'skipped' | 'pending'>,
+): boolean {
+  // Still waiting on upstreams — not yet unsatisfiable
+  if (upstreamStates.some(s => s === 'pending')) return false
+  // All upstreams terminal: if not satisfied now, can never be
+  return !isSatisfied(triggerRule, upstreamStates)
+}
 
 /**
  * Atomically claim ALL currently-ready queued tasks for a run.
- * Each findOneAndUpdate is atomic — safe for concurrent schedulers.
- * Returns an array of claimed tasks (may be empty).
+ * Readiness is evaluated in JS against trigger rules, then claimed atomically.
+ *
+ * Returns claimed tasks. Also returns a list of task_ids that are now unsatisfiable
+ * (should be skipped by the caller).
  */
-export async function claimReadyTasks(db: Db, dagRunId: string): Promise<TaskInstance[]> {
-  // Fetch ALL instances for this run to compute which task_ids are "fully done".
-  // A task_id is done iff it has ≥1 instance AND every instance is success.
-  // Non-mapped tasks have exactly 1 instance — behavior identical to before.
-  // Mapped tasks have N instances — only done when ALL N are success.
+export async function claimReadyTasks(
+  db: Db,
+  dagRunId: string,
+): Promise<TaskInstance[]> {
+  // Fetch ALL instances for this run to compute upstream states
   const allInstances = await db
     .collection<TaskInstance>('task_instances')
     .find({ dag_run_id: dagRunId })
-    .project({ task_id: 1, state: 1 })
     .toArray()
 
-  // Group by task_id
+  // Group by task_id — collect all instance states
   const byTaskId = new Map<string, string[]>()
   for (const inst of allInstances) {
     const arr = byTaskId.get(inst.task_id) ?? []
@@ -25,57 +88,96 @@ export async function claimReadyTasks(db: Db, dagRunId: string): Promise<TaskIns
     byTaskId.set(inst.task_id, arr)
   }
 
-  // task_id is "done" = all its instances are success
-  const doneIds = [...byTaskId.entries()]
-    .filter(([, states]) => states.length > 0 && states.every(s => s === 'success'))
-    .map(([taskId]) => taskId)
+  // Compute aggregate state per task_id
+  const aggState = new Map<string, 'success' | 'failed' | 'skipped' | 'pending'>()
+  for (const [taskId, states] of byTaskId) {
+    aggState.set(taskId, taskAggState(states))
+  }
 
   const now = new Date()
-  const filter = {
-    dag_run_id: dagRunId,
-    state: 'queued',
-    // Sensor poke gate: next_poke_at must be null (never poked) or <= now.
-    // Use $and so the dependency $or is preserved as a sibling condition.
-    $and: [
-      {
-        // Sensor poke gate: next_poke_at must be null (never poked) or <= now
-        $or: [
-          { next_poke_at: null },
-          { next_poke_at: { $lte: now } },
-        ],
-      },
-      {
-        // Dependency gate: all upstream task_ids must be done
-        $or: [
-          { depends_on: { $size: 0 } },
-          { depends_on: { $not: { $elemMatch: { $nin: doneIds } } } },
-        ],
-      },
-      {
-        // HITL gate: non-HITL tasks always claimable; HITL tasks only when approved.
-        // $ne:true (not $eq:false) so tasks created before is_hitl field existed still claim.
-        $or: [
-          { is_hitl: { $ne: true } },
-          { hitl_state: 'approved' },
-        ],
-      },
-    ],
-  } as Filter<TaskInstance>
-
-  // Drain all claimable tasks — each claim is atomic
   const claimed: TaskInstance[] = []
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const task = await db.collection<TaskInstance>('task_instances').findOneAndUpdate(
-      filter,
+
+  for (const inst of allInstances) {
+    if (inst.state !== 'queued') continue
+
+    // Sensor poke gate
+    if (inst.next_poke_at !== null && inst.next_poke_at > now) continue
+
+    // HITL gate
+    if (inst.is_hitl && inst.hitl_state !== 'approved') continue
+
+    // Evaluate trigger rule against upstream aggregate states
+    const upstreamStates = inst.depends_on.map(dep => aggState.get(dep) ?? 'pending')
+    const rule = inst.trigger_rule ?? 'all_success'
+
+    if (!isSatisfied(rule, upstreamStates)) continue
+
+    // Atomically claim this specific instance
+    const claimed_inst = await db.collection<TaskInstance>('task_instances').findOneAndUpdate(
+      { dag_run_id: dagRunId, task_id: inst.task_id, map_index: inst.map_index ?? null, state: 'queued' },
       { $set: { state: 'running', started_at: new Date() } },
-      { sort: { created_at: 1 }, returnDocument: 'after' }
+      { returnDocument: 'after' },
     )
-    if (!task) break
-    claimed.push(task)
+    if (claimed_inst) claimed.push(claimed_inst)
   }
 
   return claimed
+}
+
+/**
+ * Mark all queued tasks whose trigger rule is permanently unsatisfiable as 'skipped'.
+ * Called after each execution wave so runs can terminate cleanly.
+ *
+ * Returns the number of tasks skipped.
+ * Cascades: if a skipped task was an upstream for another task, caller should re-evaluate.
+ */
+export async function skipUnsatisfiableTasks(db: Db, dagRunId: string): Promise<number> {
+  let totalSkipped = 0
+
+  // Cascade: skipping a task changes aggregate states → may make more tasks unsatisfiable
+  // Iterate until stable (usually 1-2 passes for simple DAGs)
+  for (let pass = 0; pass < 20; pass++) {
+    const allInstances = await db
+      .collection<TaskInstance>('task_instances')
+      .find({ dag_run_id: dagRunId })
+      .toArray()
+
+    const byTaskId = new Map<string, string[]>()
+    for (const inst of allInstances) {
+      const arr = byTaskId.get(inst.task_id) ?? []
+      arr.push(inst.state)
+      byTaskId.set(inst.task_id, arr)
+    }
+
+    const aggState = new Map<string, 'success' | 'failed' | 'skipped' | 'pending'>()
+    for (const [taskId, states] of byTaskId) {
+      aggState.set(taskId, taskAggState(states))
+    }
+
+    // Find all queued instances that are now unsatisfiable
+    const toSkip: TaskInstance[] = []
+    for (const inst of allInstances) {
+      if (inst.state !== 'queued') continue
+      const upstreamStates = inst.depends_on.map(dep => aggState.get(dep) ?? 'pending')
+      const rule = inst.trigger_rule ?? 'all_success'
+      if (isUnsatisfiable(rule, upstreamStates)) {
+        toSkip.push(inst)
+      }
+    }
+
+    if (toSkip.length === 0) break
+
+    // Mark them skipped
+    for (const inst of toSkip) {
+      await db.collection<TaskInstance>('task_instances').updateOne(
+        { dag_run_id: dagRunId, task_id: inst.task_id, map_index: inst.map_index ?? null, state: 'queued' },
+        { $set: { state: 'skipped', ended_at: new Date() } },
+      )
+    }
+    totalSkipped += toSkip.length
+  }
+
+  return totalSkipped
 }
 
 // Keep old single-claim export for backward compatibility with tests

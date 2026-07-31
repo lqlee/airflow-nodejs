@@ -38,7 +38,7 @@ export default dag({
     route: {
       dependsOn: ['score'],
       branch: async (ctx) => {
-        const score = await ctx.xcom.pull('score', 'score') as number
+        const score = /** @type {number} */ (await ctx.xcom.pull('score', 'score'))
         if (score >= 0.9) {
           console.log('[branching_demo] route → fast_path')
           return 'fast_path'

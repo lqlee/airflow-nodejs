@@ -11,6 +11,8 @@ import { appendLog } from '../logs/index.js'
 import { enqueueTask } from '../queue/producer.js'
 import { sensorOutcome } from './sensor.js'
 import { recordTry } from './tries.js'
+import { getRunMeta } from './run-conf.js'
+import { renderTemplate, renderArgs, renderEnv, type TemplateContext } from './template.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -351,6 +353,9 @@ async function executeContainerTask(
   ti: TaskInstance,
   container: NonNullable<import('../dag/types.js').TaskDefinition['container']>,
 ): Promise<void> {
+  const meta = await getRunMeta(db, ti.dag_run_id)
+  const tctx: TemplateContext = { dag_id: ti.dag_id, run_id: ti.dag_run_id, task_id: ti.task_id, ...meta }
+
   // Unique container name — allows `docker kill <name>` on timeout
   const containerName = `airflow-${ti.dag_run_id}-${ti.task_id}`.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 64)
 
@@ -363,8 +368,9 @@ async function executeContainerTask(
     '-e', `TASK_ID=${ti.task_id}`,
   ]
 
-  // Extra env vars
-  for (const [k, v] of Object.entries(container.env ?? {})) {
+  // Extra env vars (rendered)
+  const renderedEnv = container.env ? renderEnv(container.env, tctx) : {}
+  for (const [k, v] of Object.entries(renderedEnv)) {
     args.push('-e', `${k}=${v}`)
   }
 
@@ -397,9 +403,9 @@ async function executeContainerTask(
   // Image
   args.push(container.image)
 
-  // Command override
+  // Command override (rendered)
   if (container.command?.length) {
-    args.push(...container.command)
+    args.push(...renderArgs(container.command, tctx))
   }
 
   const timeoutMs = container.timeout ?? (ti.timeout_ms > 0 ? ti.timeout_ms : 0)
@@ -518,9 +524,12 @@ async function executeJavaTask(
   ti: TaskInstance,
   java: NonNullable<import('../dag/types.js').TaskDefinition['java']>,
 ): Promise<void> {
+  const meta = await getRunMeta(db, ti.dag_run_id)
+  const tctx: TemplateContext = { dag_id: ti.dag_id, run_id: ti.dag_run_id, task_id: ti.task_id, ...meta }
+
   const binary = java.binary ?? 'java'
-  const jvmArgs = java.jvmArgs ?? []
-  const taskArgs = java.args ?? []
+  const jvmArgs = renderArgs(java.jvmArgs ?? [], tctx)
+  const taskArgs = renderArgs(java.args ?? [], tctx)
 
   let args: string[]
   if (java.jar) {
@@ -541,7 +550,7 @@ async function executeJavaTask(
     binary,
     args,
     cwd:       java.cwd,
-    env:       java.env,
+    env:       java.env ? renderEnv(java.env, tctx) : java.env,
     timeoutMs: java.timeout ?? (ti.timeout_ms > 0 ? ti.timeout_ms : 0),
     kind:      'Java',
   })
@@ -554,13 +563,16 @@ async function executeShellTask(
   ti: TaskInstance,
   shell: NonNullable<import('../dag/types.js').TaskDefinition['shell']>,
 ): Promise<void> {
+  const meta = await getRunMeta(db, ti.dag_run_id)
+  const tctx: TemplateContext = { dag_id: ti.dag_id, run_id: ti.dag_run_id, task_id: ti.task_id, ...meta }
+
   const interpreter = shell.interpreter ?? 'bash'
   return spawnTask(db, ti, {
     label:     `shell(${interpreter})`,
     binary:    interpreter,
-    args:      ['-c', shell.command],
+    args:      ['-c', renderTemplate(shell.command, tctx)],
     cwd:       shell.cwd,
-    env:       shell.env,
+    env:       shell.env ? renderEnv(shell.env, tctx) : shell.env,
     timeoutMs: shell.timeout ?? (ti.timeout_ms > 0 ? ti.timeout_ms : 0),
     kind:      'Shell',
   })
@@ -573,17 +585,20 @@ async function executePythonTask(
   ti: TaskInstance,
   python: NonNullable<import('../dag/types.js').TaskDefinition['python']>,
 ): Promise<void> {
+  const meta = await getRunMeta(db, ti.dag_run_id)
+  const tctx: TemplateContext = { dag_id: ti.dag_id, run_id: ti.dag_run_id, task_id: ti.task_id, ...meta }
+
   const binary = python.interpreter ?? 'python3'
   // Inline code runs via `python3 -c <code>`; script file runs via `python3 <path>`
   const args = python.script
-    ? [python.script, ...(python.args ?? [])]
-    : ['-c', python.code!]
+    ? [python.script, ...renderArgs(python.args ?? [], tctx)]
+    : ['-c', renderTemplate(python.code!, tctx)]
   return spawnTask(db, ti, {
     label:     `python(${binary})`,
     binary,
     args,
     cwd:       python.cwd,
-    env:       python.env,
+    env:       python.env ? renderEnv(python.env, tctx) : python.env,
     timeoutMs: python.timeout ?? (ti.timeout_ms > 0 ? ti.timeout_ms : 0),
     kind:      'Python',
   })

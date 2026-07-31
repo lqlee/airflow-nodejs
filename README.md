@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-783 tests · 16 API route modules · multi-user RBAC · Docker-ready
+805 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -914,6 +914,64 @@ Comparison against the Apache Airflow 3.x web UI. Items are grouped by priority.
 | **Dark / light theme toggle** | User-selectable theme | ❌ dark only |
 | **Cluster activity panel** | Live breakdown of scheduler / worker health | ⚠️ partial (workers badge in header) |
 | **DAG owner column** | Owner shown on DAG list and card | ❌ not shown |
+
+---
+
+## Templating
+
+Use `{{ variable }}` syntax in static string fields of shell, python, java, and container tasks. Variables are substituted at execution time — the task sees the final rendered string.
+
+**Available variables:**
+
+| Variable | Value |
+|---|---|
+| `{{ dag_id }}` | DAG id |
+| `{{ run_id }}` | Run id |
+| `{{ task_id }}` | Task id |
+| `{{ ds }}` | Execution date as `YYYY-MM-DD` |
+| `{{ ts }}` | Full ISO-8601 timestamp |
+| `{{ ts_nodash }}` | Timestamp without dashes (`20240101T120000Z`) |
+| `{{ logical_date }}` | `logical_date` ISO string, or `''` for manual runs |
+| `{{ conf.key }}` | Trigger-time conf value |
+| `{{ conf.nested.key }}` | Nested conf path |
+
+Undefined paths render as `''` (empty string, not an error).
+
+**Templated fields:**
+
+| Task type | Templated fields |
+|---|---|
+| `shell` | `command`, `env` values |
+| `python` | `code`, `args` items, `env` values |
+| `java` | `args` items, `jvmArgs` items, `env` values |
+| `container` | `command` items, `env` values |
+
+```js
+export default dag({
+  id: 'my_pipeline',
+  schedule: '0 6 * * *',   // runs daily
+  tasks: {
+    export: {
+      shell: {
+        // {{ ds }} = today's date, {{ conf.env }} = trigger-time config
+        command: 'aws s3 cp /data/output-{{ ds }}.csv s3://{{ conf.bucket }}/{{ ds }}/',
+        env: { AWS_PROFILE: '{{ conf.env }}' },
+      }
+    },
+    process: {
+      dependsOn: ['export'],
+      python: {
+        args: ['--date', '{{ ds }}', '--env', '{{ conf.env }}'],
+        script: '/app/dags/scripts/process.py',
+      }
+    },
+  }
+})
+```
+
+**Note:** `run:` JS tasks don't need templating — use `ctx.conf.key`, `ctx.xcom.pull()`, and `new Date()` directly in the function body. Templating is for static string fields that can't be closures.
+
+See `dags/templating_demo.js` for a full working example.
 
 ---
 

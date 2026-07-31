@@ -3,7 +3,7 @@ import { loadDags } from '../dag/loader.js'
 import { getDag, listDags } from '../dag/registry.js'
 import { claimReadyTasks } from './claim.js'
 import { executeTask } from './executor.js'
-import { syncCronJobs, stopAllCronJobs } from './cron.js'
+import { syncCronJobs, stopAllCronJobs, tickTimetables } from './cron.js'
 import { checkSlaBreaches } from '../sla/index.js'
 import { emitOutlets, triggerDatasetConsumers } from '../datasets/index.js'
 import { createRun } from './runs.js'
@@ -57,6 +57,9 @@ async function tick(db: Db): Promise<void> {
 
     // Sync cron jobs whenever dags reload (picks up schedule changes)
     syncCronJobs(db, dags)
+
+    // Tick timetable-scheduled dags (custom schedule functions)
+    await tickTimetables(db, dags)
 
     // Check SLA breaches for all active runs
     await checkSlaBreaches(db, dags)

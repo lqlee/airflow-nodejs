@@ -18,6 +18,8 @@ export interface DagRun {
   note: string | null
   state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled'
   created_at: Date
+  /** How the run was triggered. */
+  trigger_type: 'manual' | 'cron' | 'backfill' | 'dataset' | 'timetable'
   /** ID of the parent backfill entity, or null for non-backfill runs. */
   backfill_id: string | null
 }
@@ -70,7 +72,7 @@ export interface CreateRunOptions {
    * 'manual' = POST /trigger; 'cron' = scheduled; 'backfill' = backfill;
    * 'dataset' = data-aware scheduling. Defaults to 'manual'.
    */
-  triggerType?: 'manual' | 'cron' | 'backfill' | 'dataset'
+  triggerType?: 'manual' | 'cron' | 'backfill' | 'dataset' | 'timetable'
   /** Links this run to a backfill entity for lifecycle management. */
   backfillId?: string
 }
@@ -91,6 +93,7 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
     tags: opts.tags ?? [],
     note: null,
     state: 'queued',
+    trigger_type: opts.triggerType ?? 'manual',
     created_at: now,
     backfill_id: opts.backfillId ?? null,
   })

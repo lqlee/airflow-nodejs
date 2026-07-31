@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-730 tests · 16 API route modules · multi-user RBAC · Docker-ready
+738 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -914,6 +914,67 @@ Comparison against the Apache Airflow 3.x web UI. Items are grouped by priority.
 | **Dark / light theme toggle** | User-selectable theme | ❌ dark only |
 | **Cluster activity panel** | Live breakdown of scheduler / worker health | ⚠️ partial (workers badge in header) |
 | **DAG owner column** | Owner shown on DAG list and card | ❌ not shown |
+
+---
+
+## Timetables (Custom Schedules)
+
+Timetables replace cron with arbitrary JavaScript scheduling logic. Use them for patterns cron can't express: weekdays only, business hours, N runs then stop, exponential backoff, or any date-math.
+
+Set `schedule: null` and add a `timetable` function that returns:
+- **`Date`** — when the next run should fire
+- **`null`** — stop scheduling permanently
+
+```js
+export default dag({
+  id: 'my_dag',
+  schedule: null,                    // required when using timetable
+  timetable: (lastRunAt, runCount) => {
+    // lastRunAt: Date of most recent run, or null if no runs yet
+    // runCount:  number of timetable-triggered runs so far
+
+    // Example: every 30 minutes
+    const base = lastRunAt ?? new Date()
+    return new Date(base.getTime() + 30 * 60 * 1000)
+  },
+  tasks: { ... }
+})
+```
+
+**Common patterns:**
+
+```js
+// Every 30 minutes
+timetable: (last) => new Date((last ?? new Date()).getTime() + 30 * 60 * 1000)
+
+// Weekdays only at 09:00 UTC
+timetable: (last) => {
+  const next = new Date(); next.setUTCHours(9, 0, 0, 0);
+  if (next <= new Date()) next.setUTCDate(next.getUTCDate() + 1);
+  while (next.getUTCDay() === 0 || next.getUTCDay() === 6)
+    next.setUTCDate(next.getUTCDate() + 1);
+  return next;
+}
+
+// Run exactly 5 times then stop
+timetable: (last, count) => count >= 5 ? null :
+  new Date((last ?? new Date()).getTime() + 60_000)
+
+// Exponential backoff: 1min, 2min, 4min, 8min gaps
+timetable: (last, count) => {
+  if (count >= 5) return null
+  const delay = count === 0 ? 0 : Math.pow(2, count - 1) * 60_000
+  return new Date((last ?? new Date()).getTime() + delay)
+}
+```
+
+**Notes:**
+- Granularity floor: ~5s (scheduler poll interval)
+- A throwing timetable is logged and treated as `null` — won't crash the scheduler
+- Pause/resume works the same as cron-scheduled DAGs
+- `trigger_type: 'timetable'` is stored on each run for filtering
+
+See `dags/timetable_demo.js` for working examples (interval, weekdays, business hours, limited runs, exponential backoff).
 
 ---
 

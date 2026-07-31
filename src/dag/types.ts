@@ -404,9 +404,52 @@ export interface TaskGroupDefinition {
   dependsOn?: string[]
 }
 
+/**
+ * A timetable function computes when the next run should fire.
+ *
+ * @param lastRunAt  - The time the most recent run was created, or null if no
+ *                     runs have been created yet (first ever fire).
+ * @returns          - A Date for the next fire time, or null to stop scheduling
+ *                     permanently (no more runs will be created).
+ *
+ * The function is called on every scheduler tick (~5s). It must return quickly
+ * and must not throw — exceptions are caught and logged, treated as null.
+ *
+ * Constraints:
+ *  - Granularity floor is the scheduler poll interval (~5s).
+ *  - No data-interval semantics (unlike Apache Airflow's Timetable).
+ *    Use `lastRunAt` to decide when the next run should occur.
+ *  - Cannot be combined with `schedule` (cron). Use one or the other.
+ *
+ * Examples:
+ *
+ *   // Every 30 minutes:
+ *   timetable: (last) => new Date((last ?? new Date()).getTime() + 30 * 60 * 1000)
+ *
+ *   // Weekdays only at 09:00 UTC:
+ *   timetable: (last) => {
+ *     const next = new Date(); next.setUTCHours(9, 0, 0, 0);
+ *     if (next <= (last ?? new Date(0))) next.setUTCDate(next.getUTCDate() + 1);
+ *     while (next.getUTCDay() === 0 || next.getUTCDay() === 6)
+ *       next.setUTCDate(next.getUTCDate() + 1);
+ *     return next;
+ *   }
+ *
+ *   // Run 5 times total then stop:
+ *   timetable: (last, runCount) => runCount >= 5 ? null :
+ *     new Date((last ?? new Date()).getTime() + 10_000)
+ */
+export type TimetableFn = (lastRunAt: Date | null, runCount: number) => Date | null
+
 export interface DagDefinition {
   id: string
   schedule: string | null  // cron expression, or null for manual-only
+  /**
+   * Custom timetable function — alternative to cron `schedule`.
+   * Cannot be combined with `schedule`. Set `schedule: null` when using timetable.
+   * See TimetableFn above for full documentation and examples.
+   */
+  timetable?: TimetableFn
   sla?: number             // ms — if a run hasn't completed within this window, an SLA alert is fired
   version?: string         // sha256[:12] of the dag source file — stamped by the loader
   tasks: Record<string, TaskDefinition>

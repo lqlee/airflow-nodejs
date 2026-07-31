@@ -54,6 +54,8 @@ export interface TaskInstance {
   first_poked_at: Date | null  // when poke was first invoked — NOT started_at (claim overwrites it)
   next_poke_at: Date | null    // earliest time for the next poke; null = ready immediately
   poke_count: number        // number of poke() calls made so far
+  /** true if this task is a branch task (has a branch: fn) */
+  is_branch: boolean
   // HITL fields
   is_hitl: boolean                              // true = task requires human approval before executing
   hitl_state: 'pending' | 'approved' | 'rejected' | null  // null for non-HITL tasks
@@ -110,6 +112,7 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
 
   for (const [taskId, task] of Object.entries(dag.tasks)) {
     const isSensor = typeof task.poke === 'function'
+    const isBranch = typeof task.branch === 'function'
     const instances = isMappedTask(task.expand)
       ? planExpansion(task.expand)
       : [{ map_index: null as number | null, map_value: null as unknown }]
@@ -142,6 +145,7 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
         first_poked_at: null,
         next_poke_at: null,
         poke_count: 0,
+        is_branch: isBranch,
         is_hitl: task.requiresApproval === true,
         hitl_state: task.requiresApproval === true ? 'pending' : null,
         hitl_prompt: task.hitlPrompt ?? null,

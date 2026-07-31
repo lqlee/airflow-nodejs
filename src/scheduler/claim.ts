@@ -180,6 +180,79 @@ export async function skipUnsatisfiableTasks(db: Db, dagRunId: string): Promise<
   return totalSkipped
 }
 
+/**
+ * After a branch task succeeds, read its XCom '_branch_decision' and skip
+ * all direct dependents that were NOT selected.
+ *
+ * Called from advanceRun after each execution wave, before skipUnsatisfiableTasks.
+ * Returns the number of tasks skipped by branch decisions.
+ */
+export async function applyBranchDecisions(db: Db, dagRunId: string): Promise<number> {
+  // Find all branch tasks that just succeeded in this run
+  const branchInstances = await db.collection<TaskInstance>('task_instances').find({
+    dag_run_id: dagRunId,
+    is_branch: true,
+    state: 'success',
+  }).toArray()
+
+  if (branchInstances.length === 0) return 0
+
+  // Fetch all task instances for this run once (to find direct dependents)
+  const allInstances = await db.collection<TaskInstance>('task_instances')
+    .find({ dag_run_id: dagRunId })
+    .toArray()
+
+  let totalSkipped = 0
+
+  for (const branchTi of branchInstances) {
+    // Read branch decision from XCom
+    const xcomDoc = await db.collection('xcoms').findOne({
+      dag_run_id: dagRunId,
+      task_id: branchTi.task_id,
+      key: '_branch_decision',
+    })
+
+    // selected: the task_ids this branch wants to activate
+    const rawDecision = xcomDoc?.value
+    const selected = new Set<string>(
+      Array.isArray(rawDecision) ? rawDecision.filter((x: unknown) => typeof x === 'string') : []
+    )
+
+    // Validate: all selected ids must be direct dependents of this branch task
+    const directDependents = allInstances
+      .filter(ti => ti.depends_on.includes(branchTi.task_id))
+      .map(ti => ti.task_id)
+    const directDependentSet = new Set(directDependents)
+
+    for (const selectedId of selected) {
+      if (!directDependentSet.has(selectedId)) {
+        console.warn(`[branch] '${branchTi.task_id}' returned unknown task_id '${selectedId}' — ignoring`)
+        selected.delete(selectedId)
+      }
+    }
+
+    // Skip all direct dependents NOT in the selected set (and still queued)
+    for (const ti of allInstances) {
+      if (!ti.depends_on.includes(branchTi.task_id)) continue
+      if (ti.state !== 'queued') continue
+      if (selected.has(ti.task_id)) continue
+
+      // This dependent was not selected — skip it
+      await db.collection<TaskInstance>('task_instances').updateOne(
+        { dag_run_id: dagRunId, task_id: ti.task_id, map_index: ti.map_index ?? null, state: 'queued' },
+        { $set: { state: 'skipped', ended_at: new Date() } },
+      )
+      totalSkipped++
+    }
+
+    if (totalSkipped > 0 || directDependents.length > 0) {
+      console.log(`[branch] '${branchTi.task_id}' selected [${[...selected].join(', ')}], skipped ${totalSkipped} task(s)`)
+    }
+  }
+
+  return totalSkipped
+}
+
 // Keep old single-claim export for backward compatibility with tests
 export async function claimNextTask(db: Db, dagRunId: string): Promise<TaskInstance | null> {
   const results = await claimReadyTasks(db, dagRunId)

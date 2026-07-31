@@ -96,6 +96,27 @@ export interface TaskDefinition {
   expand?: unknown[]
 
   /**
+   * Branch task: run a function that returns the task_id(s) to continue with.
+   * All other tasks that directly depend on this branch task are automatically skipped.
+   *
+   * The function receives the same TaskContext as `run`.
+   * Return a single task_id string or an array of task_id strings.
+   * Returning an empty array or null skips all downstream tasks.
+   *
+   * Example:
+   *   branch: async (ctx) => {
+   *     const score = await ctx.xcom.pull('scorer', 'score') as number
+   *     return score > 0.9 ? 'fast_path' : 'slow_path'
+   *   }
+   *
+   * Join tasks (downstream of both branches) should use triggerRule: 'none_failed'
+   * so they still run even when one branch was skipped.
+   *
+   * Cannot be combined with `run`, `poke`, `shell`, `python`, `java`, `container`, or `kubernetes`.
+   */
+  branch?: (ctx: TaskContext) => Promise<string | string[] | null>
+
+  /**
    * Sensor mode: if present, this task polls a condition instead of running once.
    * Return true → task succeeds; return false → task requeues after pokeInterval.
    * `run` should be omitted for sensor tasks.

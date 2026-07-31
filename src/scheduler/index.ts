@@ -1,7 +1,7 @@
 import { ObjectId, type Db } from 'mongodb'
 import { loadDags } from '../dag/loader.js'
 import { getDag, listDags } from '../dag/registry.js'
-import { claimReadyTasks, skipUnsatisfiableTasks } from './claim.js'
+import { claimReadyTasks, skipUnsatisfiableTasks, applyBranchDecisions } from './claim.js'
 import { executeTask } from './executor.js'
 import { syncCronJobs, stopAllCronJobs, tickTimetables } from './cron.js'
 import { checkSlaBreaches } from '../sla/index.js'
@@ -111,6 +111,10 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
     if (current?.state === 'cancelled') return
 
     await Promise.all(claimed.map(ti => executeTask(db, ti)))
+
+    // Apply branch decisions: skip non-selected direct dependents of branch tasks.
+    // Must run before skipUnsatisfiableTasks so the cascade picks up branch-skips.
+    await applyBranchDecisions(db, dagRunId)
 
     // After tasks complete, skip any queued tasks whose rule is now unsatisfiable.
     // Cascades until stable (e.g. skipping A may make B unsatisfiable too).

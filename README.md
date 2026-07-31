@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-772 tests · 16 API route modules · multi-user RBAC · Docker-ready
+783 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -914,6 +914,47 @@ Comparison against the Apache Airflow 3.x web UI. Items are grouped by priority.
 | **Dark / light theme toggle** | User-selectable theme | ❌ dark only |
 | **Cluster activity panel** | Live breakdown of scheduler / worker health | ⚠️ partial (workers badge in header) |
 | **DAG owner column** | Owner shown on DAG list and card | ❌ not shown |
+
+---
+
+## Branching
+
+Branch tasks return the task_id(s) to activate. All other direct dependents are automatically `skipped`. Downstream chains of skipped tasks cascade.
+
+```js
+export default dag({
+  id: 'my_pipeline',
+  schedule: null,
+  tasks: {
+    // Branch: return one or more task_ids to run
+    route: {
+      branch: async (ctx) => {
+        const score = await ctx.xcom.pull('scorer', 'score') as number
+        return score >= 0.9 ? 'fast_path' : 'slow_path'
+      }
+    },
+
+    fast_path: { dependsOn: ['route'], run: async () => 'fast' },
+    slow_path: { dependsOn: ['route'], run: async () => 'slow' },
+
+    // Join: use triggerRule: 'none_failed' so it runs even when one branch is skipped
+    join: {
+      dependsOn: ['fast_path', 'slow_path'],
+      triggerRule: 'none_failed',
+      run: async () => 'done',
+    },
+  }
+})
+```
+
+**Rules:**
+- Return a `string` (single task_id) or `string[]` (multiple)
+- Return `null` or `[]` to skip all downstream tasks
+- Invalid task_ids are logged and ignored
+- Branch decision stored as XCom key `_branch_decision` for debugging
+- Cannot be combined with `run`, `poke`, `shell`, `python`, `java`, `container`, or `kubernetes`
+
+See `dags/branching_demo.js` for a complete score-based routing example.
 
 ---
 

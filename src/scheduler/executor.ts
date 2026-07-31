@@ -64,6 +64,12 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     return executeKubernetesTask(db, ti, taskDef.kubernetes)
   }
 
+  // Branch task — runs a function that returns which downstream task_ids to activate.
+  // The result is stored as XCom key '_branch_decision' then the scheduler applies skips.
+  if (taskDef.branch) {
+    return executeBranchTask(db, ti, taskDef.branch)
+  }
+
   // HITL approval-only tasks (no run body) — succeed immediately after approval
   if (ti.is_hitl && !taskDef.run && !taskDef.poke) {
     void recordTry(db, ti, 'success', new Date())
@@ -580,6 +586,151 @@ async function executePythonTask(
     env:       python.env,
     timeoutMs: python.timeout ?? (ti.timeout_ms > 0 ? ti.timeout_ms : 0),
     kind:      'Python',
+  })
+}
+
+// ── Branch task ────────────────────────────────────────────────────────────────
+
+/**
+ * Run a branch task.
+ * Wraps the user-supplied branch fn in a run fn that:
+ *   1. Calls branch(ctx)
+ *   2. Stores the result as XCom key '_branch_decision'
+ *   3. Returns normally (success) so the scheduler can read the decision
+ *
+ * The wrapper is serialized and sent to the worker via the existing fork path —
+ * no protocol change needed.
+ */
+async function executeBranchTask(
+  db: Db,
+  ti: TaskInstance,
+  branchFn: NonNullable<import('../dag/types.js').TaskDefinition['branch']>,
+): Promise<void> {
+  // Wrap branch fn: call it, push decision to XCom, return the decision
+  const branchFnStr = branchFn.toString()
+  const wrapperFn = new Function(`return async function(ctx) {
+    const branchFn = (${branchFnStr});
+    const decision = await branchFn(ctx);
+    const selected = decision == null ? [] : (Array.isArray(decision) ? decision : [decision]);
+    await ctx.xcom.push('_branch_decision', selected);
+    return selected;
+  }`)()
+
+  // Re-use the fork machinery from executeTask by temporarily shimming as run: task
+  const dag = getDag(ti.dag_id)
+  if (!dag) { await markFailed(db, ti, `Dag '${ti.dag_id}' not found`); return }
+
+  return executeRunFn(db, ti, wrapperFn)
+}
+
+/**
+ * Execute a JS function (run: or branch wrapper) in a forked worker.
+ * Extracted to share between executeTask (run:) and executeBranchTask.
+ */
+async function executeRunFn(
+  db: Db,
+  ti: TaskInstance,
+  fn: (ctx: unknown) => Promise<unknown>,
+): Promise<void> {
+  await acquire()
+  if (ti.pool) await acquirePool(db, ti.pool)
+
+  const label = ti.is_sensor ? 'poking' : ti.is_branch ? 'branching' : 'running'
+  console.log(`[executor] ${label} ${ti.dag_id}.${ti.task_id} (run: ${ti.dag_run_id})`)
+
+  return new Promise((done) => {
+    const child = fork(WORKER_SCRIPT, [], {
+      execPath: EXEC_PATH,
+      env: { ...process.env },
+      silent: true,
+    })
+
+    let timedOut = false
+    let killTimer: ReturnType<typeof setTimeout> | null = null
+
+    if (ti.timeout_ms > 0) {
+      killTimer = setTimeout(() => {
+        timedOut = true
+        child.kill('SIGTERM')
+        const msg = `Task timed out after ${ti.timeout_ms}ms`
+        console.error(`[executor] ⏱ ${ti.dag_id}.${ti.task_id}: ${msg}`)
+        release()
+        if (ti.pool) releasePool(ti.pool)
+        void recordTry(db, ti, 'failed', new Date(), msg)
+        void markFailed(db, ti, msg).then(() => done())
+      }, ti.timeout_ms)
+    }
+
+    const clearKillTimer = () => {
+      if (killTimer !== null) { clearTimeout(killTimer); killTimer = null }
+    }
+
+    const rl_out = createInterface({ input: child.stdout! })
+    rl_out.on('line', (line) => {
+      process.stdout.write(`${line}\n`)
+      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line)
+    })
+
+    const rl_err = createInterface({ input: child.stderr! })
+    rl_err.on('line', (line) => {
+      process.stderr.write(`${line}\n`)
+      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line)
+    })
+
+    const workerCtx = {
+      dagId: ti.dag_id,
+      runId: ti.dag_run_id,
+      taskId: ti.task_id,
+      mapIndex: ti.map_index ?? null,
+      mapValue: ti.map_value ?? null,
+    }
+
+    child.send({ type: 'run', fn: fn.toString(), ctx: workerCtx })
+
+    child.on('message', async (msg: WorkerDoneMsg) => {
+      if (msg.type !== 'done') return
+      if (timedOut) return
+      clearKillTimer()
+      release()
+      if (ti.pool) releasePool(ti.pool)
+
+      if (msg.outcome === 'success') {
+        const endedAt = new Date()
+        void recordTry(db, ti, 'success', endedAt)
+        await markSuccess(db, ti)
+        console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id}`)
+      } else {
+        const error = msg.error ?? 'unknown error'
+        const endedAt = new Date()
+        if (!ti.is_branch && ti.try_number < ti.max_retries) {
+          void recordTry(db, ti, 'failed', endedAt, error)
+          await scheduleRetry(db, ti, error)
+          console.warn(`[executor] ↩ ${ti.dag_id}.${ti.task_id} retrying`)
+        } else {
+          void recordTry(db, ti, 'failed', endedAt, error)
+          await markFailed(db, ti, error)
+          console.error(`[executor] ✗ ${ti.dag_id}.${ti.task_id}: ${error}`)
+        }
+      }
+      done()
+    })
+
+    child.on('error', async (err) => {
+      if (timedOut) return
+      clearKillTimer()
+      release()
+      if (ti.pool) releasePool(ti.pool)
+      void recordTry(db, ti, 'failed', new Date(), err.message)
+      await markFailed(db, ti, err.message)
+      done()
+    })
+
+    child.on('exit', (code) => {
+      if (timedOut) return
+      if (code !== 0 && code !== null) {
+        console.error(`[executor] worker exited with code ${code} for ${ti.task_id}`)
+      }
+    })
   })
 }
 

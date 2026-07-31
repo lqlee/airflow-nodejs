@@ -833,6 +833,55 @@ Timeout: 20s (`DRAIN_TIMEOUT_MS`). Second signal forces exit 1.
 
 ---
 
+## Running Apache Airflow 3.x Locally (Side-by-Side Comparison)
+
+The `apache-airflow/` project ships a `docker-compose.local.yml` for running the real Airflow 3.x alongside airflow-nodejs on port 8080.
+
+**First run (one-time DB init, ~2-3 min):**
+
+```bash
+cd ../apache-airflow   # or wherever your apache-airflow clone lives
+
+# 1. Init DB + write credentials
+docker-compose -f docker-compose.local.yml run --rm airflow-init
+
+# 2. Start all services
+docker-compose -f docker-compose.local.yml up -d
+```
+
+**Day-to-day start/stop:**
+
+```bash
+cd ../apache-airflow
+
+# Start
+docker-compose -f docker-compose.local.yml up -d
+
+# Stop (keeps data)
+docker-compose -f docker-compose.local.yml down
+
+# Stop + wipe all data
+docker-compose -f docker-compose.local.yml down -v
+```
+
+**Ports:**
+
+| Service | URL | Credentials |
+|---|---|---|
+| **Apache Airflow 3.x** | http://localhost:8080 | `airflow` / `airflow` |
+| **airflow-nodejs** | http://localhost:3000 | API key or open (if `API_KEYS` unset) |
+
+Both can run simultaneously — different ports, independent databases.
+
+**On Walmart network** — image is pulled from Artifactory:
+```bash
+docker pull generic.ci.artifacts.walmart.com/hub-docker-release-remote/apache/airflow:3.0.0
+```
+
+**Architecture:** LocalExecutor + SQLite — no Redis/Celery needed. Three containers: `airflow-apiserver` (port 8080), `airflow-scheduler`, `airflow-dag-processor`.
+
+---
+
 ## UI TODO — Feature Gaps vs Apache Airflow 3.x
 
 Comparison against the Apache Airflow 3.x web UI. Items are grouped by priority.

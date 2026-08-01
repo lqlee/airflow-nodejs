@@ -436,12 +436,12 @@ curl -s -X POST http://localhost:3000/dags/test_cron/trigger \
 | Run cancel / task clear | ✅ Full | §14 |
 | Task groups | ✅ Full | §17 |
 | RBAC (viewer/editor/admin) | ✅ Full | §15 |
-| Timetables (custom schedules) | ❌ Not implemented | — |
-| Trigger rules (one_failed, etc.) | ❌ Not implemented | — |
-| Branching (@task.branch) | ❌ Not implemented | — |
-| Jinja2 templating | ❌ Not implemented | — |
-| XCom-driven dynamic mapping | ❌ Planned | — |
-| Providers ecosystem | ❌ Not implemented | — |
+| Timetables (custom schedules) | ✅ Via `timetable: (last, count) => Date\|null` | §3 |
+| Trigger rules (one_failed, etc.) | ✅ Full (all_success/failed/done/one_success/one_failed/none_failed) | — |
+| Branching (@task.branch) | ✅ Via `branch: async (ctx) => 'task_id'` | — |
+| Jinja2 templating | ✅ Via `{{ conf.key }}`, `{{ ds }}`, `{{ dag_id }}` in shell/python/java/container | — |
+| XCom-driven dynamic mapping | ✅ Via `expand: { from: 'task', key: 'items' }` | — |
+| Providers ecosystem | ✅ Via `dags/providers/*.js` + `GET /providers` | — |
 
 ---
 

@@ -5,7 +5,8 @@
   "exports": {
     ".": "./dist/main.js",
     "./dag": "./dist/dag/types.js",
-    "./dag/types": "./dist/dag/types.js"
+    "./dag/types": "./dist/dag/types.js",
+    "./providers": "./dist/providers/index.js"
   },
   "scripts": {
     "dev": "tsx watch --ignore 'src/**/__tests__/**' --ignore 'dist/**' src/main.ts",

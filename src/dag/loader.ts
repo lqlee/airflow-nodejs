@@ -8,6 +8,7 @@ import { expandGroups } from './taskgroups.js'
 import { setImportErrors, setDagWarnings, type ImportError } from './import-errors.js'
 import { analyzeWarnings, type DagWarning } from './warnings.js'
 import { ensureImages } from './images.js'
+import { loadProviders } from '../providers/loader.js'
 import type { DagDefinition } from './types.js'
 
 const DAGS_DIR = resolve(process.cwd(), 'dags')
@@ -19,6 +20,9 @@ const DAGS_DIR = resolve(process.cwd(), 'dags')
  */
 export async function loadDags(db?: Db): Promise<void> {
   clearRegistry()
+
+  // Load providers before DAGs so DAG files can use operator factories
+  await loadProviders(DAGS_DIR)
 
   let entries: string[]
   try {

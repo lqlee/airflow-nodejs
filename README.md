@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-818 tests · 16 API route modules · multi-user RBAC · Docker-ready
+831 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -972,6 +972,80 @@ export default dag({
 **Note:** `run:` JS tasks don't need templating — use `ctx.conf.key`, `ctx.xcom.pull()`, and `new Date()` directly in the function body. Templating is for static string fields that can't be closures.
 
 See `dags/templating_demo.js` for a full working example.
+
+---
+
+## Providers Ecosystem
+
+Providers are reusable operator libraries — the Node.js equivalent of Airflow's community pip providers. Place provider files in `dags/providers/` and they're auto-discovered at startup.
+
+**Provider file structure (`dags/providers/my-provider.js`):**
+
+```js
+export default {
+  name: 'my-provider',
+  version: '1.0.0',
+  description: 'My custom operators',
+  connectionTypes: ['my-service'],   // connection types this provider supports
+
+  operators: {
+    // Factory function → returns a TaskDefinition
+    MyOperator: (opts = {}) => ({
+      shell: {
+        interpreter: 'sh',
+        command: `echo "running with option: ${opts.message ?? 'default'}"`,
+      }
+    }),
+
+    // Can also return python/container/run tasks
+    MyPythonOperator: (opts = {}) => ({
+      python: { code: `print("${opts.message ?? 'hello from provider'}")` }
+    }),
+  },
+}
+```
+
+**Using operators in DAGs:**
+
+```js
+import { getOperator } from 'airflow-nodejs/providers'
+
+const MyOperator = getOperator('my-provider', 'MyOperator')
+
+export default dag({
+  id: 'my_pipeline',
+  schedule: null,
+  tasks: {
+    step: MyOperator({ message: 'hello' }),           // single operator
+    step2: { dependsOn: ['step'], ...MyOperator({ message: 'world' }) },
+  }
+})
+```
+
+**Discovery API:**
+
+```bash
+GET /providers
+# Returns npm packages (dependencies) AND local providers from dags/providers/
+# {
+#   "local_providers": [
+#     { "package_name": "http-provider", "operator_names": ["HttpGetOperator", ...] }
+#   ],
+#   "npm_providers": [...],
+#   "total_entries": N
+# }
+
+GET /providers/http-provider   # single provider details
+```
+
+**Built-in example providers** (in `dags/providers/`):
+
+| Provider | Operators |
+|---|---|
+| `http-provider` | `HttpGetOperator`, `HealthCheckOperator`, `HttpPostOperator` |
+| `notify-provider` | `LogNotifyOperator`, `SlackNotifyOperator` (webhook stub) |
+
+See `dags/providers_demo.js` for a complete example using both providers.
 
 ---
 

@@ -93,3 +93,74 @@ export function topoLayers(tasks) {
 
   return layers;
 }
+
+/**
+ * Compute Gantt layout: each task gets a normalized x/width on [0,1].
+ * Returns array of { task_id, state, xStart, xEnd, durationMs }.
+ * Tasks with no started_at get xStart=xEnd=0 (shown as dots).
+ *
+ * @param {Array<{task_id:string, state:string, started_at:string|null, ended_at:string|null}>} tasks
+ * @param {number} [nowMs]  current time for running tasks (default: Date.now())
+ * @returns {Array<{task_id:string, state:string, xStart:number, xEnd:number, durationMs:number}>}
+ */
+export function computeGanttLayout(tasks, nowMs = Date.now()) {
+  if (!tasks || !tasks.length) return [];
+  const started = tasks.filter(t => t.started_at);
+  if (!started.length) return tasks.map(t => ({ task_id: t.task_id, state: t.state, xStart: 0, xEnd: 0, durationMs: 0 }));
+
+  const minTs = Math.min(...started.map(t => new Date(t.started_at).getTime()));
+  const maxTs = Math.max(...started.map(t => {
+    const end = t.ended_at ? new Date(t.ended_at).getTime() : nowMs;
+    return end;
+  }));
+  const totalMs = Math.max(maxTs - minTs, 1);
+
+  return tasks.map(t => {
+    if (!t.started_at) return { task_id: t.task_id, state: t.state, xStart: 0, xEnd: 0, durationMs: 0 };
+    const startMs = new Date(t.started_at).getTime();
+    const endMs   = t.ended_at ? new Date(t.ended_at).getTime() : nowMs;
+    return {
+      task_id:    t.task_id,
+      state:      t.state,
+      xStart:     (startMs - minTs) / totalMs,
+      xEnd:       (endMs   - minTs) / totalMs,
+      durationMs: endMs - startMs,
+    };
+  });
+}
+
+/**
+ * Build calendar heatmap data from a list of dag runs.
+ * Returns a map of YYYY-MM-DD → { total, success, failed }.
+ *
+ * @param {Array<{created_at:string, state:string}>} runs
+ * @returns {Record<string, {total:number, success:number, failed:number}>}
+ */
+export function buildCalendarData(runs) {
+  const byDay = {};
+  (runs || []).forEach(run => {
+    const day = (run.created_at || '').slice(0, 10);
+    if (!day) return;
+    if (!byDay[day]) byDay[day] = { total: 0, success: 0, failed: 0 };
+    byDay[day].total++;
+    if (run.state === 'success') byDay[day].success++;
+    else if (run.state === 'failed') byDay[day].failed++;
+  });
+  return byDay;
+}
+
+/**
+ * Determine the heatmap color category for a calendar cell.
+ * Returns: 'none' | 'success' | 'mostly-success' | 'mixed' | 'failure'
+ *
+ * @param {{ total: number, success: number, failed: number } | undefined} dayData
+ * @returns {'none'|'success'|'mostly-success'|'mixed'|'failure'}
+ */
+export function calendarCellCategory(dayData) {
+  if (!dayData || !dayData.total) return 'none';
+  const rate = dayData.success / dayData.total;
+  if (rate === 1) return 'success';
+  if (rate >= 0.7) return 'mostly-success';
+  if (rate >= 0.4) return 'mixed';
+  return 'failure';
+}

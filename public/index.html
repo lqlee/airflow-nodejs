@@ -1006,6 +1006,306 @@ function NoteEditor({ runId, initialNote }) {
   );
 }
 
+// ── Gantt Chart ──────────────────────────────────────────────────────
+// Shows task duration bars for a single run on a shared time axis.
+function GanttChart({ tasks }) {
+  if (!tasks || !tasks.length) return <div className="empty">No tasks</div>;
+
+  const started = tasks.filter(t => t.started_at);
+  if (!started.length) return <div className="empty">No tasks have started yet</div>;
+
+  const minTs = Math.min(...started.map(t => new Date(t.started_at).getTime()));
+  const maxTs = Math.max(...started.map(t => {
+    const end = t.ended_at ? new Date(t.ended_at).getTime() : Date.now();
+    return end;
+  }));
+  const totalMs = Math.max(maxTs - minTs, 1);
+
+  const STATE_COLORS = {
+    success: '#48bb78', failed: '#fc8181', running: '#63b3ed',
+    queued: '#a0aec0', skipped: '#667eea', deferred: '#f6ad55',
+    cancelled: '#718096',
+  };
+
+  const rowH = 28, padding = { left: 120, right: 16, top: 8, bottom: 24 };
+  const chartW = 460;
+  const svgH = tasks.length * rowH + padding.top + padding.bottom;
+
+  // Time axis ticks (4 ticks)
+  const tickCount = 4;
+  const ticks = Array.from({ length: tickCount + 1 }, (_, i) => ({
+    ms: minTs + (totalMs * i) / tickCount,
+    x: padding.left + (chartW * i) / tickCount,
+  }));
+
+  const fmtDuration = (ms) => ms < 1000 ? `${ms}ms` : ms < 60000 ? `${(ms/1000).toFixed(1)}s` : `${Math.floor(ms/60000)}m${Math.floor((ms%60000)/1000)}s`;
+
+  return (
+    <div style={{overflowX:'auto'}}>
+      <svg width={padding.left + chartW + padding.right} height={svgH}
+        style={{fontFamily:'monospace',fontSize:11}}>
+        {/* Background stripes */}
+        {tasks.map((_, i) => (
+          <rect key={i} x={0} y={padding.top + i*rowH} width={padding.left+chartW+padding.right}
+            height={rowH} fill={i%2===0 ? '#1a1f2e' : '#1e2438'} />
+        ))}
+        {/* Grid lines */}
+        {ticks.map((t, i) => (
+          <line key={i} x1={t.x} y1={padding.top} x2={t.x} y2={svgH-padding.bottom}
+            stroke="#2d3748" strokeWidth={1} strokeDasharray={i===0?'none':'3,3'} />
+        ))}
+        {/* Tick labels */}
+        {ticks.map((t, i) => (
+          <text key={i} x={t.x} y={svgH-6} textAnchor="middle" fill="#718096" fontSize={9}>
+            {i===0 ? '0s' : fmtDuration(t.ms - minTs)}
+          </text>
+        ))}
+        {/* Task rows */}
+        {tasks.map((t, i) => {
+          const y = padding.top + i * rowH;
+          const color = STATE_COLORS[t.state] || '#718096';
+          const hasStart = !!t.started_at;
+          const startX = hasStart
+            ? padding.left + (new Date(t.started_at).getTime() - minTs) / totalMs * chartW
+            : padding.left;
+          const endX = hasStart
+            ? padding.left + ((t.ended_at ? new Date(t.ended_at).getTime() : Date.now()) - minTs) / totalMs * chartW
+            : padding.left;
+          const barW = Math.max(endX - startX, 4);
+          const durMs = hasStart
+            ? (t.ended_at ? new Date(t.ended_at) : new Date()).getTime() - new Date(t.started_at).getTime()
+            : 0;
+
+          return (
+            <g key={t.task_id}>
+              {/* Task label */}
+              <text x={padding.left-4} y={y + rowH/2 + 4} textAnchor="end"
+                fill="#e2e8f0" fontSize={10} style={{maxWidth:110}}>
+                {t.task_id.length > 16 ? t.task_id.slice(0,14)+'…' : t.task_id}
+              </text>
+              {/* Duration bar */}
+              {hasStart && (
+                <rect x={startX} y={y+4} width={barW} height={rowH-8}
+                  rx={3} fill={color} opacity={t.state==='running' ? 0.9 : 0.75} />
+              )}
+              {/* State dot (queued/not started) */}
+              {!hasStart && (
+                <circle cx={padding.left+8} cy={y+rowH/2} r={4} fill={color} opacity={0.6} />
+              )}
+              {/* Duration label inside bar if wide enough */}
+              {hasStart && barW > 30 && (
+                <text x={startX+barW/2} y={y+rowH/2+4} textAnchor="middle"
+                  fill="#fff" fontSize={9} fontWeight="bold">
+                  {fmtDuration(durMs)}
+                </text>
+              )}
+            </g>
+          );
+        })}
+        {/* Current time marker for running runs */}
+        {tasks.some(t => t.state === 'running') && (() => {
+          const nowX = padding.left + (Date.now() - minTs) / totalMs * chartW;
+          return nowX <= padding.left + chartW ? (
+            <line x1={nowX} y1={padding.top} x2={nowX} y2={svgH-padding.bottom}
+              stroke="#63b3ed" strokeWidth={1.5} strokeDasharray="4,2" opacity={0.7} />
+          ) : null;
+        })()}
+      </svg>
+    </div>
+  );
+}
+
+// ── Grid View ─────────────────────────────────────────────────────────
+// Run × task heatmap: rows = recent runs, columns = task_ids, cells = state color.
+// Equivalent to Airflow's Grid view.
+function GridView({ dagId }) {
+  const [rows, setRows] = useState([]);
+  const [taskIds, setTaskIds] = useState([]);
+
+  const load = useCallback(() => {
+    apiFetch(`${BASE}/dags/${dagId}/runs?limit=25`).then(r=>r.json()).then(async data => {
+      const runs = data.items ?? [];
+      if (!runs.length) { setRows([]); return; }
+
+      // Collect all task_ids from all runs
+      const allTaskIds = new Set();
+      const runsWithTasks = await Promise.all(runs.map(async run => {
+        try {
+          const r = await apiFetch(`${BASE}/dag-runs/${run.run_id}/tasks`);
+          const tasks = await r.json();
+          const arr = Array.isArray(tasks) ? tasks : (tasks.items ?? []);
+          arr.forEach(t => allTaskIds.add(t.task_id));
+          return { run, tasks: arr };
+        } catch { return { run, tasks: [] }; }
+      }));
+
+      const sorted = [...allTaskIds].sort();
+      setTaskIds(sorted);
+      setRows(runsWithTasks);
+    }).catch(()=>{});
+  }, [dagId]);
+
+  useInterval(load, 5000);
+
+  const STATE_COLORS = {
+    success:'#48bb78', failed:'#fc8181', running:'#63b3ed',
+    queued:'#a0aec0', skipped:'#667eea', deferred:'#f6ad55', cancelled:'#718096',
+  };
+
+  if (!rows.length) return <div className="empty">No runs yet</div>;
+
+  return (
+    <div style={{overflowX:'auto'}}>
+      <table style={{borderCollapse:'collapse',fontSize:11,minWidth:'100%'}}>
+        <thead>
+          <tr>
+            <th style={{color:'#a0aec0',padding:'4px 8px',textAlign:'left',minWidth:90,borderBottom:'1px solid #2d3748'}}>Run</th>
+            <th style={{color:'#a0aec0',padding:'4px 4px',textAlign:'center',borderBottom:'1px solid #2d3748'}}>State</th>
+            {taskIds.map(id => (
+              <th key={id} style={{color:'#a0aec0',padding:'4px 2px',maxWidth:60,borderBottom:'1px solid #2d3748',writingMode:'vertical-rl',transform:'rotate(180deg)',fontSize:10}}>
+                {id.length>12 ? id.slice(0,10)+'…' : id}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(({ run, tasks }) => {
+            const taskMap = {};
+            tasks.forEach(t => { taskMap[t.task_id] = t.state; });
+            return (
+              <tr key={run.run_id} style={{borderBottom:'1px solid #1a1f2e'}}>
+                <td style={{padding:'3px 8px',fontFamily:'monospace',color:'#718096',fontSize:10}}>
+                  {run.run_id.slice(-8)}
+                  <div style={{fontSize:9,color:'#4a5568'}}>{new Date(run.created_at).toISOString().slice(5,16).replace('T',' ')}</div>
+                </td>
+                <td style={{padding:'3px 4px',textAlign:'center'}}>
+                  <span style={{display:'inline-block',width:10,height:10,borderRadius:3,background:STATE_COLORS[run.state]||'#4a5568'}} title={run.state} />
+                </td>
+                {taskIds.map(id => {
+                  const state = taskMap[id];
+                  const color = state ? (STATE_COLORS[state]||'#4a5568') : '#2d3748';
+                  return (
+                    <td key={id} style={{padding:'3px 2px',textAlign:'center'}}>
+                      <span style={{display:'inline-block',width:14,height:14,borderRadius:2,background:color,opacity:state?0.85:0.2}}
+                        title={state ? `${id}: ${state}` : `${id}: —`} />
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div style={{marginTop:8,display:'flex',gap:12,flexWrap:'wrap'}}>
+        {Object.entries(STATE_COLORS).map(([s,c]) => (
+          <span key={s} style={{display:'flex',alignItems:'center',gap:4,fontSize:10,color:'#a0aec0'}}>
+            <span style={{display:'inline-block',width:10,height:10,borderRadius:2,background:c,opacity:0.85}} />{s}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Calendar View ─────────────────────────────────────────────────────
+// Month heatmap of run counts + success rate per day for a DAG.
+function CalendarView({ dagId }) {
+  const [runsByDay, setRunsByDay] = useState({});
+  const [month, setMonth] = useState(() => {
+    const now = new Date(); return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  });
+
+  useEffect(() => {
+    apiFetch(`${BASE}/dags/${dagId}/runs?limit=200`).then(r=>r.json()).then(data => {
+      const byDay = {};
+      (data.items ?? []).forEach(run => {
+        const day = run.created_at.slice(0, 10);
+        if (!byDay[day]) byDay[day] = { total: 0, success: 0, failed: 0 };
+        byDay[day].total++;
+        if (run.state === 'success') byDay[day].success++;
+        else if (run.state === 'failed') byDay[day].failed++;
+      });
+      setRunsByDay(byDay);
+    }).catch(()=>{});
+  }, [dagId, month]);
+
+  const [year, mon] = month.split('-').map(Number);
+  const firstDay = new Date(year, mon-1, 1);
+  const lastDay = new Date(year, mon, 0);
+  const startDow = firstDay.getDay(); // 0=Sun
+  const daysInMonth = lastDay.getDate();
+
+  const prevMonth = () => {
+    const d = new Date(year, mon-2, 1);
+    setMonth(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
+  };
+  const nextMonth = () => {
+    const d = new Date(year, mon, 1);
+    setMonth(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
+  };
+
+  const cellColor = (dayData) => {
+    if (!dayData || !dayData.total) return '#1a1f2e';
+    const rate = dayData.success / dayData.total;
+    if (dayData.total === 0) return '#1a1f2e';
+    if (rate === 1) return '#276749';
+    if (rate >= 0.7) return '#2f855a';
+    if (rate >= 0.4) return '#d69e2e';
+    return '#9b2c2c';
+  };
+
+  // Build grid: 7 cols, up to 6 rows
+  const cells = [];
+  for (let i = 0; i < startDow; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  return (
+    <div>
+      <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:8}}>
+        <button className="refresh-btn" onClick={prevMonth}>‹</button>
+        <span style={{color:'#e2e8f0',fontWeight:'bold',minWidth:130,textAlign:'center'}}>
+          {MONTHS[mon-1]} {year}
+        </span>
+        <button className="refresh-btn" onClick={nextMonth}>›</button>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:3,maxWidth:280}}>
+        {['Su','Mo','Tu','We','Th','Fr','Sa'].map(d => (
+          <div key={d} style={{textAlign:'center',fontSize:10,color:'#718096',paddingBottom:2}}>{d}</div>
+        ))}
+        {cells.map((d, i) => {
+          if (!d) return <div key={`e${i}`} />;
+          const dayStr = `${month}-${String(d).padStart(2,'0')}`;
+          const data = runsByDay[dayStr];
+          const isToday = dayStr === new Date().toISOString().slice(0,10);
+          return (
+            <div key={d} title={data ? `${dayStr}: ${data.total} run(s), ${data.success} success, ${data.failed} failed` : dayStr}
+              style={{
+                width:'100%', aspectRatio:'1', borderRadius:3,
+                background: cellColor(data),
+                border: isToday ? '1px solid #63b3ed' : '1px solid transparent',
+                display:'flex', alignItems:'center', justifyContent:'center',
+                fontSize: 9, color: data?.total ? '#e2e8f0' : '#4a5568',
+                cursor: data?.total ? 'default' : 'default',
+              }}>
+              {d}
+              {data?.total ? <span style={{fontSize:7,marginLeft:1,color:'#a0aec0'}}>·{data.total}</span> : null}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{marginTop:8,display:'flex',gap:10,flexWrap:'wrap',fontSize:10,color:'#a0aec0'}}>
+        {[['#276749','100% success'],['#2f855a','≥70%'],['#d69e2e','≥40%'],['#9b2c2c','<40%'],['#1a1f2e','no runs']].map(([c,l]) => (
+          <span key={l} style={{display:'flex',alignItems:'center',gap:3}}>
+            <span style={{display:'inline-block',width:10,height:10,borderRadius:2,background:c}} />{l}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── Run Detail ────────────────────────────────────────────────────────
 function RunDetail({ runId, onClose }) {
   const [run, setRun] = useState(null);
@@ -1052,6 +1352,8 @@ function RunDetail({ runId, onClose }) {
         <div className="view-toggle">
           <button className={view==='graph'?'active':''} onClick={() => setView('graph')}>⬡ Graph</button>
           <button className={view==='list' ?'active':''} onClick={() => setView('list')}>≡ List</button>
+          <button className={view==='gantt'?'active':''} onClick={() => setView('gantt')}>▬ Gantt</button>
+          <button className={view==='grid' ?'active':''} onClick={() => setView('grid')}>⊞ Grid</button>
           <button className={view==='xcom' ?'active':''} onClick={() => setView('xcom')}>⇄ XCom</button>
         </div>
         {isActive && (
@@ -1090,6 +1392,18 @@ function RunDetail({ runId, onClose }) {
       )}
       {/* Note panel — inline editable */}
       <NoteEditor runId={runId} initialNote={run.note} />
+
+      {view === 'gantt' && (
+        <div style={{marginTop:8}}>
+          <GanttChart tasks={run.tasks} />
+        </div>
+      )}
+
+      {view === 'grid' && (
+        <div style={{marginTop:8}}>
+          <GridView dagId={run.dag_id} />
+        </div>
+      )}
 
       {view === 'xcom' && <XComPanel runId={runId} />}
 
@@ -1640,6 +1954,14 @@ function App() {
                   Runs — {selectedDag}
                 </div>
                 <RunsTable dagId={selectedDag} onSelectRun={setSelectedRun} />
+                <details style={{marginTop:12}}>
+                  <summary style={{fontSize:11,color:'#a0aec0',cursor:'pointer',userSelect:'none',padding:'4px 0'}}>
+                    📅 Calendar View
+                  </summary>
+                  <div style={{marginTop:8}}>
+                    <CalendarView dagId={selectedDag} />
+                  </div>
+                </details>
               </div>
               {selectedRun && (
                 <RunDetail runId={selectedRun} onClose={() => setSelectedRun(null)} />

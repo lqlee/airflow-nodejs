@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { duration, expandForGraph, topoLayers } from '../../../public/ui-utils.js'
+import { duration, expandForGraph, topoLayers, computeGanttLayout, buildCalendarData, calendarCellCategory } from '../../../public/ui-utils.js'
 
 // ── duration() ────────────────────────────────────────────────────────────────
 
@@ -204,5 +204,111 @@ describe('topoLayers()', () => {
     const flat = layers.flat()
     const unique = new Set(flat)
     expect(flat.length).toBe(unique.size)
+  })
+})
+
+// ── computeGanttLayout() ──────────────────────────────────────────────────────
+
+describe('computeGanttLayout()', () => {
+  const t0 = '2024-01-01T00:00:00.000Z'
+  const t1 = '2024-01-01T00:00:10.000Z'  // +10s
+  const t2 = '2024-01-01T00:00:20.000Z'  // +20s
+
+  it('returns empty array for empty input', () => {
+    expect(computeGanttLayout([])).toEqual([])
+  })
+
+  it('all tasks without started_at → xStart=xEnd=0', () => {
+    const tasks = [{ task_id: 'a', state: 'queued', started_at: null, ended_at: null }]
+    const result = computeGanttLayout(tasks)
+    expect(result[0].xStart).toBe(0)
+    expect(result[0].xEnd).toBe(0)
+    expect(result[0].durationMs).toBe(0)
+  })
+
+  it('single started+ended task fills full width (xStart=0, xEnd=1)', () => {
+    const tasks = [{ task_id: 'a', state: 'success', started_at: t0, ended_at: t1 }]
+    const result = computeGanttLayout(tasks)
+    expect(result[0].xStart).toBe(0)
+    expect(result[0].xEnd).toBe(1)
+    expect(result[0].durationMs).toBe(10000)
+  })
+
+  it('two sequential tasks: first from 0-0.5, second from 0.5-1', () => {
+    const tasks = [
+      { task_id: 'a', state: 'success', started_at: t0, ended_at: t1 },
+      { task_id: 'b', state: 'success', started_at: t1, ended_at: t2 },
+    ]
+    const result = computeGanttLayout(tasks)
+    expect(result[0].xStart).toBe(0)
+    expect(result[0].xEnd).toBeCloseTo(0.5)
+    expect(result[1].xStart).toBeCloseTo(0.5)
+    expect(result[1].xEnd).toBe(1)
+  })
+
+  it('task_id and state are preserved', () => {
+    const tasks = [{ task_id: 'my_task', state: 'failed', started_at: t0, ended_at: t1 }]
+    const result = computeGanttLayout(tasks)
+    expect(result[0].task_id).toBe('my_task')
+    expect(result[0].state).toBe('failed')
+  })
+
+  it('running task (no ended_at) uses nowMs for xEnd', () => {
+    const startMs = new Date(t0).getTime()
+    const nowMs = startMs + 5000
+    const tasks = [{ task_id: 'r', state: 'running', started_at: t0, ended_at: null }]
+    const result = computeGanttLayout(tasks, nowMs)
+    expect(result[0].xEnd).toBe(1)
+    expect(result[0].durationMs).toBe(5000)
+  })
+})
+
+// ── buildCalendarData() / calendarCellCategory() ─────────────────────────────
+
+describe('buildCalendarData()', () => {
+  it('groups runs by YYYY-MM-DD', () => {
+    const runs = [
+      { created_at: '2024-03-15T10:00:00Z', state: 'success' },
+      { created_at: '2024-03-15T12:00:00Z', state: 'success' },
+      { created_at: '2024-03-16T08:00:00Z', state: 'failed' },
+    ]
+    const data = buildCalendarData(runs)
+    expect(data['2024-03-15'].total).toBe(2)
+    expect(data['2024-03-15'].success).toBe(2)
+    expect(data['2024-03-15'].failed).toBe(0)
+    expect(data['2024-03-16'].total).toBe(1)
+    expect(data['2024-03-16'].failed).toBe(1)
+  })
+
+  it('returns empty object for empty runs', () => {
+    expect(buildCalendarData([])).toEqual({})
+  })
+
+  it('ignores runs with no created_at', () => {
+    const data = buildCalendarData([{ created_at: '', state: 'success' }])
+    expect(Object.keys(data).length).toBe(0)
+  })
+})
+
+describe('calendarCellCategory()', () => {
+  it('no data → none', () => {
+    expect(calendarCellCategory(undefined)).toBe('none')
+    expect(calendarCellCategory({ total: 0, success: 0, failed: 0 })).toBe('none')
+  })
+
+  it('100% success → success', () => {
+    expect(calendarCellCategory({ total: 3, success: 3, failed: 0 })).toBe('success')
+  })
+
+  it('>=70% success → mostly-success', () => {
+    expect(calendarCellCategory({ total: 4, success: 3, failed: 1 })).toBe('mostly-success')
+  })
+
+  it('>=40% and <70% → mixed', () => {
+    expect(calendarCellCategory({ total: 5, success: 2, failed: 3 })).toBe('mixed')
+  })
+
+  it('<40% success → failure', () => {
+    expect(calendarCellCategory({ total: 5, success: 1, failed: 4 })).toBe('failure')
   })
 })

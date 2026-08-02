@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-900 tests · 16 API route modules · multi-user RBAC · Docker-ready
+914 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -891,7 +891,7 @@ Comparison against the Apache Airflow 3.x web UI. Items are grouped by priority.
 | Feature | Airflow 3.x | Status |
 |---|---|---|
 | **DAG search / filter bar** | Search + tag + owner filters on DAG list | ❌ not implemented |
-| **Grid view** | Per-task color grid across historical runs (run × task heatmap) | ❌ not implemented |
+| **Grid view** | Per-task color grid across historical runs (run × task heatmap) | ✅ implemented — ⊞ Grid tab in run detail |
 | **Task instance actions** | Re-run, clear, mark success/failed per task | ❌ click shows logs only |
 | **Run clear / re-run** | Clear whole run or subset of tasks | ❌ cancel only |
 | **Last run badge on DAG card** | Colored last-run state badge directly on each DAG card | ❌ shown only inside runs list |
@@ -904,8 +904,8 @@ Comparison against the Apache Airflow 3.x web UI. Items are grouped by priority.
 | **Event log page** | Searchable audit log of all Airflow events | ❌ API exists (`/event-logs`), no UI page |
 | **Dataset/Asset lineage view** | Visual dependency graph across datasets | ❌ API exists (`/datasets`), no UI |
 | **DAG code viewer** | Show raw DAG source file in UI | ❌ not exposed |
-| **Calendar view** | Run frequency heatmap calendar per DAG | ❌ not implemented |
-| **Gantt chart** | Task duration Gantt chart per run | ❌ not implemented |
+| **Calendar view** | Run frequency heatmap calendar per DAG | ✅ implemented — 📅 collapsible below runs table |
+| **Gantt chart** | Task duration Gantt chart per run | ✅ implemented — ▬ Gantt tab in run detail |
 
 ### 🟢 Nice-to-have
 

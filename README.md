@@ -1413,14 +1413,79 @@ export default dag({
 
 ### Comparison
 
+### 5. SMS via Twilio (`SmsNotifyOperator`)
+
+The `notify-provider` ships a ready-to-use `SmsNotifyOperator` powered by the Twilio REST API:
+
+```js
+import { getOperator } from 'airflow-nodejs/providers'
+const SmsNotifyOperator = getOperator('notify-provider', 'SmsNotifyOperator')
+
+export default dag({
+  id: 'my_pipeline',
+  schedule: '0 6 * * *',
+  tasks: {
+    work: { run: async () => doWork() },
+
+    sms_alert: {
+      dependsOn: ['work'],
+      triggerRule: 'all_done',       // fires whether pipeline succeeded or failed
+      ...SmsNotifyOperator({
+        message: 'Pipeline $DAG_ID done — run $RUN_ID',
+        // to: '+12025559999',        // override recipient per-task (optional)
+      }),
+    },
+  }
+})
+```
+
+**Setup — set these env vars** (in `docker-compose.yml` or `SECRETS_BACKEND=env`):
+
+```bash
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=your_auth_token
+TWILIO_FROM=+12025551234    # your Twilio number
+TWILIO_TO=+12025555678      # default recipient
+```
+
+Get credentials at [console.twilio.com](https://console.twilio.com) — free $15 trial, verified numbers only.
+
+---
+
+### 6. SMS via AWS SNS (`AwsSnsOperator`)
+
+```js
+const AwsSnsOperator = getOperator('notify-provider', 'AwsSnsOperator')
+
+sms_alert: {
+  dependsOn: ['work'],
+  triggerRule: 'all_done',
+  ...AwsSnsOperator({
+    message: 'Pipeline $DAG_ID done — run $RUN_ID',
+    phoneNumber: '+12025555678',              // direct SMS (E.164 format)
+    // OR: topicArn: 'arn:aws:sns:us-east-1:123:alerts',  // fan-out topic
+  }),
+}
+```
+
+Requires `aws-cli` in the runtime image and `AWS_DEFAULT_REGION` + credentials (env or IAM role/IRSA).
+
+---
+
+### Comparison
+
 | Approach | Config | Requires | Best for |
 |---|---|---|---|
 | `onSuccess`/`onFailure` | 1-line URL in DAG | HTTP endpoint | Webhooks, Slack, PagerDuty |
 | Shell task + curl | Extra task | `triggerRule: 'all_done'` | SendGrid, Mailgun, custom APIs |
 | Container task | Extra task | Docker socket | Any language / runtime |
 | Python task | Extra task | Python image variant | SMTP relay, Python email libs |
+| `SmsNotifyOperator` | Extra task | Twilio credentials | SMS — Twilio |
+| `AwsSnsOperator` | Extra task | AWS credentials + CLI | SMS / push — AWS SNS |
 
-**Recommended for most teams:** use `onSuccess`/`onFailure` for Slack/PagerDuty webhooks, and add an explicit `email_notify` task only if you need SMTP.
+**Recommended for most teams:** use `onSuccess`/`onFailure` for Slack/PagerDuty webhooks, and add an explicit `sms_alert` task with `SmsNotifyOperator` for critical pipelines.
+
+See `dags/sms_notification_demo.js` for a complete example.
 
 ---
 

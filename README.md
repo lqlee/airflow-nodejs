@@ -1221,6 +1221,209 @@ See `dags/deferrable_demo.js` for a working example.
 
 ---
 
+## Run Notifications (Email / Slack / Webhook)
+
+Notify users when a DAG run completes. Three approaches:
+
+### 1. Built-in webhooks (`onSuccess` / `onFailure`)
+
+The fastest option — no extra tasks needed. airflow-nodejs POSTs a JSON payload to the URL when the run finishes.
+
+```js
+export default dag({
+  id: 'my_pipeline',
+  schedule: '0 6 * * *',
+
+  // Called when ALL tasks succeed
+  onSuccess: 'https://hooks.slack.com/services/T.../B.../xxx',
+
+  // Called when any task fails
+  onFailure: 'https://your-alerting-service.com/webhook/pipeline-failed',
+
+  tasks: { ... }
+})
+```
+
+**Payload sent to both URLs (POST, Content-Type: application/json):**
+```json
+{
+  "dag_id": "my_pipeline",
+  "run_id": "6a6c...",
+  "state": "success",
+  "logical_date": null,
+  "conf": { "env": "prod" },
+  "tags": ["daily"],
+  "ended_at": "2024-01-15T06:03:22Z"
+}
+```
+
+- Fire-and-forget with a 5s timeout — delivery failures are logged, not retried
+- Works with any webhook receiver: Slack, PagerDuty, Teams, custom HTTP endpoints
+
+---
+
+### 2. Email via shell task (`triggerRule: 'all_done'`)
+
+Add a final task that runs regardless of upstream outcome and sends email via `sendmail` or `curl`+SMTP API:
+
+```js
+export default dag({
+  id: 'my_pipeline',
+  schedule: '0 6 * * *',
+  tasks: {
+    extract:   { run: async () => extract() },
+    transform: { dependsOn: ['extract'], run: async () => transform() },
+    load:      { dependsOn: ['transform'], run: async () => load() },
+
+    // Email on completion — runs whether pipeline succeeded or failed
+    email_notify: {
+      dependsOn: ['load'],
+      triggerRule: 'all_done',
+      shell: {
+        interpreter: 'sh',
+        // Uses curl + SendGrid API (replace with your SMTP relay or email API)
+        command: [
+          'STATUS=$(curl -sf http://localhost:3000/dag-runs/$RUN_ID | python3 -c "import json,sys; print(json.load(sys.stdin)[\'state\'])" 2>/dev/null || echo "unknown")',
+          'ICON=$([ "$STATUS" = "success" ] && echo "✅" || echo "❌")',
+          'curl -s --request POST \\',
+          '  --url https://api.sendgrid.com/v3/mail/send \\',
+          '  --header "Authorization: Bearer $SENDGRID_API_KEY" \\',
+          '  --header "Content-Type: application/json" \\',
+          '  --data "{',
+          '    \\"personalizations\\": [{',
+          '      \\"to\\": [{\\"email\\": \\"$NOTIFY_EMAIL\\"}]',
+          '    }],',
+          '    \\"from\\": {\\"email\\": \\"noreply@example.com\\"},',
+          '    \\"subject\\": \\"$ICON Pipeline $STATUS — $DAG_ID\\",',
+          '    \\"content\\": [{',
+          '      \\"type\\": \\"text/plain\\",',
+          '      \\"value\\": \\"DAG: $DAG_ID\\\\nRun: $RUN_ID\\\\nStatus: $STATUS\\"',
+          '    }]',
+          '  }"',
+        ].join('\n'),
+        env: {
+          SENDGRID_API_KEY: 'SG.your-api-key-here',
+          NOTIFY_EMAIL:     'team@example.com',
+        },
+      }
+    },
+  }
+})
+```
+
+**Alternative: `sendmail` (if installed in the runtime image):**
+```js
+shell: {
+  interpreter: 'sh',
+  command: [
+    'echo "Subject: Pipeline $DAG_ID done\\nRun: $RUN_ID" | sendmail team@example.com',
+  ].join('\n'),
+}
+```
+
+---
+
+### 3. Slack notification via container task
+
+```js
+export default dag({
+  id: 'my_pipeline',
+  schedule: null,
+  tasks: {
+    work: { run: async () => doWork() },
+
+    slack_notify: {
+      dependsOn: ['work'],
+      triggerRule: 'all_done',
+      container: {
+        image: 'curlimages/curl:latest',
+        command: [
+          'sh', '-c',
+          [
+            'STATUS=$(curl -sf http://host.docker.internal:3000/dag-runs/$RUN_ID',
+            '  | python3 -c "import json,sys; print(json.load(sys.stdin)[\'state\'])" 2>/dev/null || echo unknown)',
+            'ICON=$([ "$STATUS" = "success" ] && echo "✅" || echo "❌")',
+            'curl -sf -X POST $SLACK_WEBHOOK',
+            '  -H "Content-Type: application/json"',
+            '  -d "{\\"text\\":\\"$ICON Pipeline *$DAG_ID* $STATUS\\\\nRun: $RUN_ID\\"}"',
+          ].join(' '),
+        ],
+        env: {
+          SLACK_WEBHOOK: 'https://hooks.slack.com/services/T.../B.../xxx',
+        },
+      }
+    },
+  }
+})
+```
+
+---
+
+### 4. Email via Python task (if Python image)
+
+```js
+export default dag({
+  id: 'my_pipeline',
+  schedule: null,
+  tasks: {
+    work: { run: async () => doWork() },
+
+    email_notify: {
+      dependsOn: ['work'],
+      triggerRule: 'all_done',
+      python: {
+        interpreter: 'python3',
+        code: [
+          'import os, smtplib',
+          'from email.mime.text import MIMEText',
+          '',
+          'dag_id  = os.environ["DAG_ID"]',
+          'run_id  = os.environ["RUN_ID"]',
+          'smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")',
+          'smtp_port = int(os.environ.get("SMTP_PORT", "587"))',
+          'smtp_user = os.environ["SMTP_USER"]',
+          'smtp_pass = os.environ["SMTP_PASS"]',
+          'to_addr   = os.environ["NOTIFY_EMAIL"]',
+          '',
+          'msg = MIMEText(f"DAG: {dag_id}\\nRun: {run_id}")',
+          'msg["Subject"] = f"Pipeline complete: {dag_id}"',
+          'msg["From"] = smtp_user',
+          'msg["To"]   = to_addr',
+          '',
+          'with smtplib.SMTP(smtp_host, smtp_port) as s:',
+          '    s.starttls()',
+          '    s.login(smtp_user, smtp_pass)',
+          '    s.send_message(msg)',
+          'print(f"Email sent to {to_addr}")',
+        ].join('\n'),
+        env: {
+          SMTP_HOST:    'smtp.gmail.com',
+          SMTP_PORT:    '587',
+          SMTP_USER:    'your@gmail.com',
+          SMTP_PASS:    'app-password-here',  // use Gmail App Password
+          NOTIFY_EMAIL: 'team@example.com',
+        },
+      }
+    },
+  }
+})
+```
+
+---
+
+### Comparison
+
+| Approach | Config | Requires | Best for |
+|---|---|---|---|
+| `onSuccess`/`onFailure` | 1-line URL in DAG | HTTP endpoint | Webhooks, Slack, PagerDuty |
+| Shell task + curl | Extra task | `triggerRule: 'all_done'` | SendGrid, Mailgun, custom APIs |
+| Container task | Extra task | Docker socket | Any language / runtime |
+| Python task | Extra task | Python image variant | SMTP relay, Python email libs |
+
+**Recommended for most teams:** use `onSuccess`/`onFailure` for Slack/PagerDuty webhooks, and add an explicit `email_notify` task only if you need SMTP.
+
+---
+
 ## Providers Ecosystem
 
 Providers are reusable operator libraries — the Node.js equivalent of Airflow's community pip providers. Place provider files in `dags/providers/` and they're auto-discovered at startup.

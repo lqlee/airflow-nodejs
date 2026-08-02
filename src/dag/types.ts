@@ -45,6 +45,43 @@ export interface TaskContext {
   xcom: XComHelper
   connections: ConnectionHelper
   variables: VariableHelper
+  /**
+   * Suspend this task and free its worker slot until a trigger condition is met.
+   *
+   * Call `ctx.defer(trigger, opts?)` from a `run:` function to:
+   *   1. Immediately free the worker/pool slot (no blocking)
+   *   2. Mark the task as `deferred`
+   *   3. Poll `trigger(ctx)` on each scheduler tick (~5s)
+   *   4. When trigger returns `true` → task resumes as `success`
+   *   5. When trigger returns `false` → task re-queues after `pokeInterval`
+   *
+   * This is equivalent to Airflow's deferrable operators / Triggerer pattern.
+   *
+   * The `trigger` function runs **in the scheduler process** (not a worker fork),
+   * so it must be self-contained — no closures over worker-scope imports.
+   * Use `ctx.conf`, `ctx.xcom`, DB queries via the trigger's own context.
+   *
+   * Example — defer until an XCom value appears:
+   *   run: async (ctx) => {
+   *     // Start a long job, then defer instead of polling
+   *     startExternalJob(ctx.conf.jobId)
+   *     await ctx.defer(
+   *       async (tctx) => {
+   *         const status = await tctx.xcom.pull('job_status', 'status')
+   *         return status === 'complete'
+   *       },
+   *       { timeout: 30 * 60 * 1000, interval: 10_000 }
+   *     )
+   *   }
+   *
+   * @param trigger  Function polled until it returns true. Receives the same ctx.
+   * @param opts.timeout   Max ms to wait before failing. Default: task-level timeout.
+   * @param opts.interval  Ms between trigger polls. Default: 10_000 (10s). Min: 100ms.
+   */
+  defer: (
+    trigger: (ctx: Omit<TaskContext, 'defer'>) => Promise<boolean>,
+    opts?: { timeout?: number; interval?: number }
+  ) => Promise<never>  // throws DeferSignal — caller's run: fn must not catch it
 }
 
 /**

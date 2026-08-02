@@ -2,6 +2,7 @@ import { ObjectId, type Db } from 'mongodb'
 import { loadDags } from '../dag/loader.js'
 import { getDag, listDags } from '../dag/registry.js'
 import { claimReadyTasks, skipUnsatisfiableTasks, applyBranchDecisions, expandDynamicMapped } from './claim.js'
+import { pollDeferredTasks } from './executor.js'
 import { executeTask } from './executor.js'
 import { syncCronJobs, stopAllCronJobs, tickTimetables } from './cron.js'
 import { checkSlaBreaches } from '../sla/index.js'
@@ -60,6 +61,9 @@ async function tick(db: Db): Promise<void> {
 
     // Tick timetable-scheduled dags (custom schedule functions)
     await tickTimetables(db, dags)
+
+    // Poll deferred tasks — check trigger conditions, resume or reschedule
+    await pollDeferredTasks(db)
 
     // Check SLA breaches for all active runs
     await checkSlaBreaches(db, dags)
@@ -135,6 +139,7 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
 
   // Check overall run completion — skipped counts as terminal (not failed)
   const tasks = await db.collection('task_instances').find({ dag_run_id: dagRunId }).toArray()
+  // 'deferred' is non-terminal — task is waiting for trigger, must not finalize the run
   const TERMINAL_STATES = new Set(['success', 'failed', 'cancelled', 'skipped'])
   const allDone = tasks.every(t => TERMINAL_STATES.has(t.state))
   const anyFailed = tasks.some(t => t.state === 'failed')

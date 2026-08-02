@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-831 tests · 16 API route modules · multi-user RBAC · Docker-ready
+838 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -972,6 +972,61 @@ export default dag({
 **Note:** `run:` JS tasks don't need templating — use `ctx.conf.key`, `ctx.xcom.pull()`, and `new Date()` directly in the function body. Templating is for static string fields that can't be closures.
 
 See `dags/templating_demo.js` for a full working example.
+
+---
+
+## Deferrable Tasks
+
+Deferrable tasks suspend mid-execution and free their worker slot. The scheduler polls a trigger condition; when it fires, the task resumes. This is equivalent to Airflow's `deferrable=True` operators and Triggerer process.
+
+```js
+export default dag({
+  id: 'my_pipeline',
+  schedule: null,
+  tasks: {
+    wait_for_job: {
+      run: async (ctx) => {
+        // Start a long-running external job
+        const jobId = await startExternalJob(ctx.conf.params)
+        await ctx.xcom.push('job_id', jobId)
+
+        // Defer: free worker slot, poll every 10s
+        await ctx.defer(
+          // Trigger — runs in scheduler process, must be self-contained
+          async (tctx) => {
+            const jobId = await tctx.xcom.pull('wait_for_job', 'job_id')
+            const status = await checkJobStatus(String(jobId))  // HTTP call or DB query
+            return status === 'complete'
+          },
+          { interval: 10_000, timeout: 60 * 60 * 1000 }  // poll 10s, deadline 1h
+        )
+        // ctx.defer() never returns — task resumes as 'success' when trigger fires
+      }
+    },
+
+    // Runs after wait_for_job resumes
+    process: {
+      dependsOn: ['wait_for_job'],
+      run: async (ctx) => processResults(ctx),
+    },
+  }
+})
+```
+
+**Key behaviors:**
+- Worker slot is freed immediately when `ctx.defer()` is called
+- Task state becomes `deferred` (non-terminal — run doesn't complete yet)
+- `trigger()` is polled by the scheduler on each tick (~5s)
+- `trigger() → true` → task succeeds; downstream tasks proceed
+- Deadline exceeded → task fails; run fails
+- `trigger()` throws → task fails
+
+**Trigger function constraints:**
+- Runs **in the scheduler process**, not a worker fork
+- Must be **self-contained** — no closures over module-scope imports
+- Use `tctx.xcom`, `tctx.conf`, or direct HTTP/DB calls to read state
+
+See `dags/deferrable_demo.js` for a working example.
 
 ---
 

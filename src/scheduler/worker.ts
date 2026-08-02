@@ -4,12 +4,12 @@
  * Secrets are decrypted HERE in the worker — never passed as plaintext over IPC.
  *
  * IPC protocol:
- *   parent → worker (regular task):  { type: 'run',  fn, ctx }
- *   parent → worker (sensor task):   { type: 'poke', fn, ctx }
- *   worker → parent:                 { type: 'done', outcome: 'success'|'reschedule'|'fail', error? }
+ *   parent → worker (regular task):   { type: 'run',  fn, ctx }
+ *   parent → worker (sensor task):    { type: 'poke', fn, ctx }
+ *   worker → parent:                  { type: 'done', outcome: 'success'|'reschedule'|'fail'|'deferred', error?, triggerFn?, deferInterval? }
  *
  * ctx includes: dagId, runId, taskId, mapIndex, mapValue
- * Injected in worker: conf (from DB), xcom, connections, variables
+ * Injected in worker: conf (from DB), xcom, connections, variables, defer
  */
 import { MongoClient } from 'mongodb'
 import { xcomPush, xcomPull } from '../xcom/index.js'
@@ -31,6 +31,18 @@ type WorkerCtx = {
 type RunMsg  = { type: 'run';  fn: string; ctx: WorkerCtx }
 type PokeMsg = { type: 'poke'; fn: string; ctx: WorkerCtx }
 type WorkerMsg = RunMsg | PokeMsg
+
+/**
+ * Thrown by ctx.defer() inside a run: function to signal deferral.
+ * The worker catches it and sends the deferred outcome to the parent.
+ */
+class DeferSignal {
+  constructor(
+    public readonly triggerFn: string,
+    public readonly interval: number,
+    public readonly timeout: number,
+  ) {}
+}
 
 process.on('message', async (msg: WorkerMsg) => {
   if (msg.type !== 'run' && msg.type !== 'poke') return
@@ -63,6 +75,16 @@ process.on('message', async (msg: WorkerMsg) => {
       get: (key: string) => getVariableRuntime(db, key),
     }
 
+    // defer() — suspends the task and frees the worker slot.
+    // Throws DeferSignal which is caught below and sent as 'deferred' outcome.
+    const defer = (
+      trigger: (tctx: unknown) => Promise<boolean>,
+      opts: { timeout?: number; interval?: number } = {}
+    ): Promise<never> => {
+      const interval = Math.max(100, opts.interval ?? 10_000)  // minimum 100ms
+      throw new DeferSignal(trigger.toString(), interval, opts.timeout ?? 0)
+    }
+
     // eslint-disable-next-line no-new-func
     const fn_ = new Function(`return (${fn})`)() as (
       ctx: WorkerCtx & {
@@ -70,10 +92,11 @@ process.on('message', async (msg: WorkerMsg) => {
         xcom: typeof xcom
         connections: typeof connections
         variables: typeof variables
+        defer: typeof defer
       }
     ) => Promise<unknown>
 
-    const fullCtx = { ...ctx, conf, xcom, connections, variables }
+    const fullCtx = { ...ctx, conf, xcom, connections, variables, defer }
 
     if (msg.type === 'poke') {
       const ready = await fn_(fullCtx) as boolean
@@ -83,8 +106,13 @@ process.on('message', async (msg: WorkerMsg) => {
       process.send!({ type: 'done', outcome: 'success' })
     }
   } catch (err: unknown) {
-    const error = err instanceof Error ? err.message : String(err)
-    process.send!({ type: 'done', outcome: 'fail', error })
+    if (err instanceof DeferSignal) {
+      // Task chose to defer — send triggerFn and interval back to parent
+      process.send!({ type: 'done', outcome: 'deferred', triggerFn: err.triggerFn, deferInterval: err.interval, deferTimeout: err.timeout })
+    } else {
+      const error = err instanceof Error ? err.message : String(err)
+      process.send!({ type: 'done', outcome: 'fail', error })
+    }
   } finally {
     await client.close()
     process.exit(0)

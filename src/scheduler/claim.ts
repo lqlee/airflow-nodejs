@@ -2,6 +2,7 @@ import type { Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
 
 // Terminal states — a task is done once it reaches one of these
+// 'deferred' is non-terminal but not claimable — polled separately by pollDeferredTasks
 const TERMINAL = new Set(['success', 'failed', 'cancelled', 'skipped'])
 
 /**

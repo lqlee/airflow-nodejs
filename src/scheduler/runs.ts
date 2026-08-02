@@ -35,7 +35,7 @@ export interface TaskInstance {
   map_index: number | null
   /** Per-instance input value for mapped tasks; null for non-mapped tasks */
   map_value: unknown
-  state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled' | 'skipped'
+  state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled' | 'skipped' | 'deferred'
   depends_on: string[]
   /** Trigger rule — controls when this task runs. Default: 'all_success'. */
   trigger_rule: 'all_success' | 'all_failed' | 'all_done' | 'one_success' | 'one_failed' | 'none_failed'
@@ -54,6 +54,14 @@ export interface TaskInstance {
   first_poked_at: Date | null  // when poke was first invoked — NOT started_at (claim overwrites it)
   next_poke_at: Date | null    // earliest time for the next poke; null = ready immediately
   poke_count: number        // number of poke() calls made so far
+  /**
+   * Deferral fields — set when a run: task calls ctx.defer().
+   * The trigger fn (serialized) is polled on each scheduler tick.
+   * While deferred the worker slot is freed; deferred is non-terminal.
+   */
+  deferred_trigger_fn: string | null    // serialized trigger function
+  deferred_at: Date | null              // when defer() was called
+  defer_timeout_ms: number              // 0 = no deadline; matches task-level timeout
   /** true if this task is a branch task (has a branch: fn) */
   is_branch: boolean
   /**
@@ -169,6 +177,9 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
         first_poked_at: null,
         next_poke_at: null,
         poke_count: 0,
+        deferred_trigger_fn: null,
+        deferred_at: null,
+        defer_timeout_ms: task.timeout ?? 0,
         is_branch: isBranch,
         is_dynamic_placeholder: isDynamic,
         dynamic_expand_source: dynamicExpandSource,

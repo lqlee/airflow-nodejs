@@ -11,7 +11,8 @@ import { appendLog } from '../logs/index.js'
 import { enqueueTask } from '../queue/producer.js'
 import { sensorOutcome } from './sensor.js'
 import { recordTry } from './tries.js'
-import { getRunMeta } from './run-conf.js'
+import { getRunMeta, getRunConf } from './run-conf.js'
+import { xcomPush, xcomPull } from '../xcom/index.js'
 import { renderTemplate, renderArgs, renderEnv, type TemplateContext } from './template.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -32,7 +33,14 @@ const EXEC_PATH = IS_COMPILED
 // When REDIS_URL is set, use BullMQ (distributed). Otherwise use local fork.
 const USE_BULLMQ = Boolean(process.env.REDIS_URL)
 
-type WorkerDoneMsg = { type: 'done'; outcome: 'success' | 'reschedule' | 'fail'; error?: string }
+type WorkerDoneMsg = {
+  type: 'done'
+  outcome: 'success' | 'reschedule' | 'fail' | 'deferred'
+  error?: string
+  triggerFn?: string      // set when outcome === 'deferred'
+  deferInterval?: number
+  deferTimeout?: number   // 0 = use task-level timeout or no timeout
+}
 
 export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
   const dag = getDag(ti.dag_id)
@@ -179,6 +187,32 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
           await schedulePoke(db, ti, firstPokedAt, now)
           console.log(`[executor] ↻ sensor ${ti.dag_id}.${ti.task_id} requeued (poke #${ti.poke_count + 1})`)
         }
+      } else if (msg.outcome === 'deferred') {
+        // Task called ctx.defer() — free slot, store trigger fn, mark deferred
+        release()
+        if (ti.pool) releasePool(ti.pool)
+        const interval = msg.deferInterval ?? 10_000
+        // defer timeout: use defer()-supplied value > task-level > no timeout
+        const deferTimeoutMs = (msg.deferTimeout && msg.deferTimeout > 0)
+          ? msg.deferTimeout
+          : (ti.timeout_ms > 0 ? ti.timeout_ms : 0)
+        const nextCheckAt = new Date(Date.now() + interval)
+        await db.collection('task_instances').updateOne(
+          tiFilter(ti),
+          {
+            $set: {
+              state: 'deferred',
+              deferred_trigger_fn: msg.triggerFn ?? null,
+              deferred_at: new Date(),
+              defer_timeout_ms: deferTimeoutMs,
+              next_poke_at: nextCheckAt,
+              poke_interval_ms: interval,
+            },
+          },
+        )
+        console.log(`[executor] ⏸ ${ti.dag_id}.${ti.task_id} deferred — next check: ${nextCheckAt.toISOString()}`)
+        done()
+        return  // skip the release() below (already released)
       } else if (msg.outcome === 'success') {
         const endedAt = new Date()
         void recordTry(db, ti, 'success', endedAt)
@@ -796,4 +830,90 @@ async function markFailed(db: Db, ti: TaskInstance, error: string): Promise<void
     tiFilter(ti),
     { $set: { state: 'failed', ended_at: new Date(), error } }
   )
+}
+
+// ── Deferred task poller ───────────────────────────────────────────────────────
+
+/**
+ * Poll all deferred tasks whose next_poke_at has arrived.
+ * Runs the stored trigger function IN the scheduler process (no fork) —
+ * so trigger functions must be self-contained (no module-scope closures).
+ *
+ * On trigger() === true  → mark task success
+ * On trigger() === false → reschedule to next check
+ * On deadline exceeded   → mark task failed
+ * On trigger() throws    → mark task failed
+ */
+export async function pollDeferredTasks(db: Db): Promise<void> {
+  const now = new Date()
+
+  const deferredTasks = await db.collection<TaskInstance>('task_instances').find({
+    state: 'deferred',
+    next_poke_at: { $lte: now },
+  }).toArray()
+
+  if (deferredTasks.length === 0) return
+
+  for (const ti of deferredTasks) {
+    if (!ti.deferred_trigger_fn) {
+      // No trigger fn stored — mark failed
+      await markFailed(db, ti, 'Deferred task has no trigger function')
+      continue
+    }
+
+    // Check deadline
+    if (ti.defer_timeout_ms > 0 && ti.deferred_at) {
+      const elapsed = now.getTime() - new Date(ti.deferred_at).getTime()
+      if (elapsed > ti.defer_timeout_ms) {
+        await markFailed(db, ti, `Deferred task timed out after ${ti.defer_timeout_ms}ms`)
+        console.error(`[executor] ⏱ deferred ${ti.dag_id}.${ti.task_id} timed out`)
+        continue
+      }
+    }
+
+    try {
+      // Re-hydrate the trigger function
+      // eslint-disable-next-line no-new-func
+      const triggerFn = new Function(`return (${ti.deferred_trigger_fn})`)() as
+        (ctx: unknown) => Promise<boolean>
+
+      // Build minimal trigger context (in-process, no DB_NAME env needed — uses same DB)
+      const conf = await getRunConf(db, ti.dag_run_id)
+      const tctx = {
+        dagId:    ti.dag_id,
+        runId:    ti.dag_run_id,
+        taskId:   ti.task_id,
+        mapIndex: ti.map_index,
+        mapValue: ti.map_value,
+        conf,
+        xcom: {
+          push: (key: string, value: unknown) =>
+            xcomPush(db, ti.dag_run_id, ti.dag_id, ti.task_id, ti.map_index, key, value),
+          pull: (fromTaskId: string, key: string) =>
+            xcomPull(db, ti.dag_run_id, fromTaskId, key),
+        },
+      }
+
+      const ready = await triggerFn(tctx)
+
+      if (ready) {
+        void recordTry(db, ti, 'success', now)
+        await markSuccess(db, ti)
+        console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id} (deferred → resumed)`)
+      } else {
+        // Reschedule
+        const interval = ti.poke_interval_ms || 10_000
+        const nextCheck = new Date(now.getTime() + interval)
+        await db.collection('task_instances').updateOne(
+          tiFilter(ti),
+          { $set: { next_poke_at: nextCheck }, $inc: { poke_count: 1 } },
+        )
+        console.log(`[executor] ↻ deferred ${ti.dag_id}.${ti.task_id} — next check: ${nextCheck.toISOString()}`)
+      }
+    } catch (err: unknown) {
+      const error = err instanceof Error ? err.message : String(err)
+      await markFailed(db, ti, `Deferred trigger threw: ${error}`)
+      console.error(`[executor] ✗ deferred ${ti.dag_id}.${ti.task_id}: trigger threw: ${error}`)
+    }
+  }
 }

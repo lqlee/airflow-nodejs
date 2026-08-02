@@ -12,6 +12,7 @@ import { enqueueTask } from '../queue/producer.js'
 import { sensorOutcome } from './sensor.js'
 import { recordTry } from './tries.js'
 import { getRunMeta, getRunConf } from './run-conf.js'
+import { USE_KUBERNETES_EXECUTOR, executeTaskOnKubernetes } from './kubernetes-executor.js'
 import { xcomPush, xcomPull } from '../xcom/index.js'
 import { renderTemplate, renderArgs, renderEnv, type TemplateContext } from './template.js'
 
@@ -86,6 +87,11 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     await markSuccess(db, ti)
     console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id} (HITL approved, no-op)`)
     return
+  }
+
+  // Kubernetes executor — dispatch task as a pod (run: tasks only; sensors/deferred not supported)
+  if (USE_KUBERNETES_EXECUTOR) {
+    return executeTaskOnKubernetes(db, ti)
   }
 
   // Sensors must run locally — BullMQ workers don't have reschedule semantics yet
@@ -808,7 +814,7 @@ async function schedulePoke(db: Db, ti: TaskInstance, firstPokedAt: Date, now: D
   )
 }
 
-async function scheduleRetry(db: Db, ti: TaskInstance, error: string): Promise<void> {
+export async function scheduleRetry(db: Db, ti: TaskInstance, error: string): Promise<void> {
   const requeue = async () => {
     await db.collection('task_instances').updateOne(
       tiFilter(ti),

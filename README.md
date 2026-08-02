@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-887 tests · 16 API route modules · multi-user RBAC · Docker-ready
+900 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -972,6 +972,48 @@ export default dag({
 **Note:** `run:` JS tasks don't need templating — use `ctx.conf.key`, `ctx.xcom.pull()`, and `new Date()` directly in the function body. Templating is for static string fields that can't be closures.
 
 See `dags/templating_demo.js` for a full working example.
+
+---
+
+## Kubernetes Executor
+
+Runs every task as an ephemeral Kubernetes Pod — the equivalent of Airflow's `KubernetesExecutor`. Enable by setting `KUBERNETES_EXECUTOR=true`.
+
+**How it works:** Instead of forking a child process, the scheduler dispatches each task as a `kubectl run --restart=Never --rm --attach` pod. The pod runs the same `worker-cli.js` entry point, connecting back to MongoDB to execute the task function.
+
+**Configuration:**
+
+```bash
+KUBERNETES_EXECUTOR=true
+KUBERNETES_NAMESPACE=airflow          # default: 'default'
+KUBERNETES_IMAGE=airflow-nodejs:local # image containing dist/
+KUBERNETES_KUBECONFIG=/path/to/kubeconfig  # optional
+KUBERNETES_CONTEXT=my-cluster         # optional
+KUBERNETES_SERVICE_ACCOUNT=airflow-sa # optional (IRSA/Workload Identity)
+KUBERNETES_CPU_REQUEST=100m           # optional
+KUBERNETES_MEMORY_REQUEST=256Mi       # optional
+```
+
+**Requirements:**
+- `kubectl` on PATH, configured for the target cluster
+- Scheduler service account has `pods/create` + `pods/delete` RBAC permissions
+- MongoDB reachable from within the cluster (`MONGO_URL` must use cluster-internal DNS)
+- `KUBERNETES_IMAGE` must be pullable from within the cluster
+
+**Limitations:**
+- Sensors and deferrable tasks are not supported (require local mode)
+- `run:` JS tasks only — shell/python/java/container tasks still use their respective executors regardless of this setting
+- `KUBERNETES_EXECUTOR` and `REDIS_URL` (BullMQ) are mutually exclusive
+
+**Comparison of execution modes:**
+
+| Mode | Enable | Tasks run as |
+|---|---|---|
+| Local (default) | — | Forked child processes |
+| BullMQ | `REDIS_URL=redis://...` | BullMQ workers (Redis queue) |
+| **Kubernetes** | `KUBERNETES_EXECUTOR=true` | K8s pods via kubectl |
+
+⚠️ **Live execution requires cluster RBAC:** the GKE cluster used in this project requires `pods/create` permission in the target namespace. Argv construction is verified via unit tests.
 
 ---
 

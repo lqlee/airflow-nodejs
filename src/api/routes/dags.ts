@@ -7,6 +7,7 @@ import { pauseDag, resumeDag, isDagPaused, getPausedDagIds } from '../../dag/pau
 import { getDagStats } from '../../stats/index.js'
 import { backfill, BACKFILL_MAX_RUNS } from '../../scheduler/backfill.js'
 import { listDagVersions, getDagSource } from '../../dag/version.js'
+import { validateParams } from '../../dag/params.js'
 
 export async function dagsRoutes(app: FastifyInstance): Promise<void> {
   // GET /dags — list all registered dags with pause state
@@ -48,6 +49,19 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
         group_id: t.group ?? null,
         depends_on: t.dependsOn ?? [],
       })),
+      params: dag.params
+        ? Object.entries(dag.params).map(([key, p]) => ({
+            name: key,
+            type: p.type ?? null,
+            default: p.default ?? null,
+            description: p.description ?? null,
+            enum: p.enum ?? null,
+            minimum: p.minimum ?? null,
+            maximum: p.maximum ?? null,
+            pattern: p.pattern ?? null,
+            required: p.default === undefined,
+          }))
+        : [],
     })
   })
 
@@ -101,9 +115,19 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: '"tags" must be an array of strings' })
     }
 
+    // Validate typed params (if dag defines params schema) and merge defaults
+    const callerConf = (body.conf as Record<string, unknown>) ?? {}
+    const paramResult = validateParams(dag, callerConf)
+    if (!paramResult.ok) {
+      return reply.status(400).send({
+        error: 'Param validation failed',
+        param_errors: paramResult.errors.map(e => ({ param: e.param, message: e.message })),
+      })
+    }
+
     const db = app.mongo
     const runId = await createRun(db, dag, {
-      conf: body.conf,
+      conf: paramResult.mergedConf,  // defaults merged in
       tags: body.tags,
     })
 

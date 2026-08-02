@@ -119,6 +119,28 @@ export interface DynamicExpand {
   key: string
 }
 
+/**
+ * A typed DAG parameter definition.
+ * Validated at trigger time before the run is created.
+ * Equivalent to Airflow's `Param` class.
+ */
+export interface ParamDefinition {
+  /** JSON Schema type. Validated if provided. */
+  type?: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object'
+  /** Default value used when caller doesn't supply this param. Omit to make param required. */
+  default?: unknown
+  /** Human-readable description shown in API docs and UI. */
+  description?: string
+  /** Restrict to one of these exact values. */
+  enum?: unknown[]
+  /** Minimum value (number/integer only). */
+  minimum?: number
+  /** Maximum value (number/integer only). */
+  maximum?: number
+  /** Regex pattern the value must match (string only). */
+  pattern?: string
+}
+
 export interface TaskDefinition {
   dependsOn?: string[]
   group?: string           // optional TaskGroup membership — label only, no scheduler impact
@@ -563,6 +585,21 @@ export interface DagDefinition {
   timetable?: TimetableFn
   sla?: number             // ms — if a run hasn't completed within this window, an SLA alert is fired
   version?: string         // sha256[:12] of the dag source file — stamped by the loader
+  /**
+   * Typed parameter definitions — validated at trigger time.
+   * Caller supplies values via POST /dags/:id/trigger body.conf.
+   * Missing required params (no default) → 400 error.
+   * Type/range/enum violations → 400 error with descriptive message.
+   * Defaults are merged into conf before the run is created.
+   *
+   * Example:
+   *   params: {
+   *     env:   { type: 'string', enum: ['dev','staging','prod'], default: 'dev' },
+   *     count: { type: 'integer', minimum: 1, maximum: 100, default: 10 },
+   *     name:  { type: 'string', description: 'Required — no default' },
+   *   }
+   */
+  params?: Record<string, ParamDefinition>
   tasks: Record<string, TaskDefinition>
   /** Optional TaskGroup definitions. Tasks opt-in via task.group = 'groupId'. */
   groups?: Record<string, TaskGroupDefinition>

@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-838 tests · 16 API route modules · multi-user RBAC · Docker-ready
+863 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -972,6 +972,63 @@ export default dag({
 **Note:** `run:` JS tasks don't need templating — use `ctx.conf.key`, `ctx.xcom.pull()`, and `new Date()` directly in the function body. Templating is for static string fields that can't be closures.
 
 See `dags/templating_demo.js` for a full working example.
+
+---
+
+## Typed DAG Params
+
+DAG params add type safety and validation to trigger-time configuration. Validated before the run is created — bad params return `400` without touching the DB.
+
+```js
+export default dag({
+  id: 'my_pipeline',
+  schedule: null,
+
+  params: {
+    name:       { type: 'string', description: 'Required — no default' },
+    env:        { type: 'string', enum: ['dev', 'staging', 'prod'], default: 'dev' },
+    batch_size: { type: 'integer', minimum: 1, maximum: 10000, default: 100 },
+    dry_run:    { type: 'boolean', default: false },
+    prefix:     { type: 'string', pattern: '^[a-z]+$', default: 'output' },
+  },
+
+  tasks: {
+    run: {
+      run: async (ctx) => {
+        // ctx.conf has caller values + defaults merged in
+        const { name, env, batch_size, dry_run } = ctx.conf
+        return { name, env, batch_size, dry_run }
+      }
+    }
+  }
+})
+```
+
+**Trigger:**
+```bash
+# Valid — defaults merged automatically
+curl -X POST http://localhost:3000/dags/my_pipeline/trigger \
+  -H 'Content-Type: application/json' \
+  -d '{"conf": {"name": "alice"}}'
+# → 201 { run_id: "...", conf: { name: "alice", env: "dev", batch_size: 100, dry_run: false } }
+
+# Missing required param → 400
+curl -X POST .../trigger -d '{}'
+# → 400 { "error": "Param validation failed", "param_errors": [{ "param": "name", "message": "Required param 'name' not provided" }] }
+```
+
+**Param fields:**
+
+| Field | Description |
+|---|---|
+| `type` | `string` \| `number` \| `integer` \| `boolean` \| `array` \| `object` |
+| `default` | Default value. Omit to make param required. |
+| `description` | Shown in `GET /dags/:id` response |
+| `enum` | Restrict to exact values: `['dev','staging','prod']` |
+| `minimum` / `maximum` | Numeric range (number/integer only) |
+| `pattern` | Regex pattern (string only): `'^[a-z]+$'` |
+
+See `dags/typed_params_demo.js` for a full example.
 
 ---
 

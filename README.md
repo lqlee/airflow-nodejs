@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-929 tests · 16 API route modules · multi-user RBAC · Docker-ready
+935 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -304,6 +304,8 @@ MongoDB collections:
 | `GLOBAL_SLACK_FAILURE_WEBHOOK` | _(unset)_ | Slack webhook — fires on failure only |
 | `GLOBAL_SUCCESS_WEBHOOK` | _(unset)_ | Generic JSON webhook — fires on every success run |
 | `GLOBAL_FAILURE_WEBHOOK` | _(unset)_ | Generic JSON webhook — fires on every failure run |
+| `LOG_BACKEND` | `file` | Task log storage: `file` (default) or `mongodb` |
+| `LOG_DIR` | `./logs` | Directory for task log files (when `LOG_BACKEND=file`) |
 | `SECRETS_BACKEND` | `none` | Secrets fallback: `none`, `env`, `file` |
 | `SECRETS_FILE_PATH` | _(unset)_ | Path to secrets JSON file (when `SECRETS_BACKEND=file`) |
 | `KUBERNETES_EXECUTOR` | _(unset)_ | Set to `true` to dispatch all tasks as K8s pods |
@@ -1453,7 +1455,74 @@ export default dag({
 
 ### Comparison
 
-### 5. SMS via Twilio (`SmsNotifyOperator`)
+### 5. Email with log attachment (`EmailNotifyOperator`) — **default notification**
+
+The most useful notification: sends an email with the full task log attached as a **gzip-compressed file**. Large logs are split into ≤100 MB parts (configurable via `LOG_PART_MB`).
+
+```js
+import { getOperator } from 'airflow-nodejs/providers'
+const EmailNotifyOperator = getOperator('notify-provider', 'EmailNotifyOperator')
+
+export default dag({
+  id: 'my_pipeline',
+  schedule: '0 6 * * *',
+  tasks: {
+    work:  { run: async (ctx) => { ctx.log.info('processing...'); return 'done' } },
+
+    // Runs after work — success OR failure — attaches log to email
+    notify: {
+      dependsOn: ['work'],
+      triggerRule: 'all_done',
+      ...EmailNotifyOperator({
+        subject: 'Pipeline $dag_id report — run $run_id',
+        body:    'See attached log for details.',
+      }),
+    },
+  }
+})
+```
+
+**Setup:**
+```bash
+# docker-compose.yml — add to app environment:
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your@gmail.com
+SMTP_PASS=your-app-password     # Gmail: Settings → Security → App passwords
+NOTIFY_EMAIL=team@example.com
+```
+
+**What happens:**
+1. After the task completes, `EmailNotifyOperator` finds the log file at `logs/<dag_id>/<run_id>/<task_id>.log`
+2. Gzip-compresses it (`gzip -9`, typically 5–20× reduction)
+3. If compressed size > 100 MB → splits into multiple emails (`part1`, `part2`, ...)
+4. Sends each part via SMTP with the `.log.gz` file attached
+5. Falls back to plain-text email if no log file found
+
+**Decompress the attachment:**
+```bash
+gunzip my_pipeline_run123_work.log.gz
+```
+
+**Configuration env vars:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `SMTP_HOST` | — | SMTP server (e.g. `smtp.gmail.com`) |
+| `SMTP_PORT` | `587` | Port (587=STARTTLS, 465=SSL) |
+| `SMTP_USE_SSL` | `false` | Set `true` for port 465 |
+| `SMTP_USER` | — | Sender email address |
+| `SMTP_PASS` | — | Password / App Password |
+| `NOTIFY_EMAIL` | — | Recipient address |
+| `LOG_PART_MB` | `100` | Max attachment size per email (MB) |
+
+Requires Python 3 — use the `airflow-nodejs:python` image variant.
+
+See `dags/email_log_notification_demo.js` for a complete example.
+
+---
+
+### 6. SMS via Twilio (`SmsNotifyOperator`)
 
 The `notify-provider` ships a ready-to-use `SmsNotifyOperator` powered by the Twilio REST API:
 
@@ -1520,10 +1589,11 @@ Requires `aws-cli` in the runtime image and `AWS_DEFAULT_REGION` + credentials (
 | Shell task + curl | Extra task | `triggerRule: 'all_done'` | SendGrid, Mailgun, custom APIs |
 | Container task | Extra task | Docker socket | Any language / runtime |
 | Python task | Extra task | Python image variant | SMTP relay, Python email libs |
+| `EmailNotifyOperator` | Extra task | Python + SMTP creds | **Email with gzipped log attached** |
 | `SmsNotifyOperator` | Extra task | Twilio credentials | SMS — Twilio |
 | `AwsSnsOperator` | Extra task | AWS credentials + CLI | SMS / push — AWS SNS |
 
-**Recommended for most teams:** use `onSuccess`/`onFailure` for Slack/PagerDuty webhooks, and add an explicit `sms_alert` task with `SmsNotifyOperator` for critical pipelines.
+**Recommended for most teams:** use `EmailNotifyOperator` as the default (email + attached log), `GLOBAL_SLACK_WEBHOOK` for team-wide Slack visibility, and `SmsNotifyOperator` for critical on-call alerts.
 
 See `dags/sms_notification_demo.js` for a complete example.
 

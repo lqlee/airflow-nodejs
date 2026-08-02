@@ -8,8 +8,13 @@ services:
     environment:
       MONGO_URL: mongodb://mongo:27017/airflow
       PORT: "3000"
+      # Task log backend — 'file' (default) keeps MongoDB lean
+      # Logs written to LOG_DIR inside the container, mounted to ./logs on host
+      LOG_BACKEND: "file"
+      LOG_DIR: "/app/logs"
     volumes:
       - ./dags:/app/dags
+      - ./logs:/app/logs    # task log files — NOT checked in (see .gitignore)
     depends_on:
       mongo:
         condition: service_healthy

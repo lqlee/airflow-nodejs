@@ -62,6 +62,7 @@ async function taskLogs(runId: string, taskId: string): Promise<string[]> {
 // ── setup ─────────────────────────────────────────────────────────────────────
 
 beforeAll(async () => {
+  process.env.LOG_BACKEND = 'mongodb'  // tests read from task_logs collection directly
   client = new MongoClient(MONGO_URL)
   await client.connect()
   db = client.db(TEST_DB)

@@ -89,6 +89,7 @@ async function runState(runId: string): Promise<string | undefined> {
 // ── setup ─────────────────────────────────────────────────────────────────────
 
 beforeAll(async () => {
+  process.env.LOG_BACKEND = 'mongodb' // tests read from task_logs directly
   process.env.DB_NAME = TEST_DB
   client = new MongoClient(MONGO_URL)
   await client.connect()

@@ -10,9 +10,14 @@ const RUN_ID = 'test-run-logs'
 const DAG_ID = 'test_dag'
 
 beforeAll(async () => {
+  process.env.LOG_BACKEND = 'mongodb'  // this test suite targets MongoDB backend directly
   client = new MongoClient(MONGO_URL)
   await client.connect()
   db = client.db('airflow_test_logs')
+})
+
+afterAll(async () => {
+  delete process.env.LOG_BACKEND
 })
 
 afterAll(async () => {

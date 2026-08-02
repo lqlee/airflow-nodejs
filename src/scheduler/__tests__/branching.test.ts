@@ -61,6 +61,7 @@ async function xcomValue(runId: string, taskId: string, key: string): Promise<un
 beforeAll(async () => {
   // Branch tasks run in forked workers which inherit process.env.
   // Set DB_NAME so workers write XCom to the same test DB as this test.
+  process.env.LOG_BACKEND = 'mongodb' // tests read from task_logs directly
   process.env.DB_NAME = TEST_DB
   client = new MongoClient(MONGO_URL)
   await client.connect()

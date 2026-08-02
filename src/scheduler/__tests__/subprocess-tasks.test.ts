@@ -26,6 +26,7 @@ let client: MongoClient
 let db: Db
 
 beforeAll(async () => {
+  process.env.LOG_BACKEND = 'mongodb'  // tests read from task_logs collection directly
   client = new MongoClient(MONGO_URL)
   await client.connect()
   db = client.db('airflow_test_subprocess_tasks')

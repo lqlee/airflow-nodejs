@@ -1,5 +1,5 @@
 /**
- * Tests for log severity levels.
+ * Tests for log severity levels and log backends (file + mongodb).
  *
  * What each test answers:
  *  - Does appendLog default level to 'info' for stdout, 'error' for stderr?
@@ -9,11 +9,15 @@
  *  - Does ?level=error return only error?
  *  - Does ?stream=stderr filter to stderr only?
  *  - Does combined ?level=warn&stream=stderr filter correctly?
- *  - Does a DAG task using ctx.log.warn() store 'warn' level in DB?
- *  - Does ctx.log.info() store 'info' level and go to stdout?
+ *  - File backend: writes a .log file, reads it back with correct levels?
+ *  - File backend: ?level filter works on file-based logs?
+ *  - Does a DAG task using ctx.log.warn() write [WARN] prefix to stdout?
  */
 
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, afterEach, beforeEach } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { MongoClient, type Db } from 'mongodb'
 import { appendLog, getTaskLogs } from '../index.js'
 import { createRun } from '../../scheduler/runs.js'
@@ -29,6 +33,8 @@ let db: Db
 
 beforeAll(async () => {
   process.env.DB_NAME = TEST_DB
+  // Default to mongodb for existing tests to avoid needing dag_id param
+  process.env.LOG_BACKEND = 'mongodb'
   client = new MongoClient(MONGO_URL)
   await client.connect()
   db = client.db(TEST_DB)
@@ -38,6 +44,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await new Promise(r => setTimeout(r, 300))
   delete process.env.DB_NAME
+  delete process.env.LOG_BACKEND
   await db.dropDatabase()
   await client.close()
 })
@@ -242,5 +249,84 @@ describe('ctx.log integration', () => {
       .find({ dag_run_id: runId, task_id: 'step', level: 'info' })
       .toArray()
     expect(infoLogs.some(l => (l.line as string).includes('"records":42'))).toBe(true)
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
+// File backend tests
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('file log backend', () => {
+  let tmpDir: string
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'airflow-logs-test-'))
+    process.env.LOG_BACKEND = 'file'
+    process.env.LOG_DIR = tmpDir
+  })
+
+  afterEach(async () => {
+    process.env.LOG_BACKEND = 'mongodb'  // restore for other tests
+    delete process.env.LOG_DIR
+    await rm(tmpDir, { recursive: true })
+  })
+
+  it('writes log file and reads it back', async () => {
+    await appendLog(db, 'run123', 'my_dag', 'step1', 'stdout', 'hello world', 'info')
+    const logs = await getTaskLogs(db, 'run123', 'step1', {}, 'my_dag')
+    expect(logs.length).toBe(1)
+    expect(logs[0].line).toBe('hello world')
+    expect(logs[0].level).toBe('info')
+    expect(logs[0].stream).toBe('stdout')
+  })
+
+  it('stores multiple lines in order', async () => {
+    await appendLog(db, 'run456', 'dag2', 'taskA', 'stdout', 'line 1', 'debug')
+    await appendLog(db, 'run456', 'dag2', 'taskA', 'stdout', 'line 2', 'info')
+    await appendLog(db, 'run456', 'dag2', 'taskA', 'stderr', 'line 3', 'error')
+    const logs = await getTaskLogs(db, 'run456', 'taskA', {}, 'dag2')
+    expect(logs.length).toBe(3)
+    expect(logs.map(l => l.line)).toEqual(['line 1', 'line 2', 'line 3'])
+  })
+
+  it('level filter works on file logs', async () => {
+    await appendLog(db, 'run789', 'dag3', 'taskB', 'stdout', 'debug msg',  'debug')
+    await appendLog(db, 'run789', 'dag3', 'taskB', 'stdout', 'info msg',   'info')
+    await appendLog(db, 'run789', 'dag3', 'taskB', 'stderr', 'warn msg',   'warn')
+    await appendLog(db, 'run789', 'dag3', 'taskB', 'stderr', 'error msg',  'error')
+
+    const warnPlus = await getTaskLogs(db, 'run789', 'taskB', { level: 'warn' }, 'dag3')
+    expect(warnPlus.length).toBe(2)
+    expect(warnPlus.every(l => l.level === 'warn' || l.level === 'error')).toBe(true)
+
+    const errOnly = await getTaskLogs(db, 'run789', 'taskB', { level: 'error' }, 'dag3')
+    expect(errOnly.length).toBe(1)
+    expect(errOnly[0].level).toBe('error')
+  })
+
+  it('stream filter works on file logs', async () => {
+    await appendLog(db, 'runABC', 'dag4', 'taskC', 'stdout', 'out line', 'info')
+    await appendLog(db, 'runABC', 'dag4', 'taskC', 'stderr', 'err line', 'error')
+
+    const stdoutOnly = await getTaskLogs(db, 'runABC', 'taskC', { stream: 'stdout' }, 'dag4')
+    expect(stdoutOnly.length).toBe(1)
+    expect(stdoutOnly[0].stream).toBe('stdout')
+
+    const stderrOnly = await getTaskLogs(db, 'runABC', 'taskC', { stream: 'stderr' }, 'dag4')
+    expect(stderrOnly.length).toBe(1)
+    expect(stderrOnly[0].stream).toBe('stderr')
+  })
+
+  it('returns empty array for non-existent task log', async () => {
+    const logs = await getTaskLogs(db, 'nonexistent', 'taskX', {}, 'dagX')
+    expect(logs).toEqual([])
+  })
+
+  it('defaults level: stdout→info, stderr→error', async () => {
+    await appendLog(db, 'runDEF', 'dag5', 'taskD', 'stdout', 'auto info')
+    await appendLog(db, 'runDEF', 'dag5', 'taskD', 'stderr', 'auto error')
+    const logs = await getTaskLogs(db, 'runDEF', 'taskD', {}, 'dag5')
+    expect(logs.find(l => l.stream === 'stdout')?.level).toBe('info')
+    expect(logs.find(l => l.stream === 'stderr')?.level).toBe('error')
   })
 })

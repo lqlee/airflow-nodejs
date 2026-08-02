@@ -267,10 +267,16 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: `Invalid stream '${streamFilter}'. Must be stdout or stderr` })
       }
 
+      // Resolve dag_id from the run (needed by file log backend to find the path)
+      const runDoc = await app.mongo.collection('dag_runs').findOne(
+        { _id: new ObjectId(runId) }, { projection: { dag_id: 1 } }
+      )
+      const dagId = runDoc?.dag_id as string | undefined
+
       const logs = await getTaskLogs(app.mongo, runId, taskId, {
         level:  levelFilter as import('../../logs/index.js').LogLevel | undefined,
         stream: streamFilter as 'stdout' | 'stderr' | undefined,
-      })
+      }, dagId)
       return reply.send(logs.map(l => ({
         ts:     l.ts,
         stream: l.stream,

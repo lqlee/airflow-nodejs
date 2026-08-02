@@ -168,18 +168,56 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
       await emitOutlets(db, dag, dagRunId)
     }
 
-    // Fire webhook callback if configured — fire-and-forget, never blocks the tick loop
+    const webhookPayload = {
+      dag_id: transitioned.dag_id,
+      run_id: dagRunId,
+      state: finalState as 'success' | 'failed',
+      logical_date: transitioned.logical_date ?? null,
+      conf: (transitioned.conf as Record<string, unknown>) ?? {},
+      tags: (transitioned.tags as string[]) ?? [],
+      ended_at: transitioned.ended_at as Date,
+    }
+
+    // Fire per-DAG webhook callback if configured — fire-and-forget
     const callbackUrl = finalState === 'success' ? dag?.onSuccess : dag?.onFailure
     if (callbackUrl) {
-      fireWebhook(callbackUrl, {
-        dag_id: transitioned.dag_id,
-        run_id: dagRunId,
-        state: finalState,
-        logical_date: transitioned.logical_date ?? null,
-        conf: (transitioned.conf as Record<string, unknown>) ?? {},
-        tags: (transitioned.tags as string[]) ?? [],
-        ended_at: transitioned.ended_at as Date,
-      }, webhookOptions)
+      fireWebhook(callbackUrl, webhookPayload, webhookOptions)
+    }
+
+    // Fire global webhooks (GLOBAL_SUCCESS_WEBHOOK / GLOBAL_FAILURE_WEBHOOK)
+    // These receive the same payload as per-DAG webhooks.
+    const globalUrl = finalState === 'success'
+      ? process.env.GLOBAL_SUCCESS_WEBHOOK
+      : process.env.GLOBAL_FAILURE_WEBHOOK
+    if (globalUrl) {
+      fireWebhook(globalUrl, webhookPayload, webhookOptions)
+    }
+
+    // Fire global Slack webhook with a formatted message
+    // GLOBAL_SLACK_WEBHOOK fires for ALL runs (success + failure)
+    // GLOBAL_SLACK_SUCCESS_WEBHOOK fires on success only
+    // GLOBAL_SLACK_FAILURE_WEBHOOK fires on failure only
+    const slackUrl = process.env.GLOBAL_SLACK_WEBHOOK
+      || (finalState === 'success' ? process.env.GLOBAL_SLACK_SUCCESS_WEBHOOK : null)
+      || (finalState === 'failed'  ? process.env.GLOBAL_SLACK_FAILURE_WEBHOOK : null)
+    if (slackUrl) {
+      const icon = finalState === 'success' ? '✅' : '❌'
+      const runShort = dagRunId.slice(-8)
+      const ts = (transitioned.ended_at as Date)?.toISOString().slice(0,16).replace('T',' ') + 'Z'
+      const slackBody = {
+        text: `${icon} *${transitioned.dag_id}* — ${finalState}`,
+        attachments: [{
+          color: finalState === 'success' ? '#48bb78' : '#fc8181',
+          fields: [
+            { title: 'DAG',    value: transitioned.dag_id, short: true },
+            { title: 'State',  value: finalState,           short: true },
+            { title: 'Run ID', value: runShort,              short: true },
+            { title: 'Ended',  value: ts,                   short: true },
+          ],
+        }],
+      }
+      // Fire as raw JSON body (Slack incoming webhook format)
+      fireWebhook(slackUrl, slackBody as any, webhookOptions)
     }
   }
 }

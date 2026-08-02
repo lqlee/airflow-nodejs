@@ -299,6 +299,16 @@ MongoDB collections:
 | `PORT` | `3000` | API + UI port |
 | `HOST` | `0.0.0.0` | API bind address |
 | `RATE_LIMIT_MAX` | `120` | Requests per minute per IP (global) |
+| `GLOBAL_SLACK_WEBHOOK` | _(unset)_ | Slack incoming webhook URL — fires for **all** DAG runs (success + failure) |
+| `GLOBAL_SLACK_SUCCESS_WEBHOOK` | _(unset)_ | Slack webhook — fires on success only |
+| `GLOBAL_SLACK_FAILURE_WEBHOOK` | _(unset)_ | Slack webhook — fires on failure only |
+| `GLOBAL_SUCCESS_WEBHOOK` | _(unset)_ | Generic JSON webhook — fires on every success run |
+| `GLOBAL_FAILURE_WEBHOOK` | _(unset)_ | Generic JSON webhook — fires on every failure run |
+| `SECRETS_BACKEND` | `none` | Secrets fallback: `none`, `env`, `file` |
+| `SECRETS_FILE_PATH` | _(unset)_ | Path to secrets JSON file (when `SECRETS_BACKEND=file`) |
+| `KUBERNETES_EXECUTOR` | _(unset)_ | Set to `true` to dispatch all tasks as K8s pods |
+| `KUBERNETES_NAMESPACE` | `default` | Kubernetes namespace for executor pods |
+| `KUBERNETES_IMAGE` | `airflow-nodejs:local` | Container image used by K8s executor pods |
 
 ---
 
@@ -1224,6 +1234,36 @@ See `dags/deferrable_demo.js` for a working example.
 ## Run Notifications (Email / Slack / Webhook)
 
 Notify users when a DAG run completes. Three approaches:
+
+### 0. Global hooks (all DAGs, zero config per-DAG)
+
+Set environment variables — **every DAG** fires them automatically, no DAG file changes needed. Equivalent to Airflow's Listener plugins.
+
+```bash
+# docker-compose.yml or .env
+
+# Slack — formatted message with DAG name, state, run ID, timestamp
+GLOBAL_SLACK_WEBHOOK=https://hooks.slack.com/services/T.../B.../xxx
+
+# Slack — success-only or failure-only
+GLOBAL_SLACK_SUCCESS_WEBHOOK=https://hooks.slack.com/services/...
+GLOBAL_SLACK_FAILURE_WEBHOOK=https://hooks.slack.com/services/...
+
+# Generic JSON webhook — same payload as per-DAG onSuccess/onFailure
+GLOBAL_SUCCESS_WEBHOOK=https://your-service.com/webhook/success
+GLOBAL_FAILURE_WEBHOOK=https://your-service.com/webhook/failure
+```
+
+**Slack message format:**
+```
+✅ *my_pipeline* — success
+  DAG: my_pipeline   State: success
+  Run ID: 6a6c...    Ended: 2024-01-15 06:03Z
+```
+
+All global hooks are fire-and-forget with a 5s timeout. They fire **in addition to** any per-DAG `onSuccess`/`onFailure` webhooks.
+
+---
 
 ### 1. Built-in webhooks (`onSuccess` / `onFailure`)
 

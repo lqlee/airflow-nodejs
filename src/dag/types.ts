@@ -46,6 +46,28 @@ export interface TaskContext {
   connections: ConnectionHelper
   variables: VariableHelper
   /**
+   * Structured logger — writes lines to task logs with severity levels.
+   * Lines are visible in the UI and filterable via `GET /logs?level=warn`.
+   *
+   * All methods accept a string or any JSON-serializable value.
+   * Lines are prefixed: `[INFO] your message`, `[WARN] your message`, etc.
+   *
+   * Example:
+   *   ctx.log.info('starting extraction')
+   *   ctx.log.info({ records: 42, source: ctx.conf.source })
+   *   ctx.log.warn('API rate limit approaching')
+   *   ctx.log.error('database connection failed')
+   *
+   * Severity order: debug < info < warn < error
+   * Filter in API: GET /dag-runs/:runId/tasks/:taskId/logs?level=warn
+   */
+  log: {
+    debug: (msg: unknown) => void
+    info:  (msg: unknown) => void
+    warn:  (msg: unknown) => void
+    error: (msg: unknown) => void
+  }
+  /**
    * Suspend this task and free its worker slot until a trigger condition is met.
    *
    * Call `ctx.defer(trigger, opts?)` from a `run:` function to:

@@ -243,16 +243,39 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
   )
 
   // GET /dag-runs/:runId/tasks/:taskId/logs — task log lines
-  app.get<{ Params: { runId: string; taskId: string } }>(
+  // Query params:
+  //   level=debug|info|warn|error   — minimum severity (default: all)
+  //   stream=stdout|stderr          — filter by stream (default: both)
+  app.get<{
+    Params: { runId: string; taskId: string }
+    Querystring: { level?: string; stream?: string }
+  }>(
     '/dag-runs/:runId/tasks/:taskId/logs',
     async (req, reply) => {
       const { runId, taskId } = req.params
       if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
-      const logs = await getTaskLogs(app.mongo, runId, taskId)
+
+      const validLevels = ['debug', 'info', 'warn', 'error']
+      const validStreams = ['stdout', 'stderr']
+      const levelFilter = req.query.level
+      const streamFilter = req.query.stream
+
+      if (levelFilter && !validLevels.includes(levelFilter)) {
+        return reply.status(400).send({ error: `Invalid level '${levelFilter}'. Must be one of: ${validLevels.join(', ')}` })
+      }
+      if (streamFilter && !validStreams.includes(streamFilter)) {
+        return reply.status(400).send({ error: `Invalid stream '${streamFilter}'. Must be stdout or stderr` })
+      }
+
+      const logs = await getTaskLogs(app.mongo, runId, taskId, {
+        level:  levelFilter as import('../../logs/index.js').LogLevel | undefined,
+        stream: streamFilter as 'stdout' | 'stderr' | undefined,
+      })
       return reply.send(logs.map(l => ({
-        ts: l.ts,
+        ts:     l.ts,
         stream: l.stream,
-        line: l.line,
+        level:  l.level,
+        line:   l.line,
       })))
     }
   )

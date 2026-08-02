@@ -16,6 +16,7 @@ import { xcomPush, xcomPull } from '../xcom/index.js'
 import { getConnectionRuntime } from '../connections/index.js'
 import { getVariableRuntime } from '../variables/index.js'
 import { getRunConf } from './run-conf.js'
+import type { LogLevel } from '../logs/index.js'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 const DB_NAME = process.env.DB_NAME ?? 'airflow'
@@ -96,7 +97,27 @@ process.on('message', async (msg: WorkerMsg) => {
       }
     ) => Promise<unknown>
 
-    const fullCtx = { ...ctx, conf, xcom, connections, variables, defer }
+    // ctx.log — structured logging with severity levels.
+    // Writes ONLY to process stdout/stderr with a [LEVEL] prefix.
+    // The executor's readline handler captures these lines and stores them
+    // in the DB with the correct level (parseLevelFromLine detects the prefix).
+    // Single writer: executor readline → no double writes.
+    const makeLogFn = (level: LogLevel, stream: 'stdout' | 'stderr') =>
+      (msg: unknown) => {
+        const line = typeof msg === 'string' ? msg : JSON.stringify(msg)
+        const prefixed = `[${level.toUpperCase()}] ${line}`
+        if (stream === 'stdout') process.stdout.write(prefixed + '\n')
+        else process.stderr.write(prefixed + '\n')
+      }
+
+    const log = {
+      debug: makeLogFn('debug', 'stdout'),
+      info:  makeLogFn('info',  'stdout'),
+      warn:  makeLogFn('warn',  'stderr'),
+      error: makeLogFn('error', 'stderr'),
+    }
+
+    const fullCtx = { ...ctx, conf, xcom, connections, variables, defer, log }
 
     if (msg.type === 'poke') {
       const ready = await fn_(fullCtx) as boolean

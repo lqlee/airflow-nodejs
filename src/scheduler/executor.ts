@@ -7,7 +7,7 @@ import type { TaskInstance } from './runs.js'
 import { getDag } from '../dag/registry.js'
 import { acquire, release } from './pool.js'
 import { acquirePool, releasePool } from '../pools/index.js'
-import { appendLog } from '../logs/index.js'
+import { appendLog, parseLevelFromLine } from '../logs/index.js'
 import { enqueueTask } from '../queue/producer.js'
 import { sensorOutcome } from './sensor.js'
 import { recordTry } from './tries.js'
@@ -143,16 +143,17 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     }
 
     // ── Stdio logging ─────────────────────────────────────────────────
+    // parseLevelFromLine detects [INFO]/[WARN]/[ERROR]/[DEBUG] prefixes from ctx.log.*
     const rl_out = createInterface({ input: child.stdout! })
     rl_out.on('line', (line) => {
       process.stdout.write(`${line}\n`)
-      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line)
+      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line, parseLevelFromLine(line) ?? 'info')
     })
 
     const rl_err = createInterface({ input: child.stderr! })
     rl_err.on('line', (line) => {
       process.stderr.write(`${line}\n`)
-      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line)
+      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line, parseLevelFromLine(line) ?? 'error')
     })
 
     // Base ctx — includes mapIndex/mapValue for mapped task instances
@@ -334,13 +335,13 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
 
     createInterface({ input: child.stdout }).on('line', (line) => {
       process.stdout.write(`${line}\n`)
-      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line)
+      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line, parseLevelFromLine(line) ?? 'info')
     })
 
     createInterface({ input: child.stderr }).on('line', (line) => {
       process.stderr.write(`${line}\n`)
       stderrLines.push(line)
-      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line)
+      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line, parseLevelFromLine(line) ?? 'error')
     })
 
     child.on('error', async (err) => {
@@ -723,13 +724,13 @@ async function executeRunFn(
     const rl_out = createInterface({ input: child.stdout! })
     rl_out.on('line', (line) => {
       process.stdout.write(`${line}\n`)
-      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line)
+      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line, parseLevelFromLine(line) ?? 'info')
     })
 
     const rl_err = createInterface({ input: child.stderr! })
     rl_err.on('line', (line) => {
       process.stderr.write(`${line}\n`)
-      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line)
+      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line, parseLevelFromLine(line) ?? 'error')
     })
 
     const workerCtx = {

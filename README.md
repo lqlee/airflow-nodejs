@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-914 tests · 16 API route modules · multi-user RBAC · Docker-ready
+929 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -184,7 +184,7 @@ POST /dag-runs/:runId/note                     add/update a note
 GET  /dag-runs/:runId/tasks                    all task instances (?state=)
 GET  /dag-runs/:runId/tasks/:taskId            single task (?map_index=)
 GET  /dag-runs/:runId/tasks/:taskId/tries      retry history
-GET  /dag-runs/:runId/tasks/:taskId/logs       stdout/stderr log lines
+GET  /dag-runs/:runId/tasks/:taskId/logs       log lines (?level=debug|info|warn|error &stream=stdout|stderr)
 POST /dag-runs/:runId/tasks/:taskId/clear      reset to queued + re-run
 GET  /dag-runs/:runId/xcoms                    all xcoms (?task_id= ?key=)
 GET  /dag-runs/:runId/xcoms/:taskId/:key       single xcom (?map_index=)
@@ -1804,6 +1804,46 @@ timetable: (last, count) => {
 - `trigger_type: 'timetable'` is stored on each run for filtering
 
 See `dags/timetable_demo.js` for working examples (interval, weekdays, business hours, limited runs, exponential backoff).
+
+---
+
+## Task Logging with Severity Levels
+
+`run:` tasks get a structured logger via `ctx.log` with four severity levels:
+
+```js
+run: async (ctx) => {
+  ctx.log.debug('detailed trace — only visible when filtering debug')
+  ctx.log.info('starting extraction')
+  ctx.log.info({ records: 42, source: ctx.conf.source })  // objects auto-serialized
+  ctx.log.warn('API rate limit at 80% — slowing down')
+  ctx.log.error('database connection failed, will retry')
+}
+```
+
+Lines are stored with a `level` field and prefixed with `[INFO]`, `[WARN]`, etc.:
+```
+[INFO] starting extraction
+[INFO] {"records":42,"source":"warehouse"}
+[WARN] API rate limit at 80% — slowing down
+[ERROR] database connection failed, will retry
+```
+
+**Filter logs by severity:**
+```bash
+# Only warnings and errors
+GET /dag-runs/:runId/tasks/:taskId/logs?level=warn
+
+# Only stderr stream
+GET /dag-runs/:runId/tasks/:taskId/logs?stream=stderr
+
+# Combined: errors on stderr only
+GET /dag-runs/:runId/tasks/:taskId/logs?level=error&stream=stderr
+```
+
+**Severity order:** `debug` < `info` < `warn` < `error`. Filtering `?level=warn` returns `warn` + `error` only.
+
+For `shell:`, `python:`, `java:`, `container:` tasks: stdout lines are stored as `info`, stderr as `error`. Lines that match `[LEVEL]` prefixes are detected automatically.
 
 ---
 

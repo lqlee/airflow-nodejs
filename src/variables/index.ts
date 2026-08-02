@@ -8,6 +8,7 @@
  */
 import type { Db } from 'mongodb'
 import { encrypt, decrypt } from '../crypto/index.js'
+import { getSecretsBackend } from '../secrets/index.js'
 
 export interface VariableDoc {
   key: string           // unique identifier
@@ -61,7 +62,8 @@ export async function getVariable(db: Db, key: string): Promise<VariableSummary 
 /** Decrypt a variable for task runtime use. Never call from API routes. */
 export async function getVariableRuntime(db: Db, key: string): Promise<string | null> {
   const doc = await db.collection<VariableDoc>('variables').findOne({ key })
-  if (!doc) return null
+  // Fallback to secrets backend if not found in DB
+  if (!doc) return getSecretsBackend().getVariable(key)
 
   if (doc.is_secret && doc.value_enc) {
     return decrypt(doc.value_enc)

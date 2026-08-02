@@ -7,6 +7,7 @@
  */
 import type { Db } from 'mongodb'
 import { encrypt, decrypt, isEncryptionConfigured } from '../crypto/index.js'
+import { getSecretsBackend } from '../secrets/index.js'
 
 export interface ConnectionDoc {
   conn_id: string          // unique identifier, e.g. 'my_postgres'
@@ -92,7 +93,8 @@ export async function getConnection(db: Db, connId: string): Promise<ConnectionS
 /** Decrypt a connection for task runtime use. Never call from API routes. */
 export async function getConnectionRuntime(db: Db, connId: string): Promise<ConnectionRuntime | null> {
   const doc = await db.collection<ConnectionDoc>('connections').findOne({ conn_id: connId })
-  if (!doc) return null
+  // Fallback to secrets backend if not found in DB
+  if (!doc) return getSecretsBackend().getConnection(connId)
 
   let password: string | null = null
   let extra: Record<string, unknown> | null = null

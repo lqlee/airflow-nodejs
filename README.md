@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-870 tests · 16 API route modules · multi-user RBAC · Docker-ready
+887 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -972,6 +972,71 @@ export default dag({
 **Note:** `run:` JS tasks don't need templating — use `ctx.conf.key`, `ctx.xcom.pull()`, and `new Date()` directly in the function body. Templating is for static string fields that can't be closures.
 
 See `dags/templating_demo.js` for a full working example.
+
+---
+
+## Secrets Backends
+
+Connections and variables are resolved via a fallback chain: **DB first, then the configured secrets backend**. This is the equivalent of Airflow's secrets backends (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager).
+
+**Configure via environment variables:**
+
+```bash
+# File backend — read from a JSON file
+SECRETS_BACKEND=file
+SECRETS_FILE_PATH=/secrets/airflow-secrets.json
+
+# Env backend — read from environment variables
+SECRETS_BACKEND=env
+AIRFLOW_VAR_API_KEY=my-secret-key
+AIRFLOW_CONN_MY_DB='{"conn_type":"postgres","host":"db.example.com","port":5432,"login":"user","password":"secret"}'
+```
+
+**Secrets file format (`SECRETS_FILE_PATH`):**
+
+```json
+{
+  "connections": {
+    "my_db": {
+      "conn_type": "postgres",
+      "host": "db.example.com",
+      "port": 5432,
+      "login": "user",
+      "password": "secret123",
+      "schema": "public"
+    }
+  },
+  "variables": {
+    "api_key": "my-secret-api-key",
+    "region": "us-east-1"
+  }
+}
+```
+
+**Fallback chain:**
+1. Check MongoDB (DB-stored connections/variables win)
+2. If not found → query the configured backend
+3. If still not found → return `null`
+
+**In DAG tasks:**
+
+```js
+run: async (ctx) => {
+  // Both check DB then fall through to secrets backend automatically
+  const apiKey = await ctx.variables.get('api_key')
+  const conn   = await ctx.connections.get('my_db')
+}
+```
+
+**Backends:**
+
+| `SECRETS_BACKEND` | Source |
+|---|---|
+| `none` (default) | DB only — no fallback |
+| `env` | `AIRFLOW_VAR_<KEY>` and `AIRFLOW_CONN_<ID>` env vars |
+| `file` | JSON file at `SECRETS_FILE_PATH` |
+
+See `dags/secrets_demo.js` for a working example.
 
 ---
 

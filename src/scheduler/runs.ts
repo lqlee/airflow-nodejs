@@ -39,6 +39,8 @@ export interface TaskInstance {
   depends_on: string[]
   /** Trigger rule — controls when this task runs. Default: 'all_success'. */
   trigger_rule: 'all_success' | 'all_failed' | 'all_done' | 'one_success' | 'one_failed' | 'none_failed'
+  /** Priority weight — higher values claimed first. Default: 0. */
+  priority: number
   try_number: number
   max_retries: number       // max allowed retries (0 = no retries)
   retry_delay: number       // ms to wait before requeue
@@ -161,6 +163,7 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
         state: 'queued',
         depends_on: task.dependsOn ?? [],
         trigger_rule: task.triggerRule ?? 'all_success',
+        priority: task.priority ?? 0,
         try_number: 0,
         max_retries: task.retries ?? 0,
         retry_delay: task.retryDelay ?? 0,

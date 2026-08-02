@@ -95,6 +95,19 @@ export async function claimReadyTasks(
     aggState.set(taskId, taskAggState(states))
   }
 
+  // Sort: higher priority first, then FIFO (created_at ascending) as tiebreaker.
+  // This ensures high-priority tasks are claimed before low-priority ones when
+  // multiple tasks are ready simultaneously under a constrained pool.
+  allInstances.sort((a, b) => {
+    const pa = a.priority ?? 0
+    const pb = b.priority ?? 0
+    if (pb !== pa) return pb - pa  // higher priority first
+    // Tiebreaker: FIFO by creation time
+    const ta = a.created_at ? new Date(a.created_at).getTime() : 0
+    const tb = b.created_at ? new Date(b.created_at).getTime() : 0
+    return ta - tb
+  })
+
   const now = new Date()
   const claimed: TaskInstance[] = []
 

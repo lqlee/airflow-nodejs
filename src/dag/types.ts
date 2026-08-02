@@ -152,6 +152,17 @@ export interface TaskDefinition {
    * See TriggerRule type for all options.
    */
   triggerRule?: TriggerRule
+  /**
+   * Priority weight — higher values run before lower values when multiple tasks
+   * are ready simultaneously (e.g. under a constrained pool or global concurrency limit).
+   * Default: 0. Negative values allowed (lower priority than default).
+   * Equivalent to Airflow's `priority_weight`.
+   *
+   * Example: make a critical task run before others in the same DAG:
+   *   critical_step: { priority: 10, run: async () => doImportantWork() }
+   *   background_step: { priority: -5, run: async () => doCleanup() }
+   */
+  priority?: number
   retries?: number        // max retry attempts (default: 0 = no retries)
   retryDelay?: number     // ms to wait before requeuing (default: 0)
   timeout?: number        // ms before worker is killed and task marked failed (default: no timeout)

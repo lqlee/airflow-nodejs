@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-863 tests · 16 API route modules · multi-user RBAC · Docker-ready
+870 tests · 16 API route modules · multi-user RBAC · Docker-ready
 
 ---
 
@@ -972,6 +972,33 @@ export default dag({
 **Note:** `run:` JS tasks don't need templating — use `ctx.conf.key`, `ctx.xcom.pull()`, and `new Date()` directly in the function body. Templating is for static string fields that can't be closures.
 
 See `dags/templating_demo.js` for a full working example.
+
+---
+
+## Priority Weights
+
+Tasks with higher `priority` are claimed before lower-priority ones when multiple tasks are ready simultaneously (e.g. under a shared pool or global concurrency limit). Default is `0`. Negative values are allowed.
+
+```js
+export default dag({
+  id: 'my_pipeline',
+  schedule: null,
+  tasks: {
+    critical:   { priority: 100, run: async () => doUrgentWork() },
+    important:  { priority: 50,  run: async () => doImportantWork() },
+    normal:     {                 run: async () => doNormalWork() },   // priority: 0 (default)
+    background: { priority: -10, run: async () => doCleanup() },
+  }
+})
+```
+
+**Behavior:**
+- Higher `priority` → claimed first when slots are available
+- Equal priority → FIFO (first created runs first)
+- Priority has no effect on tasks with unmet dependencies (they can't run regardless)
+- Works across pools and the global concurrency limit
+
+See `dags/priority_demo.js` for a working example.
 
 ---
 

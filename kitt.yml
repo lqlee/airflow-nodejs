@@ -1,11 +1,8 @@
 # WCNP / KITT deployment configuration for airflow-nodejs
 # Docs: https://gecgithub01.walmart.com/devtools/kitt/blob/main/docs/README.md
 #
-# TODO before first deploy:
-#   1. Replace <cluster-id> with your target cluster  (e.g. uscentral-lab-aks-001)
-#   2. Replace <your-slack-channel> with your team Slack channel name
-#   3. Set MONGO_URL + REDIS_URL in your KITT secrets / environment overrides
-#   4. Push image to Walmart Artifactory before deploying
+# NOTE: WCNP deployment is owned by gecgithub01.walmart.com/inkiru/airflow-nodejs-wcnp
+# This file is kept for reference only — do not deploy from this repo.
 
 profiles:
   - basic-docker-build        # custom Dockerfile — KITT does not manage the node build

@@ -1,0 +1,66 @@
+# WCNP / KITT deployment configuration for airflow-nodejs
+# Docs: https://gecgithub01.walmart.com/devtools/kitt/blob/main/docs/README.md
+#
+# TODO before first deploy:
+#   1. Replace <cluster-id> with your target cluster  (e.g. uscentral-lab-aks-001)
+#   2. Replace <your-slack-channel> with your team Slack channel name
+#   3. Set MONGO_URL + REDIS_URL in your KITT secrets / environment overrides
+#   4. Push image to Walmart Artifactory before deploying
+
+profiles:
+  - basic-docker-build        # custom Dockerfile — KITT does not manage the node build
+
+owner:
+  group: inkiru
+
+# Image is built externally via docker-build.sh + Artifactory.
+# KITT only handles deploy; it does not rebuild the image.
+build:
+  attributes:
+    skipDocker: true
+
+deploy:
+  namespace: airflow-nodejs
+
+  helm:
+    values:
+      # App listens on 8080 (WCNP standard — set PORT=8080 in env or change app default)
+      ports:
+        http:
+          internalPort: 8080
+          externalPort: 8080
+          protocol: TCP
+
+      # Resource limits — scheduler + worker process needs more than the default example
+      min:
+        cpu: "250m"
+        memory: "256Mi"
+      max:
+        cpu: "1000m"
+        memory: "512Mi"
+
+      readinessProbe:
+        enabled: "true"
+        path: "/health"
+        probeInterval: 5
+        wait: 15
+        timeout: 3
+        failureThreshold: 3
+
+      # External backing services — supply values via KITT env overrides or secrets backend
+      # MongoDB and Redis are NOT provisioned by KITT; they must exist before deploying
+      env:
+        PORT: "8080"
+        LOG_BACKEND: "file"
+        LOG_DIR: "/app/logs"
+        # MONGO_URL and REDIS_URL injected via KITT secrets / pipeline env overrides
+
+  stages:
+    - name: dev
+      target:
+        cluster_id:
+          - "<cluster-id>"    # TODO: replace with your cluster, e.g. uscentral-lab-aks-001
+
+notify:
+  slack:
+    channelName: "<your-slack-channel>"   # TODO: replace with your team channel

@@ -16,7 +16,9 @@
     "start:bullmq": "REDIS_URL=${REDIS_URL} node dist/main.js",
     "worker": "node dist/queue/consumer.js",
     "dev:start": "tsx src/main.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "//prepare": "runs tsc build when installed as a git dependency (for wcnp node_modules inclusion)",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "@fastify/multipart": "^10.1.0",

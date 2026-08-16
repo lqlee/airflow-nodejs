@@ -2,6 +2,14 @@
   "name": "airflow-nodejs",
   "version": "0.1.0",
   "type": "module",
+  "//files": "explicit allowlist for npm pack — .gitignore excludes dist/, which would otherwise strip the built output when installed as a git dependency",
+  "files": [
+    "dist",
+    "public",
+    "src",
+    "tsconfig.json",
+    "tsconfig.build.json"
+  ],
   "exports": {
     ".": "./dist/main.js",
     "./dag": "./dist/dag/types.js",

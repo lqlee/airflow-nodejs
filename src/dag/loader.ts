@@ -11,7 +11,9 @@ import { ensureImages } from './images.js'
 import { loadProviders } from '../providers/loader.js'
 import type { DagDefinition } from './types.js'
 
-const DAGS_DIR = resolve(process.cwd(), 'dags')
+// DAG_DIR env var allows overriding the default location — used in WCNP where
+// DAGs are bundled inside the npm package rather than mounted at ./dags/
+const DAGS_DIR = process.env.DAG_DIR ?? resolve(process.cwd(), 'dags')
 
 /**
  * Load and register all Dag files from the dags/ directory.

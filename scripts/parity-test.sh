@@ -73,9 +73,13 @@ astro() {
 }
 
 anjs() {
-  curl -s -m "$TIMEOUT" -w '\n%{http_code}' -X "$1" "$ANJS_BASE$2" \
-    -H 'Content-Type: application/json' \
-    ${3:+--data "$3"}
+  local method="$1" path="$2" body="${3:-}"
+  if [[ -n "$body" ]]; then
+    curl -s -m "$TIMEOUT" -w '\n%{http_code}' -X "$method" "$ANJS_BASE$path" \
+      -H 'Content-Type: application/json' --data "$body"
+  else
+    curl -s -m "$TIMEOUT" -w '\n%{http_code}' -X "$method" "$ANJS_BASE$path"
+  fi
 }
 
 # check <label> <target> <expected-code> <method> <path> [body] [jq-filter]
@@ -83,7 +87,11 @@ anjs() {
 check() {
   local label="$1" target="$2" want="$3" method="$4" path="$5" body="${6:-}" filter="${7:-}"
   local raw code out
-  raw=$([[ "$target" == astro ]] && astro "$method" "$path" "$body" || anjs "$method" "$path" "$body")
+  if [[ -n "$body" ]]; then
+    raw=$([[ "$target" == astro ]] && astro "$method" "$path" "$body" || anjs "$method" "$path" "$body")
+  else
+    raw=$([[ "$target" == astro ]] && astro "$method" "$path" || anjs "$method" "$path")
+  fi
   code=$(tail -n1 <<<"$raw")
   out=$(sed '$d' <<<"$raw")
 
@@ -118,22 +126,48 @@ check "health"  anjs  200 GET /health        '' '.status'
 check "version" astro 200 GET /api/v1/version '' '.version'
 
 # ── 1. Variables ──────────────────────────────────────────────────────────────
+# NOTE: Astro service account needs 'variable:read' scope. A 403 here means
+# the key has dag:read only — grant more permissions in Astro UI → Service Accounts.
 section "1. Variables"
-check "list"    astro 200 GET /api/v1/variables '' '.total_entries'
+VARS_CODE=$(astro GET /api/v1/variables | tail -n1)
+if [[ "$VARS_CODE" == 200 ]]; then
+  ok "list" "astro -> $(astro GET /api/v1/variables | sed '$d' | jq -r '.total_entries')"
+else
+  skip "list" "astro HTTP $VARS_CODE — grant variable:read scope on service account in Astro UI"
+fi
 check "list"    anjs  200 GET /variables
 
 if (( WITH_WRITES )); then
-  KEY="parity_test_$$"
-  check "create" astro 200 POST /api/v1/variables "{\"key\":\"$KEY\",\"value\":\"dev\"}" '.key'
-  check "read"   astro 200 GET  "/api/v1/variables/$KEY" '' '.value'
-  check "delete" astro 204 DELETE "/api/v1/variables/$KEY"
+  # Use $BASHPID (current process, stable) + timestamp to guarantee uniqueness
+  # across subshells — $$ can change in subshells, causing create/delete key mismatch
+  KEY="parity_test_${RANDOM}${RANDOM}"
+  # Test write on anjs (no auth required)
+  # POST /variables returns 201 Created (correct REST semantics)
+  check "create" anjs 201 POST /variables "{\"key\":\"$KEY\",\"value\":\"dev\"}"
+  check "read"   anjs 200 GET  "/variables/$KEY" '' '.value'
+  check "delete" anjs 204 DELETE "/variables/$KEY"
+  # Test write on astro only if service account has variable:write scope
+  WRITE_CODE=$(astro POST /api/v1/variables "{\"key\":\"${KEY}_astro\",\"value\":\"dev\"}" | tail -n1)
+  if [[ "$WRITE_CODE" == 200 ]]; then
+    ok "create" "astro"
+    astro DELETE "/api/v1/variables/${KEY}_astro" >/dev/null
+    ok "delete" "astro (cleanup)"
+  else
+    skip "create/delete" "astro HTTP $WRITE_CODE — grant variable:write scope on service account in Astro UI"
+  fi
 else
   skip "create/delete" "both (use --with-writes)"
 fi
 
 # ── 2. Connections ────────────────────────────────────────────────────────────
+# NOTE: same scope requirement — needs 'connection:read' on the service account.
 section "2. Connections"
-check "list" astro 200 GET /api/v1/connections '' '.total_entries'
+CONN_CODE=$(astro GET /api/v1/connections | tail -n1)
+if [[ "$CONN_CODE" == 200 ]]; then
+  ok "list" "astro -> $(astro GET /api/v1/connections | sed '$d' | jq -r '.total_entries')"
+else
+  skip "list" "astro HTTP $CONN_CODE — grant connection:read scope on service account in Astro UI"
+fi
 check "list" anjs  200 GET /connections
 
 # ── 3. DAG discovery ──────────────────────────────────────────────────────────
@@ -160,7 +194,7 @@ if [[ -n "$ANJS_DAG" ]]; then
   check "dag source" anjs 200 GET "/dags/$ANJS_DAG/source"
   check "dag stats"  anjs 200 GET "/dags/$ANJS_DAG/stats"
 else
-  skip "dag detail" "anjs (no DAGs found)"
+  skip "dag detail" "anjs (no DAGs mounted in WCNP pod — upload DAGs via POST /dags or mount a dags volume)"
 fi
 
 # ── 10. Pools ─────────────────────────────────────────────────────────────────

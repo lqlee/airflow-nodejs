@@ -20,6 +20,7 @@ import { createRun } from '../runs.js'
 import { advanceRun } from '../index.js'
 import { register, clearRegistry } from '../../dag/registry.js'
 import type { DagDefinition } from '../../dag/types.js'
+import { waitFor } from './wait-for.js'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 let client: MongoClient
@@ -60,12 +61,18 @@ async function taskState(dagId: string, taskId: string) {
   )
 }
 
+// Logs are written fire-and-forget by the executor — wait for the first line to land.
 async function taskLogs(runId: string, taskId: string): Promise<string[]> {
-  const docs = await db.collection('task_logs')
-    .find({ dag_run_id: runId, task_id: taskId })
-    .sort({ ts: 1 })
-    .toArray()
-  return docs.map(d => d.line as string)
+  return waitFor(
+    async () => {
+      const docs = await db.collection('task_logs')
+        .find({ dag_run_id: runId, task_id: taskId })
+        .sort({ ts: 1 })
+        .toArray()
+      return docs.map(d => d.line as string)
+    },
+    lines => lines.length > 0,
+  )
 }
 
 async function getRunId(dagId: string): Promise<string> {

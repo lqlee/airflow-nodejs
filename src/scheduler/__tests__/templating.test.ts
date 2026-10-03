@@ -21,6 +21,7 @@ import { MongoClient, type Db } from 'mongodb'
 import { renderTemplate, renderArgs, renderEnv, type TemplateContext } from '../template.js'
 import { createRun } from '../runs.js'
 import { advanceRun } from '../index.js'
+import { waitFor } from './wait-for.js'
 import { register, clearRegistry } from '../../dag/registry.js'
 import type { DagDefinition } from '../../dag/types.js'
 
@@ -51,12 +52,18 @@ async function runDag(dag: DagDefinition): Promise<string> {
   return runId
 }
 
+// Logs are written fire-and-forget by the executor — wait for the first line to land.
 async function taskLogs(runId: string, taskId: string): Promise<string[]> {
-  const docs = await db.collection('task_logs')
-    .find({ dag_run_id: runId, task_id: taskId })
-    .sort({ ts: 1 })
-    .toArray()
-  return docs.map(d => d.line as string)
+  return waitFor(
+    async () => {
+      const docs = await db.collection('task_logs')
+        .find({ dag_run_id: runId, task_id: taskId })
+        .sort({ ts: 1 })
+        .toArray()
+      return docs.map(d => d.line as string)
+    },
+    lines => lines.length > 0,
+  )
 }
 
 // ── setup ─────────────────────────────────────────────────────────────────────

@@ -91,6 +91,18 @@ describe('ensureImages()', () => {
   })
 
   it('handles mix of .tar and plain image names — only tars trigger load attempt', async () => {
+    // Point at an existing path so the socket check passes without a Docker daemon;
+    // otherwise ensureImages bails with a warning before checking the tar.
+    const origSocket = process.env.DOCKER_SOCKET
+    process.env.DOCKER_SOCKET = tmpdir()
+    try {
+      await runMixCase()
+    } finally {
+      if (origSocket === undefined) delete process.env.DOCKER_SOCKET; else process.env.DOCKER_SOCKET = origSocket
+    }
+  })
+
+  async function runMixCase() {
     await ensureImages('my_dag', [
       'python:3.13-slim',          // plain — silent
       '/nonexistent/path/img.tar', // tar — should log error
@@ -101,7 +113,7 @@ describe('ensureImages()', () => {
     expect(allOutput()).not.toMatch(/ruby:3\.3-slim/)
     // The tar triggers an error (file not found)
     expect(errorLines.join(' ')).toMatch(/not found/i)
-  })
+  }
 
   it('(integration) exports and reloads a real image via .tar', async () => {
     if (!dockerAvailable()) return

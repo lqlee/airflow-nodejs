@@ -20,6 +20,7 @@ import { createRun } from '../runs.js'
 import { advanceRun } from '../index.js'
 import type { DagDefinition } from '../../dag/types.js'
 import type { FastifyInstance } from 'fastify'
+import { waitFor } from './wait-for.js'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 let client: MongoClient
@@ -64,8 +65,11 @@ describe('successful task — try record', () => {
     const runId = await createRun(db, dag)
     await advanceRun(db, runId)
 
-    const tries = await db.collection('task_instance_tries')
-      .find({ dag_run_id: runId, task_id: 'step' }).toArray()
+    // recordTry is fire-and-forget in the executor — wait for the write
+    const tries = await waitFor(
+      () => db.collection('task_instance_tries').find({ dag_run_id: runId, task_id: 'step' }).toArray(),
+      t => t.length > 0,
+    )
     expect(tries).toHaveLength(1)
     expect(tries[0].state).toBe('success')
     expect(tries[0].try_number).toBe(0)

@@ -20,6 +20,7 @@ import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MongoClient, type Db } from 'mongodb'
+import { waitFor } from '../../scheduler/__tests__/wait-for.js'
 import {
   registerProvider,
   clearProviders,
@@ -320,9 +321,10 @@ describe('provider operator integration', () => {
     expect(s2?.state).toBe('success')
 
     // Verify output reached task logs
-    const logs = await db.collection('task_logs')
-      .find({ dag_run_id: runId, task_id: 'step1' })
-      .toArray()
+    const logs = await waitFor(
+      () => db.collection('task_logs').find({ dag_run_id: runId, task_id: 'step1' }).toArray(),
+      l => l.length > 0,
+    )
     expect(logs.some(l => (l.line as string).includes('provider_operator_ran'))).toBe(true)
   })
 

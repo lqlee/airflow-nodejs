@@ -59,14 +59,20 @@ export async function eventLogsRoutes(app: FastifyInstance): Promise<void> {
       }
       const pivot = await db.collection('event_logs').findOne({ _id: new ObjectId(cursor) })
       if (pivot) {
-        filter['created_at'] = { $lt: pivot.created_at }
+        // (created_at, _id) tuple comparison — events recorded within the same
+        // millisecond share created_at, so created_at alone would skip them.
+        const after = { $or: [
+          { created_at: { $lt: pivot.created_at } },
+          { created_at: pivot.created_at, _id: { $lt: pivot._id } },
+        ] }
+        filter['$and'] = [...((filter['$and'] as object[] | undefined) ?? []), after]
       }
     }
 
     const events = await db
       .collection('event_logs')
       .find(filter)
-      .sort({ created_at: -1 })
+      .sort({ created_at: -1, _id: -1 })
       .limit(limit)
       .toArray()
 

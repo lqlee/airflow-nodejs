@@ -4,6 +4,8 @@
   "type": "module",
   "//files": "explicit allowlist for npm pack — .gitignore excludes dist/, which would otherwise strip the built output when installed as a git dependency",
   "files": [
+    "dags",
+    "!dags/images",
     "dist",
     "public",
     "src",

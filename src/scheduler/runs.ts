@@ -23,10 +23,12 @@ export interface DagRun {
    * Used by depends_on_past to find the previous run. Absent on legacy runs.
    */
   ordering_date?: Date
+  /** Parent run/task when started by a TriggerDagRun task; null/absent otherwise. */
+  triggered_by?: { dag_id: string; dag_run_id: string; task_id: string } | null
   /** When the run first moved queued → running (basis for runTimeout). Absent on legacy runs. */
   started_at?: Date | null
   /** How the run was triggered. */
-  trigger_type: 'manual' | 'cron' | 'backfill' | 'dataset' | 'timetable' | 'catchup'
+  trigger_type: 'manual' | 'cron' | 'backfill' | 'dataset' | 'timetable' | 'catchup' | 'triggered'
   /** ID of the parent backfill entity, or null for non-backfill runs. */
   backfill_id: string | null
 }
@@ -81,6 +83,10 @@ export interface TaskInstance {
   defer_timeout_ms: number              // 0 = no deadline; matches task-level timeout
   /** true if this task is a branch task (has a branch: fn) */
   is_branch: boolean
+  /** true if this task is a ShortCircuit task (has a shortCircuit: fn) */
+  is_short_circuit?: boolean
+  /** Run started by a TriggerDagRun task, polled while the task is deferred. */
+  triggered_run_id?: string | null
   /**
    * true if this instance is a placeholder for a dynamic-expand task.
    * Placeholder blocks run completion until the source XCom is available;
@@ -112,7 +118,9 @@ export interface CreateRunOptions {
    * 'manual' = POST /trigger; 'cron' = scheduled; 'backfill' = backfill;
    * 'dataset' = data-aware scheduling. Defaults to 'manual'.
    */
-  triggerType?: 'manual' | 'cron' | 'backfill' | 'dataset' | 'timetable' | 'catchup'
+  triggerType?: 'manual' | 'cron' | 'backfill' | 'dataset' | 'timetable' | 'catchup' | 'triggered'
+  /** Set by a TriggerDagRun task — the parent run/task that started this run. */
+  triggeredBy?: { dag_id: string; dag_run_id: string; task_id: string }
   /** Links this run to a backfill entity for lifecycle management. */
   backfillId?: string
 }
@@ -136,6 +144,7 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
     trigger_type: opts.triggerType ?? 'manual',
     created_at: now,
     ordering_date: opts.logicalDate ?? now,
+    triggered_by: opts.triggeredBy ?? null,
     backfill_id: opts.backfillId ?? null,
   })
   const runId = runResult.insertedId.toString()
@@ -204,6 +213,7 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
         deferred_at: null,
         defer_timeout_ms: task.timeout ?? 0,
         is_branch: isBranch,
+        is_short_circuit: typeof task.shortCircuit === 'function',
         is_dynamic_placeholder: isDynamic,
         dynamic_expand_source: dynamicExpandSource,
         is_hitl: task.requiresApproval === true,

@@ -92,6 +92,26 @@ describe('API exposes catchup / startDate / dependsOnPast', () => {
   })
 })
 
+describe('API exposes shortCircuit / triggerDag / externalTask', () => {
+  it('GET /dags/:id/tasks reports the cross-dag task kinds', async () => {
+    register({
+      id: 'api_cross_dag', schedule: null,
+      tasks: {
+        gate: { shortCircuit: async () => true },
+        fire: { triggerDag: { dagId: 'x', conf: { a: 1 }, waitForCompletion: true } },
+        wait: { externalTask: { dagId: 'y', taskId: 'z', allowedStates: ['success'] } },
+        plain: { run: async () => {} },
+      },
+    })
+    const tasks = (await app.inject({ method: 'GET', url: '/dags/api_cross_dag/tasks' })).json()
+    const by = Object.fromEntries(tasks.map((t: { task_id: string }) => [t.task_id, t]))
+    expect(by.gate).toMatchObject({ is_short_circuit: true, trigger_dag: null, external_task: null })
+    expect(by.fire.trigger_dag).toEqual({ dagId: 'x', conf: { a: 1 }, waitForCompletion: true })
+    expect(by.wait.external_task).toEqual({ dagId: 'y', taskId: 'z', allowedStates: ['success'] })
+    expect(by.plain).toMatchObject({ is_short_circuit: false, trigger_dag: null, external_task: null })
+  })
+})
+
 describe('retry backoff — real timing', () => {
   it('waits retryDelay, then retryDelay×multiplier between successive attempts', async () => {
     const dag: DagDefinition = {

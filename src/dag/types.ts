@@ -254,6 +254,58 @@ export interface TaskDefinition {
   branch?: (ctx: TaskContext) => Promise<string | string[] | null>
 
   /**
+   * ShortCircuit (Airflow `ShortCircuitOperator`): run a condition; if it returns a falsy
+   * value, EVERY downstream task (direct and transitive) is skipped regardless of its
+   * trigger rule. Truthy → downstream proceeds normally. The function receives the same
+   * TaskContext as `run` and runs in a worker like `run`.
+   *
+   * Example:
+   *   shortCircuit: async (ctx) => (await ctx.xcom.pull('check', 'new_rows')) > 0
+   *
+   * Cannot be combined with `run`, `poke`, `branch`, `shell`, `python`, `java`,
+   * `container`, `kubernetes`, `triggerDag` or `externalTask`.
+   */
+  shortCircuit?: (ctx: TaskContext) => Promise<unknown>
+
+  /**
+   * TriggerDagRun (Airflow `TriggerDagRunOperator`): start a run of another Dag.
+   * Runs in the scheduler process (no worker). The new run's id is pushed to XCom key
+   * `triggered_run_id`. With `waitForCompletion` the task stays `deferred` (no slot held)
+   * until the triggered run is terminal: success → task succeeds; failed/cancelled → task
+   * fails. Poll interval = `pokeInterval` (default 10s, min 1s); deadline = `timeout`.
+   * A Dag cannot trigger itself. Cannot be combined with other task types.
+   */
+  triggerDag?: {
+    dagId: string
+    /** Static JSON conf for the triggered run. */
+    conf?: Record<string, unknown>
+    /** Wait for the triggered run to finish. Default: false (fire and forget). */
+    waitForCompletion?: boolean
+  }
+
+  /**
+   * ExternalTaskSensor (Airflow `ExternalTaskSensor`): wait until a run — or one task of a
+   * run — of another Dag reaches an allowed state. Runs in the scheduler process; stays
+   * `deferred` between checks. Poll interval = `pokeInterval` (default 30s, min 1s);
+   * deadline = `sensorTimeout` (default 1h). Fails fast if the Dag/task is not registered.
+   * Cannot be combined with other task types.
+   */
+  externalTask?: {
+    dagId: string
+    /** Task to watch; omit to watch the whole Dag run. */
+    taskId?: string
+    /**
+     * Which external run to watch. 'latest' (default) = the most recently created run;
+     * 'logical_date' = the run with the same logical_date as this run (this run must have one).
+     */
+    match?: 'latest' | 'logical_date'
+    /** States that satisfy the sensor. Default: ['success']. */
+    allowedStates?: string[]
+    /** States that fail the sensor immediately. Default: [] (wait until timeout, like Airflow). */
+    failedStates?: string[]
+  }
+
+  /**
    * Sensor mode: if present, this task polls a condition instead of running once.
    * Return true → task succeeds; return false → task requeues after pokeInterval.
    * `run` should be omitted for sensor tasks.

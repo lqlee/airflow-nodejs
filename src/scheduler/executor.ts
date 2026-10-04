@@ -15,6 +15,7 @@ import { getRunMeta, getRunConf } from './run-conf.js'
 import { USE_KUBERNETES_EXECUTOR, executeTaskOnKubernetes } from './kubernetes-executor.js'
 import { xcomPush, xcomPull } from '../xcom/index.js'
 import { renderTemplate, renderArgs, renderEnv, type TemplateContext } from './template.js'
+import { triggerDagRun, checkTriggeredRun, checkExternalTask, validateExternalTask, type WaitResult } from './cross-dag.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -80,6 +81,15 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
   if (taskDef.branch) {
     return executeBranchTask(db, ti, taskDef.branch)
   }
+
+  // ShortCircuit — condition fn in a worker; a falsy result makes the scheduler skip all downstream
+  if (taskDef.shortCircuit) {
+    return executeShortCircuitTask(db, ti, taskDef.shortCircuit)
+  }
+
+  // Cross-Dag tasks run in the scheduler process (metadata only — no worker needed)
+  if (taskDef.triggerDag) return executeTriggerDagTask(db, ti, taskDef)
+  if (taskDef.externalTask) return executeExternalTaskSensor(db, ti, taskDef)
 
   // HITL approval-only tasks (no run body) — succeed immediately after approval
   if (ti.is_hitl && !taskDef.run && !taskDef.poke) {
@@ -679,6 +689,109 @@ async function executeBranchTask(
   return executeRunFn(db, ti, wrapperFn)
 }
 
+// ── ShortCircuit task ──────────────────────────────────────────────────────────
+
+/**
+ * Run a shortCircuit condition. The result is stored as XCom `_short_circuit` (boolean);
+ * advanceRun then skips every downstream task when it is false (applyShortCircuitDecisions).
+ */
+async function executeShortCircuitTask(
+  db: Db,
+  ti: TaskInstance,
+  conditionFn: NonNullable<import('../dag/types.js').TaskDefinition['shortCircuit']>,
+): Promise<void> {
+  const wrapperFn = new Function(`return async function(ctx) {
+    const conditionFn = (${conditionFn.toString()});
+    const pass = Boolean(await conditionFn(ctx));
+    await ctx.xcom.push('_short_circuit', pass);
+    return pass;
+  }`)()
+  return executeRunFn(db, ti, wrapperFn)
+}
+
+// ── Cross-Dag tasks (TriggerDagRun / ExternalTaskSensor) ───────────────────────
+
+type CrossDagTaskDef = import('../dag/types.js').TaskDefinition
+
+/** Park a task as 'deferred' so pollDeferredTasks re-checks it — holds no worker slot. */
+async function deferForPolling(
+  db: Db, ti: TaskInstance, intervalMs: number, timeoutMs: number, extra: Record<string, unknown> = {},
+): Promise<void> {
+  await db.collection('task_instances').updateOne(tiFilter(ti), {
+    $set: {
+      state: 'deferred',
+      deferred_trigger_fn: null,
+      deferred_at: new Date(),
+      defer_timeout_ms: timeoutMs,
+      next_poke_at: new Date(Date.now() + intervalMs),
+      poke_interval_ms: intervalMs,
+      ...extra,
+    },
+  })
+}
+
+async function failCrossDag(db: Db, ti: TaskInstance, error: string): Promise<void> {
+  void recordTry(db, ti, 'failed', new Date(), error)
+  await markFailed(db, ti, error)
+  console.error(`[executor] ✗ ${ti.dag_id}.${ti.task_id}: ${error}`)
+}
+
+async function executeTriggerDagTask(db: Db, ti: TaskInstance, taskDef: CrossDagTaskDef): Promise<void> {
+  const cfg = taskDef.triggerDag!
+  const res = await triggerDagRun(db, ti, cfg)
+  if ('error' in res) return failCrossDag(db, ti, res.error)
+
+  await xcomPush(db, ti.dag_run_id, ti.dag_id, ti.task_id, ti.map_index, 'triggered_run_id', res.runId)
+  console.log(`[executor] ⇢ ${ti.dag_id}.${ti.task_id} triggered ${cfg.dagId} run ${res.runId}`)
+
+  if (!cfg.waitForCompletion) {
+    void recordTry(db, ti, 'success', new Date())
+    await markSuccess(db, ti)
+    return
+  }
+  await deferForPolling(db, ti, Math.max(1_000, taskDef.pokeInterval ?? 10_000), taskDef.timeout ?? 0,
+    { triggered_run_id: res.runId })
+}
+
+async function executeExternalTaskSensor(db: Db, ti: TaskInstance, taskDef: CrossDagTaskDef): Promise<void> {
+  const cfg = taskDef.externalTask!
+  const invalid = validateExternalTask(cfg)
+  if (invalid) return failCrossDag(db, ti, invalid)
+
+  // First check inline so an already-satisfied sensor doesn't wait a poll interval
+  if (await applyWaitResult(db, ti, await checkExternalTask(db, ti, cfg))) return
+  await deferForPolling(db, ti, Math.max(1_000, taskDef.pokeInterval ?? 30_000), taskDef.sensorTimeout ?? 3_600_000)
+}
+
+/** Apply a terminal WaitResult. Returns true when the task was finished (success/failed). */
+async function applyWaitResult(db: Db, ti: TaskInstance, result: WaitResult): Promise<boolean> {
+  if (result.status === 'pending') return false
+  if (result.status === 'failed') { await failCrossDag(db, ti, result.error); return true }
+  void recordTry(db, ti, 'success', new Date())
+  await markSuccess(db, ti)
+  console.log(`[executor] ✓ ${ti.dag_id}.${ti.task_id} (cross-dag wait satisfied)`)
+  return true
+}
+
+/** One poll of a deferred TriggerDagRun/ExternalTaskSensor task. */
+async function pollCrossDagTask(db: Db, ti: TaskInstance, taskDef: CrossDagTaskDef, now: Date): Promise<void> {
+  if (ti.defer_timeout_ms > 0 && ti.deferred_at &&
+      now.getTime() - new Date(ti.deferred_at).getTime() > ti.defer_timeout_ms) {
+    return failCrossDag(db, ti, `Timed out after ${ti.defer_timeout_ms}ms waiting on ${
+      taskDef.triggerDag ? `triggered run of '${taskDef.triggerDag.dagId}'` : `external '${taskDef.externalTask!.dagId}'`}`)
+  }
+
+  const result = taskDef.triggerDag
+    ? await checkTriggeredRun(db, ti.triggered_run_id)
+    : await checkExternalTask(db, ti, taskDef.externalTask!)
+  if (await applyWaitResult(db, ti, result)) return
+
+  const nextCheck = new Date(now.getTime() + (ti.poke_interval_ms || 10_000))
+  await db.collection('task_instances').updateOne(
+    tiFilter(ti), { $set: { next_poke_at: nextCheck }, $inc: { poke_count: 1 } },
+  )
+}
+
 /**
  * Execute a JS function (run: or branch wrapper) in a forked worker.
  * Extracted to share between executeTask (run:) and executeBranchTask.
@@ -880,6 +993,13 @@ export async function pollDeferredTasks(db: Db): Promise<void> {
   if (deferredTasks.length === 0) return
 
   for (const ti of deferredTasks) {
+    // Built-in cross-Dag waits carry no trigger fn — they are checked against run metadata
+    const taskDef = getDag(ti.dag_id)?.tasks[ti.task_id]
+    if (taskDef && (taskDef.triggerDag || taskDef.externalTask)) {
+      await pollCrossDagTask(db, ti, taskDef, now)
+      continue
+    }
+
     if (!ti.deferred_trigger_fn) {
       // No trigger fn stored — mark failed
       await markFailed(db, ti, 'Deferred task has no trigger function')

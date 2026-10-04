@@ -1,7 +1,7 @@
 import { ObjectId, type Db } from 'mongodb'
 import { loadDags } from '../dag/loader.js'
 import { getDag, listDags } from '../dag/registry.js'
-import { claimReadyTasks, skipUnsatisfiableTasks, applyBranchDecisions, expandDynamicMapped } from './claim.js'
+import { claimReadyTasks, skipUnsatisfiableTasks, applyBranchDecisions, applyShortCircuitDecisions, expandDynamicMapped } from './claim.js'
 import { pollDeferredTasks } from './executor.js'
 import { executeTask } from './executor.js'
 import { syncCronJobs, stopAllCronJobs, tickTimetables, tickCatchup } from './cron.js'
@@ -141,6 +141,7 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
     // Apply branch decisions: skip non-selected direct dependents of branch tasks.
     // Must run before expandDynamicMapped so the cascade picks up branch-skips.
     await applyBranchDecisions(db, dagRunId)
+    await applyShortCircuitDecisions(db, dagRunId)
 
     // Expand dynamic-mapped tasks: replace placeholders with real instances once
     // the source XCom is available. Must run before skipUnsatisfiableTasks so
@@ -156,6 +157,7 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
 
   // Final passes: handle tasks that were unsatisfiable from the start or
   // dynamic tasks whose source just succeeded in the last wave.
+  await applyShortCircuitDecisions(db, dagRunId)
   await expandDynamicMapped(db, dagRunId)
   await skipUnsatisfiableTasks(db, dagRunId)
 
@@ -349,7 +351,7 @@ async function failIfRunTimedOut(
 /**
  * Cancel a dag_run atomically:
  * - Marks run state → cancelled
- * - Marks all queued/running tasks → cancelled
+ * - Marks all queued/running/deferred tasks → cancelled
  * Returns false if the run was already in a terminal state.
  */
 export async function cancelRun(db: Db, dagRunId: string): Promise<boolean> {
@@ -363,7 +365,7 @@ export async function cancelRun(db: Db, dagRunId: string): Promise<boolean> {
 
   // Cancel all non-terminal tasks in one shot
   await db.collection('task_instances').updateMany(
-    { dag_run_id: dagRunId, state: { $in: ['queued', 'running'] } },
+    { dag_run_id: dagRunId, state: { $in: ['queued', 'running', 'deferred'] } },
     { $set: { state: 'cancelled', ended_at: new Date(), error: 'Cancelled by user' } }
   )
 

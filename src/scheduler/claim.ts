@@ -321,6 +321,43 @@ export async function applyBranchDecisions(db: Db, dagRunId: string): Promise<nu
 }
 
 /**
+ * After a ShortCircuit task succeeds, read its XCom `_short_circuit`. When false, skip every
+ * downstream task (direct AND transitive) that is still queued — regardless of trigger rule.
+ * Returns the number of tasks skipped.
+ */
+export async function applyShortCircuitDecisions(db: Db, dagRunId: string): Promise<number> {
+  const all = await db.collection<TaskInstance>('task_instances').find({ dag_run_id: dagRunId }).toArray()
+  const shorted = all.filter(t => t.is_short_circuit && t.state === 'success')
+  if (shorted.length === 0) return 0
+
+  const doomed = new Set<string>()
+  for (const sc of shorted) {
+    const doc = await db.collection('xcoms').findOne({ dag_run_id: dagRunId, task_id: sc.task_id, key: '_short_circuit' })
+    if (doc?.value !== false) continue
+
+    // BFS over the depends_on graph for everything downstream of this task
+    const frontier = [sc.task_id]
+    while (frontier.length > 0) {
+      const current = frontier.pop()!
+      for (const t of all) {
+        if (t.depends_on.includes(current) && !doomed.has(t.task_id)) {
+          doomed.add(t.task_id)
+          frontier.push(t.task_id)
+        }
+      }
+    }
+  }
+  if (doomed.size === 0) return 0
+
+  const res = await db.collection<TaskInstance>('task_instances').updateMany(
+    { dag_run_id: dagRunId, task_id: { $in: [...doomed] }, state: 'queued' },
+    { $set: { state: 'skipped', ended_at: new Date() } },
+  )
+  if (res.modifiedCount > 0) console.log(`[short-circuit] skipped ${res.modifiedCount} downstream task instance(s)`)
+  return res.modifiedCount
+}
+
+/**
  * Expand dynamic-mapped tasks once their source XCom is available.
  *
  * For each placeholder instance (is_dynamic_placeholder=true) whose source

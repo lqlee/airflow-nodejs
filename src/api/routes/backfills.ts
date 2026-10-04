@@ -31,12 +31,18 @@ export async function backfillsRoutes(app: FastifyInstance): Promise<void> {
     if (cursor) {
       if (!ObjectId.isValid(cursor)) return reply.status(400).send({ error: 'Invalid cursor' })
       const pivot = await db.collection('backfills').findOne({ _id: new ObjectId(cursor) })
-      if (pivot) filter['created_at'] = { $lt: pivot.created_at }
+      if (pivot) {
+        // (created_at, _id) tuple — same-millisecond backfills share created_at
+        filter['$or'] = [
+          { created_at: { $lt: pivot.created_at } },
+          { created_at: pivot.created_at, _id: { $lt: pivot._id } },
+        ]
+      }
     }
 
     const docs = await db.collection<BackfillDoc>('backfills')
       .find(filter)
-      .sort({ created_at: -1 })
+      .sort({ created_at: -1, _id: -1 })
       .limit(limit)
       .toArray()
 

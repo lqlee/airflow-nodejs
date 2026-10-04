@@ -310,14 +310,18 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: 'Invalid cursor' })
       const pivot = await db.collection('dag_runs').findOne({ _id: new ObjectId(cursor) })
       if (pivot) {
-        filter['created_at'] = { $lt: pivot.created_at }
+        // (created_at, _id) tuple — runs created in the same millisecond share created_at
+        filter['$or'] = [
+          { created_at: { $lt: pivot.created_at } },
+          { created_at: pivot.created_at, _id: { $lt: pivot._id } },
+        ]
       }
     }
 
     const runs = await db
       .collection('dag_runs')
       .find(filter)
-      .sort({ created_at: -1 })
+      .sort({ created_at: -1, _id: -1 })
       .limit(limit)
       .toArray()
 

@@ -11,6 +11,7 @@ import { createRun } from './runs.js'
 import { isDagPaused } from '../dag/pause.js'
 import { fireWebhook, type DeliverOptions } from '../webhooks/index.js'
 import { recordEvent } from '../events/index.js'
+import { recordSchedulerTick } from '../metrics/registry.js'
 import { getPausedBackfillIds, buildActiveRunFilter } from './backfill-filter.js'
 
 const POLL_INTERVAL_MS = 5_000
@@ -52,6 +53,8 @@ export function stopScheduler(): void {
 }
 
 async function tick(db: Db): Promise<void> {
+  const startedAt = performance.now()
+  let ok = true
   try {
     await loadDags(db)
     const dags = listDags()
@@ -88,7 +91,10 @@ async function tick(db: Db): Promise<void> {
     // Trigger dataset-aware consumers whose datasets have new events
     await triggerDatasetConsumers(db, dags, createRun, isDagPaused)
   } catch (err) {
+    ok = false
     console.error('[scheduler] tick error:', err)
+  } finally {
+    recordSchedulerTick((performance.now() - startedAt) / 1000, ok)
   }
 }
 

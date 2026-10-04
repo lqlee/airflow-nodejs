@@ -23,6 +23,8 @@ import { pluginsRoutes } from './routes/plugins.js'
 import { dagWarningsRoutes } from './routes/dag-warnings.js'
 import { configRoutes } from './routes/config.js'
 import { imagesRoutes } from './routes/images.js'
+import { metricsRoutes } from './routes/metrics.js'
+import { recordHttpRequest } from '../metrics/registry.js'
 import { activeWorkers, queueDepth } from '../scheduler/pool.js'
 import { authHook, AUTH_ENABLED, setDb } from '../auth/index.js'
 
@@ -81,6 +83,11 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
   // Auth hook — runs before every API request
   app.addHook('preHandler', authHook)
 
+  // Request metrics for /metrics — route is the registered pattern (low cardinality), not the URL
+  app.addHook('onResponse', async (req, reply) => {
+    recordHttpRequest(req.method, req.routeOptions?.url ?? 'unmatched', reply.statusCode, reply.elapsedTime / 1000)
+  })
+
   // Serve static assets; disable automatic Cache-Control so we control it via onSend.
   app.register(fastifyStatic, { root: PUBLIC_DIR, prefix: '/', cacheControl: false })
 
@@ -90,7 +97,7 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
   app.addHook('onSend', async (req, reply, payload) => {
     if (req.url === '/' || req.url === '/index.html') {
       reply.header('Cache-Control', 'no-store, no-cache, must-revalidate')
-    } else if (!req.url.startsWith('/api/') && !req.url.startsWith('/dags')) {
+    } else if (!reply.hasHeader('cache-control') && !req.url.startsWith('/api/') && !req.url.startsWith('/dags')) {
       reply.header('Cache-Control', 'public, max-age=3600')
     }
     return payload
@@ -131,6 +138,7 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
     app.register(dagWarningsRoutes)
     app.register(configRoutes)
     app.register(imagesRoutes)
+    app.register(metricsRoutes)
   })
 
   return app

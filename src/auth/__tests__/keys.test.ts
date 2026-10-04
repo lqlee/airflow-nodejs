@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
 import { MongoClient, ObjectId, type Db } from 'mongodb'
 import { createApiKey, validateApiKey, revokeApiKey, listApiKeys } from '../keys.js'
+import { waitFor } from '../../scheduler/__tests__/wait-for.js'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 let client: MongoClient
@@ -79,9 +80,11 @@ describe('validateApiKey', () => {
   it('updates last_used_at on successful validation', async () => {
     const { raw } = await createApiKey(db, 'track-usage')
     await validateApiKey(db, raw)
-    // Small delay for the fire-and-forget update
-    await new Promise(r => setTimeout(r, 50))
-    const doc = await db.collection('api_keys').findOne({ name: 'track-usage' })
+    // The update is fire-and-forget — poll for it instead of guessing a delay
+    const doc = await waitFor(
+      () => db.collection('api_keys').findOne({ name: 'track-usage' }),
+      d => d?.last_used_at != null,
+    )
     expect(doc!.last_used_at).not.toBeNull()
   })
 })

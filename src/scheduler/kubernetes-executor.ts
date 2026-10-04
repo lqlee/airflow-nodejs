@@ -148,7 +148,7 @@ export async function executeTaskOnKubernetes(
   const podName = args[1]  // second arg is the pod name
 
   await acquire()
-  if (ti.pool) await acquirePool(db, ti.pool)
+  if (ti.pool) ti.pool_slots = await acquirePool(db, ti.pool, ti.pool_slots)
 
   console.log(`[k8s-executor] dispatching ${ti.dag_id}.${ti.task_id} → pod ${podName}`)
 
@@ -167,7 +167,7 @@ export async function executeTaskOnKubernetes(
         const msg = `Kubernetes executor: task timed out after ${ti.timeout_ms}ms`
         console.error(`[k8s-executor] ⏱ ${ti.dag_id}.${ti.task_id}: ${msg}`)
         release()
-        if (ti.pool) releasePool(ti.pool)
+        if (ti.pool) releasePool(ti.pool, ti.pool_slots)
         void recordTry(db, ti, 'failed', new Date(), msg)
         void markFailed(db, ti, msg).then(() => done())
       }, ti.timeout_ms)
@@ -192,7 +192,7 @@ export async function executeTaskOnKubernetes(
       errored = true
       clearKillTimer()
       release()
-      if (ti.pool) releasePool(ti.pool)
+      if (ti.pool) releasePool(ti.pool, ti.pool_slots)
       const msg = (err as NodeJS.ErrnoException).code === 'ENOENT'
         ? `kubectl not found — is it installed and on PATH?`
         : err.message
@@ -205,7 +205,7 @@ export async function executeTaskOnKubernetes(
       if (timedOut || errored) return
       clearKillTimer()
       release()
-      if (ti.pool) releasePool(ti.pool)
+      if (ti.pool) releasePool(ti.pool, ti.pool_slots)
       const endedAt = new Date()
 
       if (code === 0) {

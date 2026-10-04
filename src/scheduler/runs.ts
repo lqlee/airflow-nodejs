@@ -18,6 +18,8 @@ export interface DagRun {
   note: string | null
   state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled'
   created_at: Date
+  /** When the run first moved queued → running (basis for runTimeout). Absent on legacy runs. */
+  started_at?: Date | null
   /** How the run was triggered. */
   trigger_type: 'manual' | 'cron' | 'backfill' | 'dataset' | 'timetable'
   /** ID of the parent backfill entity, or null for non-backfill runs. */
@@ -44,6 +46,12 @@ export interface TaskInstance {
   try_number: number
   max_retries: number       // max allowed retries (0 = no retries)
   retry_delay: number       // ms to wait before requeue
+  /** Backoff multiplier (<= 1 or absent = fixed delay). */
+  retry_backoff?: number
+  /** Cap in ms for backed-off delay (0/absent = uncapped). */
+  max_retry_delay?: number
+  /** Pool slots held while running; absent on legacy docs = 1. */
+  pool_slots?: number
   timeout_ms: number        // 0 = no timeout; >0 = kill worker after this many ms
   started_at: Date | null
   ended_at: Date | null
@@ -167,6 +175,9 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
         try_number: 0,
         max_retries: task.retries ?? 0,
         retry_delay: task.retryDelay ?? 0,
+        retry_backoff: task.retryExponentialBackoff ?? 0,
+        max_retry_delay: task.maxRetryDelay ?? 0,
+        pool_slots: Math.max(1, Math.floor(task.poolSlots ?? 1)),
         timeout_ms: task.timeout ?? 0,
         started_at: null,
         ended_at: null,

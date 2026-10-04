@@ -109,7 +109,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
 
   // Local: fork directly — acquire global slot, then per-pool slot (if task declares a pool)
   await acquire()
-  if (ti.pool) await acquirePool(db, ti.pool)
+  if (ti.pool) ti.pool_slots = await acquirePool(db, ti.pool, ti.pool_slots)
 
   const label = ti.is_sensor ? 'poking' : 'running'
   console.log(`[executor] ${label} ${ti.dag_id}.${ti.task_id} (run: ${ti.dag_run_id})`)
@@ -132,7 +132,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
         const msg = `Task timed out after ${ti.timeout_ms}ms`
         console.error(`[executor] ⏱ ${ti.dag_id}.${ti.task_id}: ${msg}`)
         release()
-        if (ti.pool) releasePool(ti.pool)
+        if (ti.pool) releasePool(ti.pool, ti.pool_slots)
         void recordTry(db, ti, 'failed', new Date(), msg)
         void markFailed(db, ti, msg).then(() => done())
       }, ti.timeout_ms)
@@ -177,7 +177,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
       if (timedOut) return
       clearKillTimer()
       release()
-      if (ti.pool) releasePool(ti.pool)
+      if (ti.pool) releasePool(ti.pool, ti.pool_slots)
 
       if (msg.outcome === 'reschedule') {
         // Sensor: poke returned false — compute next outcome based on deadline
@@ -197,7 +197,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
       } else if (msg.outcome === 'deferred') {
         // Task called ctx.defer() — free slot, store trigger fn, mark deferred
         release()
-        if (ti.pool) releasePool(ti.pool)
+        if (ti.pool) releasePool(ti.pool, ti.pool_slots)
         const interval = msg.deferInterval ?? 10_000
         // defer timeout: use defer()-supplied value > task-level > no timeout
         const deferTimeoutMs = (msg.deferTimeout && msg.deferTimeout > 0)
@@ -247,7 +247,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
       if (timedOut) return
       clearKillTimer()
       release()
-      if (ti.pool) releasePool(ti.pool)
+      if (ti.pool) releasePool(ti.pool, ti.pool_slots)
       void recordTry(db, ti, 'failed', new Date(), err.message)
       await markFailed(db, ti, err.message)
       done()
@@ -293,7 +293,7 @@ interface SpawnOpts {
  */
 async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<void> {
   await acquire()
-  if (ti.pool) await acquirePool(db, ti.pool)
+  if (ti.pool) ti.pool_slots = await acquirePool(db, ti.pool, ti.pool_slots)
 
   console.log(`[executor] ${opts.label} ${ti.dag_id}.${ti.task_id}`)
 
@@ -321,7 +321,7 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
         const msg = `${opts.kind} task timed out after ${opts.timeoutMs}ms`
         console.error(`[executor] ⏱ ${ti.dag_id}.${ti.task_id}: ${msg}`)
         release()
-        if (ti.pool) releasePool(ti.pool)
+        if (ti.pool) releasePool(ti.pool, ti.pool_slots)
         void recordTry(db, ti, 'failed', new Date(), msg)
         void markFailed(db, ti, msg).then(() => done())
       }, opts.timeoutMs)
@@ -349,7 +349,7 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
       errored = true
       clearKillTimer()
       release()
-      if (ti.pool) releasePool(ti.pool)
+      if (ti.pool) releasePool(ti.pool, ti.pool_slots)
       const msg = (err as NodeJS.ErrnoException).code === 'ENOENT'
         ? `${opts.kind} binary '${opts.binary}' not found — is it installed in the runtime image?`
         : err.message
@@ -362,7 +362,7 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
       if (timedOut || errored) return   // already handled by error or timeout handler
       clearKillTimer()
       release()
-      if (ti.pool) releasePool(ti.pool)
+      if (ti.pool) releasePool(ti.pool, ti.pool_slots)
       const endedAt = new Date()
 
       if (code === 0) {
@@ -689,7 +689,7 @@ async function executeRunFn(
   fn: (ctx: unknown) => Promise<unknown>,
 ): Promise<void> {
   await acquire()
-  if (ti.pool) await acquirePool(db, ti.pool)
+  if (ti.pool) ti.pool_slots = await acquirePool(db, ti.pool, ti.pool_slots)
 
   const label = ti.is_sensor ? 'poking' : ti.is_branch ? 'branching' : 'running'
   console.log(`[executor] ${label} ${ti.dag_id}.${ti.task_id} (run: ${ti.dag_run_id})`)
@@ -711,7 +711,7 @@ async function executeRunFn(
         const msg = `Task timed out after ${ti.timeout_ms}ms`
         console.error(`[executor] ⏱ ${ti.dag_id}.${ti.task_id}: ${msg}`)
         release()
-        if (ti.pool) releasePool(ti.pool)
+        if (ti.pool) releasePool(ti.pool, ti.pool_slots)
         void recordTry(db, ti, 'failed', new Date(), msg)
         void markFailed(db, ti, msg).then(() => done())
       }, ti.timeout_ms)
@@ -748,7 +748,7 @@ async function executeRunFn(
       if (timedOut) return
       clearKillTimer()
       release()
-      if (ti.pool) releasePool(ti.pool)
+      if (ti.pool) releasePool(ti.pool, ti.pool_slots)
 
       if (msg.outcome === 'success') {
         const endedAt = new Date()
@@ -775,7 +775,7 @@ async function executeRunFn(
       if (timedOut) return
       clearKillTimer()
       release()
-      if (ti.pool) releasePool(ti.pool)
+      if (ti.pool) releasePool(ti.pool, ti.pool_slots)
       void recordTry(db, ti, 'failed', new Date(), err.message)
       await markFailed(db, ti, err.message)
       done()
@@ -815,14 +815,32 @@ async function schedulePoke(db: Db, ti: TaskInstance, firstPokedAt: Date, now: D
   )
 }
 
+/**
+ * Delay in ms before the next retry. try_number is the 0-based attempt that just failed,
+ * so the first retry waits retry_delay, then retry_delay×m, retry_delay×m², … capped at
+ * max_retry_delay. A multiplier <= 1 (or absent) keeps the delay fixed.
+ */
+export function computeRetryDelay(
+  ti: Pick<TaskInstance, 'retry_delay' | 'retry_backoff' | 'max_retry_delay' | 'try_number'>,
+): number {
+  const base = ti.retry_delay ?? 0
+  const mult = ti.retry_backoff ?? 0
+  let delay = mult > 1 ? base * Math.pow(mult, ti.try_number) : base
+  if (ti.max_retry_delay && ti.max_retry_delay > 0) delay = Math.min(delay, ti.max_retry_delay)
+  return Math.round(delay)
+}
+
 export async function scheduleRetry(db: Db, ti: TaskInstance, error: string): Promise<void> {
   const requeue = async () => {
+    // state:'running' guard — if the run was timed out/cancelled while the delay timer
+    // was pending, the task is no longer 'running' and must not be resurrected.
     await db.collection('task_instances').updateOne(
-      tiFilter(ti),
+      { ...tiFilter(ti), state: 'running' },
       { $set: { state: 'queued', started_at: null, ended_at: null, error }, $inc: { try_number: 1 } }
     )
   }
-  ti.retry_delay > 0 ? setTimeout(() => void requeue(), ti.retry_delay) : await requeue()
+  const delay = computeRetryDelay(ti)
+  delay > 0 ? setTimeout(() => void requeue(), delay) : await requeue()
 }
 
 async function markSuccess(db: Db, ti: TaskInstance): Promise<void> {

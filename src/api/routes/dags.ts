@@ -34,6 +34,8 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({
       id: dag.id,
       schedule: dag.schedule,
+      max_active_runs: dag.maxActiveRuns ?? null,
+      run_timeout_ms: dag.runTimeout ?? null,
       datasets: dag.datasets ?? [],
       outlets: dag.outlets ?? [],
       is_paused: isPaused,
@@ -78,6 +80,10 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
       // Retry / timeout
       retries: t.retries ?? 0,
       retry_delay_ms: t.retryDelay ?? 0,
+      retry_exponential_backoff: t.retryExponentialBackoff ?? null,
+      max_retry_delay_ms: t.maxRetryDelay ?? null,
+      pool: t.pool ?? null,
+      pool_slots: t.pool ? Math.max(1, Math.floor(t.poolSlots ?? 1)) : null,
       timeout_ms: t.timeout ?? 0,
       // Task type flags
       is_mapped: Array.isArray(t.expand),

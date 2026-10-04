@@ -378,6 +378,7 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
         try_number: t.try_number ?? 0,
         max_retries: t.max_retries ?? 0,
         retry_delay_ms: t.retry_delay ?? 0,
+        pool_slots: t.pool ? (t.pool_slots ?? 1) : null,
         timeout_ms: t.timeout_ms ?? 0,
         started_at: t.started_at ?? null,
         ended_at: t.ended_at ?? null,

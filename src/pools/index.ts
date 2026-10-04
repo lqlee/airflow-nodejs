@@ -6,8 +6,8 @@
  * pool run concurrently across the scheduler.
  *
  * Enforcement sits in executor.ts (local-fork mode only; BullMQ mode skips it,
- * same as the global MAX_WORKERS semaphore). Each acquire is per-task-instance
- * — per-task slot cost is fixed at 1 (MVP; Airflow supports >1).
+ * same as the global MAX_WORKERS semaphore). Each acquire is per-task-instance;
+ * a task may occupy several slots via `poolSlots` (default 1).
  *
  * Missing pool → fall through (global-only gating), warning logged once.
  */
@@ -34,51 +34,68 @@ export interface PoolSummary {
 
 // ── In-memory per-pool semaphore ───────────────────────────────────────────
 
-/** Active (acquired) count per pool name. */
+/** Slots currently held per pool name (sum of held task slot costs). */
 const poolActive = new Map<string, number>()
-/** Waiters per pool name. */
-const poolQueue = new Map<string, Array<() => void>>()
+/** Last-seen pool size per pool name — used when draining waiters on release. */
+const poolCapacity = new Map<string, number>()
+/** FIFO waiters per pool name, each wanting `slots` slots. */
+const poolQueue = new Map<string, Array<{ slots: number; resolve: () => void }>>()
 
 /**
- * Acquire one slot in the named pool.
- * Reads `slots` from the DB — always fresh, honours runtime PATCH.
- * Returns immediately if the pool is not in the DB (fall-through).
+ * Acquire `slots` slots (default 1) in the named pool.
+ * Reads pool size from the DB — always fresh, honours runtime PATCH.
+ * A request larger than the pool is clamped to the pool size (it could never be granted).
+ * Returns the number of slots actually held — pass it to releasePool. Returns 0 for an
+ * unknown pool (fall-through, nothing held).
  */
-export async function acquirePool(db: Db, poolName: string): Promise<void> {
+export async function acquirePool(db: Db, poolName: string, slots = 1): Promise<number> {
   const doc = await db.collection<Pool>('pools').findOne({ name: poolName })
   if (!doc) {
     console.warn(`[pools] task references unknown pool '${poolName}' — running without pool limit`)
-    return
+    return 0
   }
 
-  const slots = doc.slots
+  poolCapacity.set(poolName, doc.slots)
+  const want = Math.min(Math.max(1, Math.floor(slots)), doc.slots)
   const active = poolActive.get(poolName) ?? 0
+  const queue = poolQueue.get(poolName)
 
-  if (active < slots) {
-    poolActive.set(poolName, active + 1)
-    return
+  // Respect FIFO: don't jump ahead of tasks already waiting
+  if (!queue?.length && active + want <= doc.slots) {
+    poolActive.set(poolName, active + want)
+    return want
   }
 
-  // Pool full — wait
-  return new Promise<void>((resolve) => {
+  // Pool full — wait. drainPool() grants the slots (and counts them) before resolving.
+  await new Promise<void>((resolve) => {
     if (!poolQueue.has(poolName)) poolQueue.set(poolName, [])
-    poolQueue.get(poolName)!.push(resolve)
+    poolQueue.get(poolName)!.push({ slots: want, resolve })
   })
+  return want
 }
 
 /**
- * Release one slot in the named pool, unblocking the next waiter if any.
- * No-op for unknown pools (consistent with fall-through on acquire).
+ * Release `slots` slots (default 1) in the named pool, then grant waiting tasks in
+ * strict FIFO order while they fit. No-op for unknown pools / zero slots.
  */
-export function releasePool(poolName: string): void {
-  const waiters = poolQueue.get(poolName) ?? []
-  const next = waiters.shift()
-  if (next) {
-    // Hand slot directly to next waiter; active count stays the same
-    next()
-  } else {
+export function releasePool(poolName: string, slots = 1): void {
+  const held = poolActive.get(poolName) ?? 0
+  if (held > 0) poolActive.set(poolName, Math.max(0, held - Math.max(0, slots)))
+  drainPool(poolName)
+}
+
+/** Grant queued waiters in order until the head no longer fits (no starvation of big tasks). */
+function drainPool(poolName: string): void {
+  const queue = poolQueue.get(poolName)
+  const capacity = poolCapacity.get(poolName)
+  if (!queue || capacity === undefined) return
+  while (queue.length > 0) {
     const active = poolActive.get(poolName) ?? 0
-    if (active > 0) poolActive.set(poolName, active - 1)
+    const head = queue[0]
+    if (active + head.slots > capacity) break
+    queue.shift()
+    poolActive.set(poolName, active + head.slots)
+    head.resolve()
   }
 }
 
@@ -95,6 +112,7 @@ export function poolQueueDepth(poolName: string): number {
 /** Reset all per-pool state — test helper only. */
 export function resetAllPools(): void {
   poolActive.clear()
+  poolCapacity.clear()
   poolQueue.clear()
 }
 

@@ -74,6 +74,7 @@ async function tick(db: Db): Promise<void> {
     const activeRuns = await db
       .collection('dag_runs')
       .find(buildActiveRunFilter(pausedBackfillIds))
+      .sort({ created_at: 1 })   // oldest first — queued runs get maxActiveRuns slots in order
       .toArray()
 
     for (const run of activeRuns) {
@@ -97,24 +98,41 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
   const run = await db.collection('dag_runs').findOne({ _id: new ObjectId(dagRunId) })
   if (!run || run.state === 'cancelled' || run.state === 'success' || run.state === 'failed') return
 
-  // Mark run as running if still queued
-  await db.collection('dag_runs').updateOne(
-    { _id: new ObjectId(dagRunId), state: 'queued' },
-    { $set: { state: 'running' } }
-  )
+  const dagDef = getDag(run.dag_id as string)
+
+  // Mark run as running if still queued — unless the Dag is at its maxActiveRuns limit,
+  // in which case the run stays queued and a later tick retries.
+  if (run.state === 'queued') {
+    if (dagDef?.maxActiveRuns && dagDef.maxActiveRuns > 0) {
+      const running = await db.collection('dag_runs').countDocuments({ dag_id: run.dag_id, state: 'running' })
+      if (running >= dagDef.maxActiveRuns) return
+    }
+    await db.collection('dag_runs').updateOne(
+      { _id: new ObjectId(dagRunId), state: 'queued' },
+      { $set: { state: 'running', started_at: new Date() } }
+    )
+    run.started_at = new Date()
+  }
+
+  // runTimeout: fail the run (and its unfinished tasks) once it has been running too long.
+  // Checked here and between waves; the normal completion path below finalizes + fires hooks.
+  let timedOut = await failIfRunTimedOut(db, dagRunId, dagDef?.runTimeout, run.started_at ?? run.created_at)
 
   // Claim all currently-ready tasks and execute in parallel.
   // After each wave, skip any tasks whose trigger rule can never be satisfied.
   // Re-check cancellation and shutdown flag before each wave.
   // On shutdown: bail without forking new children — recoverOrphanedRuns()
   // will re-claim any queued/running rows on next boot.
-  let claimed = await claimReadyTasks(db, dagRunId)
+  let claimed = timedOut ? [] : await claimReadyTasks(db, dagRunId)
   while (claimed.length > 0) {
     if (_shuttingDown) return
     const current = await db.collection('dag_runs').findOne({ _id: new ObjectId(dagRunId) })
     if (current?.state === 'cancelled') return
 
     await Promise.all(claimed.map(ti => executeTask(db, ti)))
+
+    timedOut = await failIfRunTimedOut(db, dagRunId, dagDef?.runTimeout, run.started_at ?? run.created_at)
+    if (timedOut) break
 
     // Apply branch decisions: skip non-selected direct dependents of branch tasks.
     // Must run before expandDynamicMapped so the cascade picks up branch-skips.
@@ -298,6 +316,30 @@ export async function clearTaskInstance(
     metadata: { cleared_count: result.modifiedCount },
   })
   return { cleared: true, clearedCount: result.modifiedCount }
+}
+
+/**
+ * If the run has exceeded `runTimeout` ms since it started running, mark every unfinished
+ * task failed so the caller's completion check finalizes the run as failed.
+ * Returns true when the run is (now) timed out.
+ */
+async function failIfRunTimedOut(
+  db: Db,
+  dagRunId: string,
+  runTimeout: number | undefined,
+  startedAt: Date | null | undefined,
+): Promise<boolean> {
+  if (!runTimeout || runTimeout <= 0 || !startedAt) return false
+  if (Date.now() - new Date(startedAt).getTime() < runTimeout) return false
+
+  const res = await db.collection('task_instances').updateMany(
+    { dag_run_id: dagRunId, state: { $in: ['queued', 'running', 'deferred'] } },
+    { $set: { state: 'failed', ended_at: new Date(), error: `Dag run exceeded runTimeout (${runTimeout}ms)` } },
+  )
+  if (res.modifiedCount > 0) {
+    console.warn(`[scheduler] run ${dagRunId} exceeded runTimeout ${runTimeout}ms — failed ${res.modifiedCount} task(s)`)
+  }
+  return true
 }
 
 /**

@@ -187,6 +187,20 @@ export interface TaskDefinition {
   priority?: number
   retries?: number        // max retry attempts (default: 0 = no retries)
   retryDelay?: number     // ms to wait before requeuing (default: 0)
+  /**
+   * Exponential backoff multiplier for retries (Airflow `retry_exponential_backoff`).
+   * Delay before retry N (0-based) = retryDelay × multiplier^N, e.g. retryDelay 1000 +
+   * multiplier 2 → 1s, 2s, 4s… Values <= 1 disable backoff (fixed retryDelay).
+   * Capped by `maxRetryDelay` when set. Applies in local-executor mode only.
+   */
+  retryExponentialBackoff?: number
+  /** Upper bound in ms for the backed-off retry delay (Airflow `max_retry_delay`). */
+  maxRetryDelay?: number
+  /**
+   * Pool slots this task occupies while running (Airflow `pool_slots`). Default: 1.
+   * Only meaningful with `pool`. Values above the pool size are clamped to the pool size.
+   */
+  poolSlots?: number
   timeout?: number        // ms before worker is killed and task marked failed (default: no timeout)
   run?: (ctx: TaskContext) => Promise<unknown>
   /**
@@ -616,6 +630,16 @@ export interface DagDefinition {
    * See TimetableFn above for full documentation and examples.
    */
   timetable?: TimetableFn
+  /**
+   * Max concurrently active (running) runs of this Dag (Airflow `max_active_runs`).
+   * Extra runs stay `queued` until a slot frees. Default: unlimited.
+   */
+  maxActiveRuns?: number
+  /**
+   * Fail a run that has been running longer than this many ms (Airflow `dagrun_timeout`).
+   * Queued time does not count. Non-terminal tasks are marked failed.
+   */
+  runTimeout?: number
   sla?: number             // ms — if a run hasn't completed within this window, an SLA alert is fired
   version?: string         // sha256[:12] of the dag source file — stamped by the loader
   /**

@@ -321,3 +321,86 @@ describe('pool field on task_instance', () => {
     expect(run?.state).toBe('success')
   })
 })
+
+// ── weighted slots (poolSlots) ────────────────────────────────────────────
+
+describe('acquirePool / releasePool — multi-slot tasks', () => {
+  it('a 2-slot task consumes 2 of 3 slots; a 2-slot task cannot run beside it', async () => {
+    await createPool(db, 'wide_pool', 3)
+    expect(await acquirePool(db, 'wide_pool', 2)).toBe(2)
+    expect(poolActiveCount('wide_pool')).toBe(2)
+
+    let resolved = false
+    void acquirePool(db, 'wide_pool', 2).then(() => { resolved = true })
+    await new Promise(r => setTimeout(r, 30))
+    expect(resolved).toBe(false)
+    expect(poolQueueDepth('wide_pool')).toBe(1)
+
+    releasePool('wide_pool', 2)
+    await new Promise(r => setTimeout(r, 30))
+    expect(resolved).toBe(true)
+    expect(poolActiveCount('wide_pool')).toBe(2)
+  })
+
+  it('release frees exactly the slots that were acquired', async () => {
+    await createPool(db, 'exact_pool', 4)
+    await acquirePool(db, 'exact_pool', 3)
+    await acquirePool(db, 'exact_pool', 1)
+    releasePool('exact_pool', 3)
+    expect(poolActiveCount('exact_pool')).toBe(1)
+  })
+
+  it('grants waiters strictly FIFO — a big head-of-line waiter is not starved by small ones', async () => {
+    await createPool(db, 'fifo_w', 2)
+    await acquirePool(db, 'fifo_w', 1)             // 1/2 held
+    const order: string[] = []
+    void acquirePool(db, 'fifo_w', 2).then(() => order.push('big'))     // needs both slots → waits
+    await new Promise(r => setTimeout(r, 20))
+    void acquirePool(db, 'fifo_w', 1).then(() => order.push('small'))   // would fit, but must queue behind big
+    await new Promise(r => setTimeout(r, 20))
+    expect(order).toEqual([])
+
+    releasePool('fifo_w', 1)
+    await new Promise(r => setTimeout(r, 30))
+    expect(order).toEqual(['big'])
+    releasePool('fifo_w', 2)
+    await new Promise(r => setTimeout(r, 30))
+    expect(order).toEqual(['big', 'small'])
+  })
+
+  it('clamps a request larger than the pool to the pool size instead of deadlocking', async () => {
+    await createPool(db, 'small_pool', 2)
+    expect(await acquirePool(db, 'small_pool', 5)).toBe(2)
+    expect(poolActiveCount('small_pool')).toBe(2)
+  })
+
+  it('returns 0 (nothing held) for an unknown pool', async () => {
+    expect(await acquirePool(db, 'no_such_pool', 3)).toBe(0)
+    expect(poolActiveCount('no_such_pool')).toBe(0)
+  })
+})
+
+describe('poolSlots on task instances', () => {
+  it('createRun stamps pool_slots (default 1, floor ≥ 1) and a run with a 2-slot task completes', async () => {
+    await createPool(db, 'stamp_pool', 2)
+    const dag: DagDefinition = {
+      id: 'pool_slots_dag', schedule: null,
+      tasks: {
+        wide: { pool: 'stamp_pool', poolSlots: 2, run: async () => {} },
+        plain: { pool: 'stamp_pool', run: async () => {} },
+        bad: { pool: 'stamp_pool', poolSlots: 0, run: async () => {} },
+      },
+    }
+    register(dag)
+    const runId = await createRun(db, dag)
+    const slots = Object.fromEntries(
+      (await db.collection('task_instances').find({ dag_run_id: runId }).toArray()).map(t => [t.task_id, t.pool_slots]),
+    )
+    expect(slots).toEqual({ wide: 2, plain: 1, bad: 1 })
+
+    for (let i = 0; i < 6; i++) await advanceRun(db, runId)
+    const run = await db.collection('dag_runs').findOne({ dag_id: 'pool_slots_dag' })
+    expect(run!.state).toBe('success')
+    expect(poolActiveCount('stamp_pool')).toBe(0)   // every slot released
+  }, 20000)
+})

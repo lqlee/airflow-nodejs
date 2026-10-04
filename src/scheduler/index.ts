@@ -4,7 +4,7 @@ import { getDag, listDags } from '../dag/registry.js'
 import { claimReadyTasks, skipUnsatisfiableTasks, applyBranchDecisions, expandDynamicMapped } from './claim.js'
 import { pollDeferredTasks } from './executor.js'
 import { executeTask } from './executor.js'
-import { syncCronJobs, stopAllCronJobs, tickTimetables } from './cron.js'
+import { syncCronJobs, stopAllCronJobs, tickTimetables, tickCatchup } from './cron.js'
 import { checkSlaBreaches } from '../sla/index.js'
 import { emitOutlets, triggerDatasetConsumers } from '../datasets/index.js'
 import { createRun } from './runs.js'
@@ -59,6 +59,9 @@ async function tick(db: Db): Promise<void> {
     // Sync cron jobs whenever dags reload (picks up schedule changes)
     syncCronJobs(db, dags)
 
+    // Create runs for every missed occurrence of catchup dags
+    await tickCatchup(db, dags)
+
     // Tick timetable-scheduled dags (custom schedule functions)
     await tickTimetables(db, dags)
 
@@ -74,7 +77,8 @@ async function tick(db: Db): Promise<void> {
     const activeRuns = await db
       .collection('dag_runs')
       .find(buildActiveRunFilter(pausedBackfillIds))
-      .sort({ created_at: 1 })   // oldest first — queued runs get maxActiveRuns slots in order
+      .sort({ ordering_date: 1, created_at: 1 })   // timeline order — with maxActiveRuns + depends_on_past an
+      // earlier-dated run must get the slot before a later-dated one that waits on it
       .toArray()
 
     for (const run of activeRuns) {

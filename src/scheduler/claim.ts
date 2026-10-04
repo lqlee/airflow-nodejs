@@ -1,4 +1,4 @@
-import type { Db } from 'mongodb'
+import { ObjectId, type Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
 
 // Terminal states — a task is done once it reaches one of these
@@ -64,6 +64,48 @@ export function isUnsatisfiable(
   return !isSatisfied(triggerRule, upstreamStates)
 }
 
+/** depends_on_past passes when the task is absent from the previous run or every instance succeeded/was skipped. */
+export function isPastSatisfied(previousStates: string[] | undefined): boolean {
+  if (!previousStates || previousStates.length === 0) return true
+  return previousStates.every(s => s === 'success' || s === 'skipped')
+}
+
+/**
+ * Task states (per task_id) of the previous run of the same Dag — the latest earlier,
+ * non-cancelled run by ordering_date. Empty map when this is the first run.
+ */
+async function getPreviousRunTaskStates(db: Db, dagRunId: string): Promise<Map<string, string[]>> {
+  const result = new Map<string, string[]>()
+  const run = await db.collection('dag_runs').findOne({ _id: new ObjectId(dagRunId) })
+  const orderingDate = (run?.ordering_date ?? run?.logical_date ?? run?.created_at) as Date | undefined
+  if (!run || !orderingDate) return result
+
+  const prev = await db.collection('dag_runs').findOne(
+    {
+      dag_id: run.dag_id,
+      _id: { $ne: run._id },
+      state: { $ne: 'cancelled' },
+      // Equal dates tie-break on _id so two runs never wait on each other
+      $or: [
+        { ordering_date: { $lt: orderingDate } },
+        { ordering_date: orderingDate, _id: { $lt: run._id } },
+      ],
+    },
+    { sort: { ordering_date: -1, _id: -1 } },
+  )
+  if (!prev) return result
+
+  const instances = await db.collection('task_instances')
+    .find({ dag_run_id: prev._id.toString() }, { projection: { task_id: 1, state: 1 } })
+    .toArray()
+  for (const t of instances) {
+    const arr = result.get(t.task_id as string) ?? []
+    arr.push(t.state as string)
+    result.set(t.task_id as string, arr)
+  }
+  return result
+}
+
 /**
  * Atomically claim ALL currently-ready queued tasks for a run.
  * Readiness is evaluated in JS against trigger rules, then claimed atomically.
@@ -111,6 +153,11 @@ export async function claimReadyTasks(
   const now = new Date()
   const claimed: TaskInstance[] = []
 
+  // depends_on_past gate — resolve the previous run's task states once per claim
+  const pastStates = allInstances.some(i => i.depends_on_past && i.state === 'queued')
+    ? await getPreviousRunTaskStates(db, dagRunId)
+    : null
+
   for (const inst of allInstances) {
     if (inst.state !== 'queued') continue
 
@@ -122,6 +169,9 @@ export async function claimReadyTasks(
 
     // HITL gate
     if (inst.is_hitl && inst.hitl_state !== 'approved') continue
+
+    // depends_on_past gate
+    if (inst.depends_on_past && !isPastSatisfied(pastStates?.get(inst.task_id))) continue
 
     // Evaluate trigger rule against upstream aggregate states
     const upstreamStates = inst.depends_on.map(dep => aggState.get(dep) ?? 'pending')

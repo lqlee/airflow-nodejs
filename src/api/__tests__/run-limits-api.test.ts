@@ -68,6 +68,30 @@ describe('API exposes the new Dag/task settings', () => {
   })
 })
 
+describe('API exposes catchup / startDate / dependsOnPast', () => {
+  it('GET /dags/:id and /dags/:id/tasks', async () => {
+    register({
+      id: 'api_catchup_dag', schedule: '0 * * * *', catchup: true, startDate: '2026-01-02T03:04:05Z',
+      tasks: { seq: { dependsOnPast: true, run: async () => {} }, free: { run: async () => {} } },
+    })
+    const dagBody = (await app.inject({ method: 'GET', url: '/dags/api_catchup_dag' })).json()
+    expect(dagBody).toMatchObject({ catchup: true, start_date: '2026-01-02T03:04:05.000Z' })
+    const tasks = (await app.inject({ method: 'GET', url: '/dags/api_catchup_dag/tasks' })).json()
+    const by = Object.fromEntries(tasks.map((t: { task_id: string }) => [t.task_id, t]))
+    expect(by.seq.depends_on_past).toBe(true)
+    expect(by.free.depends_on_past).toBe(false)
+  })
+
+  it('defaults to catchup=false / start_date=null, and tolerates an invalid startDate', async () => {
+    register({ id: 'api_plain_dag', schedule: null, tasks: { t: { run: async () => {} } } })
+    register({ id: 'api_badstart_dag', schedule: null, catchup: true, startDate: 'garbage', tasks: { t: { run: async () => {} } } })
+    expect((await app.inject({ method: 'GET', url: '/dags/api_plain_dag' })).json()).toMatchObject({ catchup: false, start_date: null })
+    const bad = await app.inject({ method: 'GET', url: '/dags/api_badstart_dag' })
+    expect(bad.statusCode).toBe(200)
+    expect(bad.json().start_date).toBeNull()
+  })
+})
+
 describe('retry backoff — real timing', () => {
   it('waits retryDelay, then retryDelay×multiplier between successive attempts', async () => {
     const dag: DagDefinition = {

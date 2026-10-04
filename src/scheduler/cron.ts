@@ -5,6 +5,7 @@ import { getDag } from '../dag/registry.js'
 import { createRun } from './runs.js'
 import { advanceRun } from './index.js'
 import { isDagPaused } from '../dag/pause.js'
+import { enumerateDates } from './backfill.js'
 
 // Store both the task and the expression so we can detect schedule changes.
 // Previously only the task was stored — this prevented syncCronJobs from
@@ -22,6 +23,11 @@ const cronJobs = new Map<string, CronEntry>()
  */
 export function scheduleDag(db: Db, dag: DagDefinition): void {
   if (!dag.schedule) return
+  // catchup Dags are driven by tickCatchup() so every missed occurrence gets a run
+  if (dag.catchup) {
+    unscheduleDag(dag.id)
+    return
+  }
 
   if (!cron.validate(dag.schedule)) {
     console.warn(`[cron] invalid cron expression for dag '${dag.id}': '${dag.schedule}' — skipping`)
@@ -81,7 +87,7 @@ export function stopAllCronJobs(): void {
  * - Remove jobs for dags no longer present or no longer scheduled
  */
 export function syncCronJobs(db: Db, dags: DagDefinition[]): void {
-  const activeDagIds = new Set(dags.filter(d => d.schedule).map(d => d.id))
+  const activeDagIds = new Set(dags.filter(d => d.schedule && !d.catchup).map(d => d.id))
 
   // Remove jobs for dags no longer active or no longer scheduled
   for (const dagId of cronJobs.keys()) {
@@ -93,7 +99,7 @@ export function syncCronJobs(db: Db, dags: DagDefinition[]): void {
 
   // Add or replace jobs for scheduled dags
   for (const dag of dags) {
-    if (!dag.schedule) continue
+    if (!dag.schedule || dag.catchup) continue
     const existing = cronJobs.get(dag.id)
     if (!existing) {
       // First time we see this dag with a schedule
@@ -115,6 +121,90 @@ export function getScheduledExpression(dagId: string): string | undefined {
 /** Number of active cron jobs (for testing). */
 export function activeCronJobCount(): number {
   return cronJobs.size
+}
+
+// ── Catch-up scheduling ────────────────────────────────────────────────────────
+
+/** Runs created per Dag per tick — a long gap is replayed over several ticks. */
+export const CATCHUP_MAX_RUNS_PER_TICK = 100
+
+/** Process-local baseline for Dags with neither startDate nor any prior catch-up run. */
+const catchupFirstSeen = new Map<string, Date>()
+
+/** Where to start enumerating: latest catch-up run > startDate > first time we saw the Dag. */
+async function resolveCatchupBaseline(db: Db, dag: DagDefinition, now: Date): Promise<Date | null> {
+  const last = await db.collection('dag_runs').findOne(
+    { dag_id: dag.id, trigger_type: 'catchup', logical_date: { $ne: null } },
+    { sort: { logical_date: -1 } },
+  )
+  if (last) return new Date(last.logical_date as Date)
+
+  if (dag.startDate !== undefined) {
+    const start = new Date(dag.startDate)
+    if (Number.isNaN(start.getTime())) {
+      console.warn(`[catchup] dag '${dag.id}' has an invalid startDate '${String(dag.startDate)}' — skipping`)
+      return null
+    }
+    return start
+  }
+
+  if (!catchupFirstSeen.has(dag.id)) catchupFirstSeen.set(dag.id, now)
+  return catchupFirstSeen.get(dag.id)!
+}
+
+/**
+ * Create a queued run for every scheduled occurrence (UTC) of each `catchup: true` Dag that
+ * has come due and has no run yet. Idempotent — existing (dag_id, logical_date) pairs are
+ * skipped, so it is safe on every tick and across restarts. Oldest dates first.
+ * `now` is injectable for tests.
+ */
+export async function tickCatchup(db: Db, dags: DagDefinition[], now: Date = new Date()): Promise<number> {
+  // setInterval doesn't wait for the previous tick — overlapping calls would both see the
+  // same missing dates and create duplicate runs. Skip if one is already in flight.
+  if (catchupInFlight) return 0
+  catchupInFlight = true
+  try {
+    return await runCatchup(db, dags, now)
+  } finally {
+    catchupInFlight = false
+  }
+}
+
+let catchupInFlight = false
+
+async function runCatchup(db: Db, dags: DagDefinition[], now: Date): Promise<number> {
+  let created = 0
+  for (const dag of dags) {
+    if (!dag.catchup || !dag.schedule) continue
+    if (!cron.validate(dag.schedule)) continue
+    if (await isDagPaused(db, dag.id)) continue
+
+    const from = await resolveCatchupBaseline(db, dag, now)
+    if (!from || from > now) continue
+
+    const dates = enumerateDates(dag.schedule, from, now)
+    if (dates.length === 0) continue
+
+    const existing = await db.collection('dag_runs')
+      .find({ dag_id: dag.id, logical_date: { $gte: from, $lte: now } }, { projection: { logical_date: 1 } })
+      .toArray()
+    const have = new Set(existing.map(r => new Date(r.logical_date as Date).getTime()))
+
+    const missing = dates.filter(d => !have.has(d.getTime())).slice(0, CATCHUP_MAX_RUNS_PER_TICK)
+    for (const date of missing) {
+      await createRun(db, dag, { logicalDate: date, triggerType: 'catchup' })
+      created++
+    }
+    if (missing.length > 0) {
+      console.log(`[catchup] dag '${dag.id}' → created ${missing.length} run(s) up to ${missing[missing.length - 1].toISOString()}`)
+    }
+  }
+  return created
+}
+
+/** Test helper — forget in-memory catch-up baselines. */
+export function resetCatchupState(): void {
+  catchupFirstSeen.clear()
 }
 
 // ── Timetable scheduling ───────────────────────────────────────────────────────

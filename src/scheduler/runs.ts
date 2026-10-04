@@ -18,10 +18,15 @@ export interface DagRun {
   note: string | null
   state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled'
   created_at: Date
+  /**
+   * Position of this run in the Dag's timeline: logical_date, or created_at when absent.
+   * Used by depends_on_past to find the previous run. Absent on legacy runs.
+   */
+  ordering_date?: Date
   /** When the run first moved queued → running (basis for runTimeout). Absent on legacy runs. */
   started_at?: Date | null
   /** How the run was triggered. */
-  trigger_type: 'manual' | 'cron' | 'backfill' | 'dataset' | 'timetable'
+  trigger_type: 'manual' | 'cron' | 'backfill' | 'dataset' | 'timetable' | 'catchup'
   /** ID of the parent backfill entity, or null for non-backfill runs. */
   backfill_id: string | null
 }
@@ -46,6 +51,8 @@ export interface TaskInstance {
   try_number: number
   max_retries: number       // max allowed retries (0 = no retries)
   retry_delay: number       // ms to wait before requeue
+  /** true = wait for this task to have succeeded/skipped in the previous run. */
+  depends_on_past?: boolean
   /** Backoff multiplier (<= 1 or absent = fixed delay). */
   retry_backoff?: number
   /** Cap in ms for backed-off delay (0/absent = uncapped). */
@@ -105,7 +112,7 @@ export interface CreateRunOptions {
    * 'manual' = POST /trigger; 'cron' = scheduled; 'backfill' = backfill;
    * 'dataset' = data-aware scheduling. Defaults to 'manual'.
    */
-  triggerType?: 'manual' | 'cron' | 'backfill' | 'dataset' | 'timetable'
+  triggerType?: 'manual' | 'cron' | 'backfill' | 'dataset' | 'timetable' | 'catchup'
   /** Links this run to a backfill entity for lifecycle management. */
   backfillId?: string
 }
@@ -128,6 +135,7 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
     state: 'queued',
     trigger_type: opts.triggerType ?? 'manual',
     created_at: now,
+    ordering_date: opts.logicalDate ?? now,
     backfill_id: opts.backfillId ?? null,
   })
   const runId = runResult.insertedId.toString()
@@ -175,6 +183,7 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
         try_number: 0,
         max_retries: task.retries ?? 0,
         retry_delay: task.retryDelay ?? 0,
+        depends_on_past: task.dependsOnPast === true,
         retry_backoff: task.retryExponentialBackoff ?? 0,
         max_retry_delay: task.maxRetryDelay ?? 0,
         pool_slots: Math.max(1, Math.floor(task.poolSlots ?? 1)),

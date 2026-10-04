@@ -185,6 +185,13 @@ export interface TaskDefinition {
    *   background_step: { priority: -5, run: async () => doCleanup() }
    */
   priority?: number
+  /**
+   * Run only if this task succeeded (or was skipped) in the previous run of the Dag
+   * (Airflow `depends_on_past`). Previous run = latest earlier non-cancelled run by
+   * logical date. The first run, and a previous run lacking this task, pass. A failed
+   * previous instance blocks this one until it is cleared and succeeds.
+   */
+  dependsOnPast?: boolean
   retries?: number        // max retry attempts (default: 0 = no retries)
   retryDelay?: number     // ms to wait before requeuing (default: 0)
   /**
@@ -630,6 +637,16 @@ export interface DagDefinition {
    * See TimetableFn above for full documentation and examples.
    */
   timetable?: TimetableFn
+  /**
+   * Create a run for every scheduled occurrence missed since `startDate` (or since the
+   * last catch-up run), not just the latest (Airflow `catchup`). Default: false.
+   * Catch-up Dags are driven by the scheduler tick (≤5s late) instead of node-cron, run in
+   * UTC like backfill, and stamp each run's `logical_date` with its scheduled time.
+   * Needs a cron `schedule`. Combine with `maxActiveRuns` to throttle the replay.
+   */
+  catchup?: boolean
+  /** First scheduled time to catch up from (ISO string or Date). Only used with `catchup`. */
+  startDate?: string | Date
   /**
    * Max concurrently active (running) runs of this Dag (Airflow `max_active_runs`).
    * Extra runs stay `queued` until a slot frees. Default: unlimited.

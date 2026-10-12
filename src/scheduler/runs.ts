@@ -1,6 +1,7 @@
 import type { Db, WithId } from 'mongodb'
 import type { DagDefinition, TriggerRule } from '../dag/types.js'
 import { planExpansion, isLiteralMapped, isDynamicMapped, isMappedTask } from './mapping.js'
+import { computeEffectiveWeights } from './weights.js'
 import { recordEvent } from '../events/index.js'
 
 export interface DagRun {
@@ -61,6 +62,10 @@ export interface TaskInstance {
   max_retry_delay?: number
   /** Pool slots held while running; absent on legacy docs = 1. */
   pool_slots?: number
+  /** Max concurrently running instances of this task across the Dag's runs (0/absent = unlimited). */
+  max_active_tis?: number
+  /** Max concurrently running instances of this task within this run (0/absent = unlimited). */
+  max_active_tis_per_run?: number
   timeout_ms: number        // 0 = no timeout; >0 = kill worker after this many ms
   started_at: Date | null
   ended_at: Date | null
@@ -125,6 +130,11 @@ export interface CreateRunOptions {
   backfillId?: string
 }
 
+/** Positive integer or 0 (= unlimited). */
+function positiveInt(n: number | undefined): number {
+  return n !== undefined && Number.isFinite(n) && n >= 1 ? Math.floor(n) : 0
+}
+
 /**
  * Create a dag_run + one task_instance per task for the given Dag.
  * Returns the run id (string).
@@ -155,6 +165,7 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
 
   // Insert one task_instance per task (or N instances for mapped tasks)
   const taskDocs: TaskInstance[] = []
+  const weights = computeEffectiveWeights(dag.tasks)
 
   for (const [taskId, task] of Object.entries(dag.tasks)) {
     const isSensor = typeof task.poke === 'function'
@@ -188,7 +199,7 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
         state: 'queued',
         depends_on: task.dependsOn ?? [],
         trigger_rule: task.triggerRule ?? 'all_success',
-        priority: task.priority ?? 0,
+        priority: weights.get(taskId) ?? 0,
         try_number: 0,
         max_retries: task.retries ?? 0,
         retry_delay: task.retryDelay ?? 0,
@@ -196,6 +207,8 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
         retry_backoff: task.retryExponentialBackoff ?? 0,
         max_retry_delay: task.maxRetryDelay ?? 0,
         pool_slots: Math.max(1, Math.floor(task.poolSlots ?? 1)),
+        max_active_tis: positiveInt(task.maxActiveTis),
+        max_active_tis_per_run: positiveInt(task.maxActiveTisPerRun),
         timeout_ms: task.timeout ?? 0,
         started_at: null,
         ended_at: null,

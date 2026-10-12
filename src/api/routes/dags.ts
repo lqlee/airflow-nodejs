@@ -11,12 +11,16 @@ import { validateParams } from '../../dag/params.js'
 
 export async function dagsRoutes(app: FastifyInstance): Promise<void> {
   // GET /dags — list all registered dags with pause state
-  app.get('/dags', async (_req, reply) => {
+  // Optional ?tag=a&tag=b — Dags carrying ALL the given tags (Dag-level tags, not run tags)
+  app.get<{ Querystring: { tag?: string | string[] } }>('/dags', async (req, reply) => {
     const db = app.mongo
     const paused = await getPausedDagIds(db)
-    const dags = listDags().map(d => ({
+    const wanted = req.query.tag === undefined ? [] : [req.query.tag].flat()
+    const dags = listDags().filter(d => wanted.every(t => (d.tags ?? []).includes(t))).map(d => ({
       id: d.id,
       schedule: d.schedule,
+      tags: d.tags ?? [],
+      owner: d.owner ?? null,
       datasets: d.datasets ?? [],
       outlets: d.outlets ?? [],
       tasks: Object.keys(d.tasks),
@@ -34,6 +38,9 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({
       id: dag.id,
       schedule: dag.schedule,
+      tags: dag.tags ?? [],
+      owner: dag.owner ?? null,
+      doc_md: dag.docMd ?? null,
       catchup: dag.catchup === true,
       start_date: dag.startDate && !Number.isNaN(new Date(dag.startDate).getTime()) ? new Date(dag.startDate).toISOString() : null,
       max_active_runs: dag.maxActiveRuns ?? null,
@@ -88,6 +95,11 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
       external_task: t.externalTask ?? null,
       retry_exponential_backoff: t.retryExponentialBackoff ?? null,
       max_retry_delay_ms: t.maxRetryDelay ?? null,
+      priority: t.priority ?? 0,
+      weight_rule: t.weightRule ?? 'absolute',
+      max_active_tis: t.maxActiveTis ?? null,
+      max_active_tis_per_run: t.maxActiveTisPerRun ?? null,
+      has_on_retry: typeof t.onRetry === 'function',
       pool: t.pool ?? null,
       pool_slots: t.pool ? Math.max(1, Math.floor(t.poolSlots ?? 1)) : null,
       timeout_ms: t.timeout ?? 0,

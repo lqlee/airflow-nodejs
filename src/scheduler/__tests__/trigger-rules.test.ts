@@ -177,6 +177,20 @@ describe('isSatisfied — extended rules', () => {
   })
 })
 
+describe('extended rules — empty upstream list (root tasks)', () => {
+  // Pins the vacuous-truth behaviour: rules that need a success/failure never fire without upstreams.
+  it.each([
+    ['one_done', false],
+    ['none_failed_min_one_success', false],
+    ['all_done_min_one_success', false],
+    ['none_skipped', true],
+    ['all_skipped', true],
+    ['always', true],
+  ])('%s with no upstreams → %s', (rule, expected) => {
+    expect(isSatisfied(rule, [])).toBe(expected)
+  })
+})
+
 describe('isUnsatisfiable', () => {
   it('all_success becomes unsatisfiable when any upstream failed', () => {
     expect(isUnsatisfiable('all_success', ['success', 'failed'])).toBe(true)

@@ -183,3 +183,46 @@ describe('GET /dags/:id/runs cursor — same-millisecond runs', () => {
     expect(seen).toHaveLength(5)
   })
 })
+
+describe('Dag metadata and task controls in the API', () => {
+  const meta = (id: string, over: Partial<DagDefinition> = {}): DagDefinition => ({
+    id, schedule: null, tasks: { t: { run: async () => {} } }, ...over,
+  })
+
+  it('GET /dags/:id returns tags, owner and doc_md; null/empty when unset', async () => {
+    register(meta('meta_full', { tags: ['etl', 'prod'], owner: 'data-eng', docMd: '# Hello' }))
+    register(meta('meta_none'))
+    const full = (await app.inject({ method: 'GET', url: '/dags/meta_full' })).json()
+    expect(full).toMatchObject({ tags: ['etl', 'prod'], owner: 'data-eng', doc_md: '# Hello' })
+    const none = (await app.inject({ method: 'GET', url: '/dags/meta_none' })).json()
+    expect(none).toMatchObject({ tags: [], owner: null, doc_md: null })
+  })
+
+  it('GET /dags?tag= keeps only Dags carrying every requested tag', async () => {
+    register(meta('tag_a', { tags: ['etl', 'prod'] }))
+    register(meta('tag_b', { tags: ['etl'] }))
+    register(meta('tag_c'))
+    const ids = async (qs: string) =>
+      ((await app.inject({ method: 'GET', url: `/dags${qs}` })).json() as Array<{ id: string }>).map(d => d.id).sort()
+    expect(await ids('?tag=etl')).toEqual(['tag_a', 'tag_b'])
+    expect(await ids('?tag=etl&tag=prod')).toEqual(['tag_a'])
+    expect(await ids('?tag=nope')).toEqual([])
+    expect(await ids('')).toEqual(['tag_a', 'tag_b', 'tag_c'])
+  })
+
+  it('GET /dags/:id/tasks returns weight, concurrency and callback info', async () => {
+    register(meta('ctl_dag', {
+      tasks: {
+        a: { priority: 3, weightRule: 'downstream', maxActiveTis: 2, maxActiveTisPerRun: 1, onRetry: () => {}, run: async () => {} },
+        b: { run: async () => {} },
+      },
+    }))
+    const tasks = (await app.inject({ method: 'GET', url: '/dags/ctl_dag/tasks' })).json() as Array<Record<string, unknown>>
+    expect(tasks.find(t => t.task_id === 'a')).toMatchObject({
+      priority: 3, weight_rule: 'downstream', max_active_tis: 2, max_active_tis_per_run: 1, has_on_retry: true,
+    })
+    expect(tasks.find(t => t.task_id === 'b')).toMatchObject({
+      priority: 0, weight_rule: 'absolute', max_active_tis: null, max_active_tis_per_run: null, has_on_retry: false,
+    })
+  })
+})

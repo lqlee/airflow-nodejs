@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline'
 import type { Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
 import { getDag } from '../dag/registry.js'
+import { fireRetryCallback } from './callbacks.js'
 import { acquire, release } from './pool.js'
 import { acquirePool, releasePool } from '../pools/index.js'
 import { appendLog, parseLevelFromLine } from '../logs/index.js'
@@ -944,6 +945,7 @@ export function computeRetryDelay(
 }
 
 export async function scheduleRetry(db: Db, ti: TaskInstance, error: string): Promise<void> {
+  void fireRetryCallback(ti, error)
   const requeue = async () => {
     // state:'running' guard — if the run was timed out/cancelled while the delay timer
     // was pending, the task is no longer 'running' and must not be resurrected.

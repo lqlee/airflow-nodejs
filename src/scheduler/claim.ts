@@ -172,6 +172,14 @@ export async function claimReadyTasks(
     ? await getPreviousRunTaskStates(db, dagRunId)
     : null
 
+  // Per-task concurrency (maxActiveTis / maxActiveTisPerRun) — running counts per task_id,
+  // bumped after every claim so one pass cannot claim past the cap.
+  const runningInRun = new Map<string, number>()
+  for (const i of allInstances) {
+    if (i.state === 'running') runningInRun.set(i.task_id, (runningInRun.get(i.task_id) ?? 0) + 1)
+  }
+  const runningInDag = await countRunningAcrossRuns(db, allInstances)
+
   for (const inst of allInstances) {
     if (inst.state !== 'queued') continue
 
@@ -193,16 +201,47 @@ export async function claimReadyTasks(
 
     if (!isSatisfied(rule, upstreamStates)) continue
 
+    // Per-task concurrency gates
+    const perRun = inst.max_active_tis_per_run ?? 0
+    if (perRun > 0 && (runningInRun.get(inst.task_id) ?? 0) >= perRun) continue
+    const perDag = inst.max_active_tis ?? 0
+    if (perDag > 0 && (runningInDag.get(inst.task_id) ?? 0) >= perDag) continue
+
     // Atomically claim this specific instance
     const claimed_inst = await db.collection<TaskInstance>('task_instances').findOneAndUpdate(
       { dag_run_id: dagRunId, task_id: inst.task_id, map_index: inst.map_index ?? null, state: 'queued' },
       { $set: { state: 'running', started_at: new Date() } },
       { returnDocument: 'after' },
     )
-    if (claimed_inst) claimed.push(claimed_inst)
+    if (claimed_inst) {
+      claimed.push(claimed_inst)
+      runningInRun.set(inst.task_id, (runningInRun.get(inst.task_id) ?? 0) + 1)
+      runningInDag.set(inst.task_id, (runningInDag.get(inst.task_id) ?? 0) + 1)
+    }
   }
 
   return claimed
+}
+
+/**
+ * Running instance counts per task_id across ALL runs of the Dag — only for task_ids that
+ * have a queued instance with `max_active_tis` set (empty map, no query, otherwise).
+ * Count-then-claim, so not atomic across several scheduler processes.
+ */
+async function countRunningAcrossRuns(db: Db, runInstances: TaskInstance[]): Promise<Map<string, number>> {
+  const capped = new Map<string, string>()  // task_id → dag_id
+  for (const i of runInstances) {
+    if (i.state === 'queued' && (i.max_active_tis ?? 0) > 0) capped.set(i.task_id, i.dag_id)
+  }
+  const counts = new Map<string, number>()
+  if (capped.size === 0) return counts
+  const dagId = [...capped.values()][0]
+  const rows = await db.collection('task_instances').aggregate<{ _id: string; n: number }>([
+    { $match: { dag_id: dagId, state: 'running', task_id: { $in: [...capped.keys()] } } },
+    { $group: { _id: '$task_id', n: { $sum: 1 } } },
+  ]).toArray()
+  for (const r of rows) counts.set(r._id, r.n)
+  return counts
 }
 
 /**

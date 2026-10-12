@@ -106,6 +106,18 @@ export interface TaskContext {
   ) => Promise<never>  // throws DeferSignal — caller's run: fn must not catch it
 }
 
+/** Passed to a task's `onRetry` callback. */
+export interface RetryCallbackInfo {
+  dagId: string
+  runId: string
+  taskId: string
+  mapIndex: number | null
+  /** The attempt that just failed (1-based). */
+  tryNumber: number
+  maxRetries: number
+  error: string
+}
+
 /**
  * Controls when a task is allowed to run based on the states of its upstream tasks.
  *
@@ -203,6 +215,33 @@ export interface TaskDefinition {
    *   background_step: { priority: -5, run: async () => doCleanup() }
    */
   priority?: number
+  /**
+   * How `priority` is turned into the effective claim order (Airflow `weight_rule`).
+   *  - `absolute` (default): the task's own `priority`. NOTE: Airflow defaults to `downstream`.
+   *  - `downstream`: own priority + priorities of every task downstream of it, so tasks
+   *    with more work depending on them are claimed first.
+   *  - `upstream`: own priority + priorities of every task upstream of it, so deeper
+   *    tasks are claimed first.
+   * Each related task is counted once, however many paths lead to it.
+   */
+  weightRule?: 'absolute' | 'downstream' | 'upstream'
+  /**
+   * Max instances of THIS task running at once across ALL runs of the Dag
+   * (Airflow `max_active_tis_per_dag`). Others stay queued. Default: unlimited.
+   */
+  maxActiveTis?: number
+  /**
+   * Max instances of this task running at once within ONE run — throttles mapped
+   * tasks (Airflow `max_active_tis_per_dagrun`). Default: unlimited.
+   */
+  maxActiveTisPerRun?: number
+  /**
+   * Called each time this task fails and is about to be retried (Airflow
+   * `on_retry_callback`). Not called on the final failure. Runs in the scheduler
+   * (or worker) process, fire-and-forget with a 10s timeout; errors are logged,
+   * never fail the task.
+   */
+  onRetry?: (info: RetryCallbackInfo) => void | Promise<void>
   /**
    * Run only if this task succeeded (or was skipped) in the previous run of the Dag
    * (Airflow `depends_on_past`). Previous run = latest earlier non-cancelled run by
@@ -727,6 +766,12 @@ export interface DagDefinition {
    * Queued time does not count. Non-terminal tasks are marked failed.
    */
   runTimeout?: number
+  /** Free-form labels for filtering Dags (Airflow `tags`); `GET /dags?tag=x`. Distinct from run-level tags. */
+  tags?: string[]
+  /** Owning team or person (Airflow `owner`). Informational. */
+  owner?: string
+  /** Markdown documentation shown with the Dag (Airflow `doc_md`). */
+  docMd?: string
   sla?: number             // ms — if a run hasn't completed within this window, an SLA alert is fired
   version?: string         // sha256[:12] of the dag source file — stamped by the loader
   /**

@@ -1,6 +1,7 @@
 import type { FastifyRequest, FastifyReply } from 'fastify'
 import type { Db } from 'mongodb'
 import { validateApiKey, type Role } from './keys.js'
+import { loadOidcConfig, createOidcVerifier, type OidcVerifier } from './oidc.js'
 
 // ── Role hierarchy ─────────────────────────────────────────────────────────
 export { type Role }
@@ -24,17 +25,16 @@ function hasRole(actual: Role, required: Role): boolean {
  *
  * Routes can override by setting `config.requiredRole` in their route options.
  */
+export function requiredRoleForRoute(method: string, path: string, override?: Role): Role {
+  if (override) return override
+  if (path.startsWith('/api-keys')) return 'admin'
+  const m = method.toUpperCase()
+  return m === 'GET' || m === 'HEAD' ? 'viewer' : 'editor'
+}
+
 function requiredRoleFor(req: FastifyRequest): Role {
   const override = (req.routeOptions?.config as { requiredRole?: Role } | undefined)?.requiredRole
-  if (override) return override
-
-  const path = req.url.split('?')[0]
-  if (path.startsWith('/api-keys')) return 'admin'
-
-  const method = req.method.toUpperCase()
-  if (method === 'GET' || method === 'HEAD') return 'viewer'
-
-  return 'editor'
+  return requiredRoleForRoute(req.method, req.url.split('?')[0], override)
 }
 
 // ── Legacy env-based keys (backward compat) ───────────────────────────────
@@ -43,8 +43,13 @@ const ENV_KEYS = new Set(
   rawKeys.split(',').map(k => k.trim()).filter(Boolean),
 )
 
-// Auth is considered enabled if either env keys or DB-backed keys are in use.
-export const AUTH_ENABLED = ENV_KEYS.size > 0 || Boolean(process.env.ADMIN_KEY)
+// OIDC bearer-token validation (see ./oidc.ts). A misconfigured OIDC_ISSUER keeps auth ON
+// with no valid OIDC token, rather than silently opening the API.
+const OIDC = loadOidcConfig(process.env)
+const oidcVerifier: OidcVerifier | null = OIDC.enabled && 'config' in OIDC ? createOidcVerifier(OIDC.config) : null
+
+// Auth is considered enabled if env keys, DB-backed keys or OIDC are in use.
+export const AUTH_ENABLED = ENV_KEYS.size > 0 || Boolean(process.env.ADMIN_KEY) || OIDC.enabled
 
 let _db: Db | null = null
 
@@ -60,17 +65,21 @@ if (AUTH_ENABLED) {
   if (process.env.ADMIN_KEY) {
     console.log('[auth] ADMIN_KEY set — DB-backed key management enabled')
   }
+  if (OIDC.enabled) {
+    if ('error' in OIDC) console.error(`[auth] OIDC misconfigured: ${OIDC.error}`)
+    else console.log(`[auth] OIDC bearer-token auth enabled (issuer ${OIDC.config.issuer}, audience ${OIDC.config.audience})`)
+  }
 } else {
-  console.log('[auth] no API_KEYS or ADMIN_KEY configured — auth disabled (open access)')
+  console.log('[auth] no API_KEYS, ADMIN_KEY or OIDC_ISSUER configured — auth disabled (open access)')
 }
 
 // Routes that skip auth entirely (no token required, no role check)
 const PUBLIC_PATHS = new Set(['/', '/health'])
-const isPublicPath = (path: string) =>
-  PUBLIC_PATHS.has(path) ||
-  path.startsWith('/assets') ||
-  path.endsWith('.js') ||
-  path.endsWith('.css')
+/** `url` may carry a query string — only the pathname decides, and only root-level static files qualify. */
+export const isPublicPath = (url: string) => {
+  const path = url.split('?')[0]
+  return PUBLIC_PATHS.has(path) || path.startsWith('/assets/') || /^\/[^/]+\.(js|css)$/.test(path)
+}
 
 // ── FastifyRequest / FastifyContextConfig augmentation ────────────────────
 declare module 'fastify' {
@@ -108,7 +117,7 @@ export async function authHook(req: FastifyRequest, reply: FastifyReply): Promis
 
   if (!token) {
     return reply.status(401).send({
-      error: 'Unauthorized — provide a valid API key in Authorization: Bearer <key>',
+      error: 'Unauthorized — provide a valid API key or OIDC token in Authorization: Bearer <token>',
     })
   }
 
@@ -127,10 +136,21 @@ export async function authHook(req: FastifyRequest, reply: FastifyReply): Promis
     const result = await validateApiKey(_db, token)
     if (result) callerRole = result.role
   }
+  // 4. OIDC JWT (only tokens shaped like a JWT are sent to the verifier)
+  if (callerRole === null && oidcVerifier && token.split('.').length === 3) {
+    const claims = await oidcVerifier.verify(token)
+    if (claims) {
+      const role = oidcVerifier.roleFor(claims)
+      if (!role) {
+        return reply.status(403).send({ error: 'Forbidden — token is valid but carries no role mapped to airflow-nodejs' })
+      }
+      callerRole = role
+    }
+  }
 
   if (callerRole === null) {
     return reply.status(401).send({
-      error: 'Unauthorized — provide a valid API key in Authorization: Bearer <key>',
+      error: 'Unauthorized — provide a valid API key or OIDC token in Authorization: Bearer <token>',
     })
   }
 

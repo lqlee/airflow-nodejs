@@ -27,6 +27,7 @@ import { metricsRoutes } from './routes/metrics.js'
 import { recordHttpRequest } from '../metrics/registry.js'
 import { activeWorkers, queueDepth } from '../scheduler/pool.js'
 import { authHook, AUTH_ENABLED, setDb } from '../auth/index.js'
+import { setupOpenApi } from './openapi.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PUBLIC_DIR = resolve(__dirname, '../../public')
@@ -79,6 +80,9 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
       }),
     })
   }
+
+  // OpenAPI index of all routes — must come before route registration
+  setupOpenApi(app, process.env.npm_package_version ?? '0.1.0')
 
   // Auth hook — runs before every API request
   app.addHook('preHandler', authHook)

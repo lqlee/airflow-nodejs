@@ -150,7 +150,7 @@ describe('GET /metrics', () => {
     const dag = { id: 'hitl_dag', schedule: null, tasks: { gate: { requiresApproval: true, run: async () => {} } } }
     register(dag)
     await createRun(db, dag)
-    await db.collection('sla_alerts').insertMany([{ acked: false }, { acked: false }, { acked: true }])
+    await db.collection('sla_alerts').insertMany([{ dag_run_id: 'a', acked: false }, { dag_run_id: 'b', acked: false }, { dag_run_id: 'c', acked: true }])
     setImportErrors([{ filename: 'bad.js', error: 'x', imported_at: new Date() }])
 
     const { text } = await scrape()

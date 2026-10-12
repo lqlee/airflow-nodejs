@@ -10,7 +10,7 @@
  *   K8S_EXEC_TASK_ID      — task id
  *   K8S_EXEC_MAP_INDEX    — map index (empty string = null)
  *
- * Connects to MongoDB (MONGO_URL / DB_NAME), loads the dag from registry,
+ * Connects to the database (DB_BACKEND, MONGO_URL or SPANNER_*, DB_NAME), loads the dag from registry,
  * executes the task function, then exits.
  *
  * Exit codes:
@@ -19,7 +19,7 @@
  *   2 — configuration error (missing env var, dag not found, etc.)
  */
 
-import { MongoClient } from 'mongodb'
+import { createDbClient } from '../db/factory.js'
 import { loadDags } from '../dag/loader.js'
 import { getDag } from '../dag/registry.js'
 import { getRunConf } from './run-conf.js'
@@ -27,7 +27,6 @@ import { xcomPush, xcomPull } from '../xcom/index.js'
 import { getConnectionRuntime } from '../connections/index.js'
 import { getVariableRuntime } from '../variables/index.js'
 
-const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 const DB_NAME   = process.env.DB_NAME   ?? 'airflow'
 
 const dagId    = process.env.K8S_EXEC_DAG_ID   ?? ''
@@ -41,10 +40,10 @@ if (!dagId || !runId || !taskId) {
   process.exit(2)
 }
 
-const client = new MongoClient(MONGO_URL)
+const client = createDbClient()
 
 try {
-  await client.connect()
+  await client.connect({ light: true })
   const db = client.db(DB_NAME)
 
   // Load dags so the registry is populated

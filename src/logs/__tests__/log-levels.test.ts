@@ -24,6 +24,7 @@ import { createRun } from '../../scheduler/runs.js'
 import { advanceRun } from '../../scheduler/index.js'
 import { register, clearRegistry } from '../../dag/registry.js'
 import type { DagDefinition } from '../../dag/types.js'
+import { waitFor } from '../../scheduler/__tests__/wait-for.js'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 const TEST_DB = 'airflow_test_log_levels'
@@ -186,12 +187,11 @@ describe('ctx.log integration', () => {
     const runId = await createRun(db, dag)
     for (let i = 0; i < 15; i++) await advanceRun(db, runId)
 
-    // Wait for log writes (fire-and-forget in worker)
-    await new Promise(r => setTimeout(r, 500))
-
-    const allLogs = await db.collection('task_logs')
-      .find({ dag_run_id: runId, task_id: 'step' })
-      .toArray()
+    // Log writes are fire-and-forget in the worker — poll until all four arrive
+    const allLogs = await waitFor(
+      () => db.collection('task_logs').find({ dag_run_id: runId, task_id: 'step' }).toArray(),
+      logs => new Set(logs.map(l => l.level)).size >= 4,
+    )
 
     const levels = allLogs.map(l => l.level)
 
@@ -217,11 +217,10 @@ describe('ctx.log integration', () => {
     register(dag)
     const runId = await createRun(db, dag)
     for (let i = 0; i < 15; i++) await advanceRun(db, runId)
-    await new Promise(r => setTimeout(r, 500))
-
-    const warnLogs = await db.collection('task_logs')
-      .find({ dag_run_id: runId, task_id: 'step', level: 'warn' })
-      .toArray()
+    const warnLogs = await waitFor(
+      () => db.collection('task_logs').find({ dag_run_id: runId, task_id: 'step', level: 'warn' }).toArray(),
+      logs => logs.length > 0,
+    )
     // At least one warn log from ctx.log.warn()
     expect(warnLogs.some(l => (l.line as string).includes('[WARN]'))).toBe(true)
     expect(warnLogs.some(l => (l.line as string).includes('rate limit'))).toBe(true)

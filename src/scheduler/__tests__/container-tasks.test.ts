@@ -25,6 +25,7 @@ import { createRun } from '../runs.js'
 import { advanceRun } from '../index.js'
 import { register, clearRegistry } from '../../dag/registry.js'
 import type { DagDefinition } from '../../dag/types.js'
+import { waitFor } from './wait-for.js'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 const TEST_IMAGE = 'alpine:latest'   // tiny (13 MB), always local on dev machines
@@ -49,10 +50,11 @@ async function taskState(dagId: string, taskId: string) {
 }
 
 async function taskLogs(runId: string, taskId: string): Promise<string[]> {
-  const docs = await db.collection('task_logs')
-    .find({ dag_run_id: runId, task_id: taskId })
-    .sort({ ts: 1 })
-    .toArray()
+  // Log writes are fire-and-forget — poll until at least one line has landed
+  const docs = await waitFor(
+    () => db.collection('task_logs').find({ dag_run_id: runId, task_id: taskId }).sort({ ts: 1 }).toArray(),
+    d => d.length > 0,
+  )
   return docs.map(d => d.line as string)
 }
 

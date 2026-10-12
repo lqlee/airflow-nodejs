@@ -18,7 +18,7 @@ afterAll(async () => { stopAllCronJobs(); await db.dropDatabase(); await client.
 afterEach(async () => {
   stopAllCronJobs()
   resetCatchupState()
-  for (const c of ['dag_runs', 'task_instances', 'dag_pauses', 'event_logs']) await db.collection(c).deleteMany({})
+  for (const c of ['dag_runs', 'task_instances', 'dag_paused', 'event_logs']) await db.collection(c).deleteMany({})
 })
 
 const NOW = new Date('2026-03-10T12:30:00Z')
@@ -70,11 +70,16 @@ describe('tickCatchup', () => {
   })
 
   it('caps runs created per tick and replays the rest on later ticks', async () => {
-    const dag = hourly({ schedule: '* * * * *', startDate: '2026-03-10T08:00:00Z' })   // every minute → 271 due
-    expect(await tickCatchup(db, [dag], NOW)).toBe(CATCHUP_MAX_RUNS_PER_TICK)
-    expect(await tickCatchup(db, [dag], NOW)).toBe(CATCHUP_MAX_RUNS_PER_TICK)
-    expect(await tickCatchup(db, [dag], NOW)).toBe(271 - 2 * CATCHUP_MAX_RUNS_PER_TICK)
-    expect(await runs()).toHaveLength(271)
+    // 5 due occurrences (08..12), cap of 2 → 2 + 2 + 1
+    expect(await tickCatchup(db, [hourly()], NOW, 2)).toBe(2)
+    expect(hours(await runs() as never)).toEqual([8, 9])
+    expect(await tickCatchup(db, [hourly()], NOW, 2)).toBe(2)
+    expect(await tickCatchup(db, [hourly()], NOW, 2)).toBe(1)
+    expect(hours(await runs() as never)).toEqual([8, 9, 10, 11, 12])
+  })
+
+  it('defaults to CATCHUP_MAX_RUNS_PER_TICK', () => {
+    expect(CATCHUP_MAX_RUNS_PER_TICK).toBe(100)
   })
 
   it('skips paused dags, then catches everything up after resume', async () => {

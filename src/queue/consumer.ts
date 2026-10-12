@@ -6,7 +6,7 @@
  * Or alongside the scheduler: the scheduler calls startWorker() on boot.
  */
 import { Worker, type Job } from 'bullmq'
-import { MongoClient } from 'mongodb'
+import { createDbClient } from '../db/factory.js'
 import { createInterface } from 'node:readline'
 import { fork } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -19,7 +19,6 @@ import type { TaskJobData } from './producer.js'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WORKER_SCRIPT = pathResolve(__dirname, '../scheduler/worker.ts')
 const TSX_BIN = pathResolve(__dirname, '../../node_modules/.bin/tsx')
-const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 const DB_NAME   = process.env.DB_NAME   ?? 'airflow'
 const CONCURRENCY = Number(process.env.WORKER_CONCURRENCY ?? 4)
 
@@ -27,10 +26,10 @@ let bullWorker: Worker<TaskJobData> | null = null
 
 async function processJob(job: Job<TaskJobData>): Promise<void> {
   const { ti, fn } = job.data
-  const client = new MongoClient(MONGO_URL)
+  const client = createDbClient()
 
   try {
-    await client.connect()
+    await client.connect({ light: true })
     const db = client.db(DB_NAME)
 
     // Mark task running

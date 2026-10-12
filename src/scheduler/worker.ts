@@ -11,14 +11,13 @@
  * ctx includes: dagId, runId, taskId, mapIndex, mapValue
  * Injected in worker: conf (from DB), xcom, connections, variables, defer
  */
-import { MongoClient } from 'mongodb'
+import { createDbClient } from '../db/factory.js'
 import { xcomPush, xcomPull } from '../xcom/index.js'
 import { getConnectionRuntime } from '../connections/index.js'
 import { getVariableRuntime } from '../variables/index.js'
 import { getRunConf } from './run-conf.js'
 import type { LogLevel } from '../logs/index.js'
 
-const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 const DB_NAME = process.env.DB_NAME ?? 'airflow'
 
 type WorkerCtx = {
@@ -49,10 +48,10 @@ process.on('message', async (msg: WorkerMsg) => {
   if (msg.type !== 'run' && msg.type !== 'poke') return
 
   const { fn, ctx } = msg
-  const client = new MongoClient(MONGO_URL)
+  const client = createDbClient()
 
   try {
-    await client.connect()
+    await client.connect({ light: true })
     const db = client.db(DB_NAME)
 
     // Trigger-time conf — read from DB, not IPC (conf could be large)

@@ -1,14 +1,14 @@
-import { MongoClient, type Db } from 'mongodb'
+import type { Db } from 'mongodb'
+import { createDbClient, type DbClient } from './factory.js'
 
-const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 const DB_NAME = process.env.DB_NAME ?? 'airflow'
 
-let client: MongoClient | null = null
+let client: DbClient | null = null
 let db: Db | null = null
 
 export async function connectDb(): Promise<Db> {
   if (db) return db
-  client = new MongoClient(MONGO_URL)
+  client = createDbClient()
   await client.connect()
   db = client.db(DB_NAME)
   return db

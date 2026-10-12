@@ -17,6 +17,7 @@ import {
 } from '../index.js'
 import { buildServer } from '../../api/server.js'
 import { register, clearRegistry } from '../../dag/registry.js'
+import { scaled } from '../../scheduler/__tests__/wait-for.js'
 import { createRun } from '../../scheduler/runs.js'
 import { advanceRun } from '../../scheduler/index.js'
 import type { DagDefinition } from '../../dag/types.js'
@@ -76,7 +77,7 @@ describe('acquirePool / releasePool — slot enforcement', () => {
     const secondDone = acquirePool(db, 'tight_pool').then(() => { secondResolved = true })
 
     // Give microtasks a cycle — second should NOT have resolved
-    await new Promise(r => setTimeout(r, 10))
+    await new Promise(r => setTimeout(r, scaled(10)))
     expect(secondResolved).toBe(false)
     expect(poolQueueDepth('tight_pool')).toBe(1)
 
@@ -97,6 +98,7 @@ describe('acquirePool / releasePool — slot enforcement', () => {
 
     const order: number[] = []
     const p1 = acquirePool(db, 'fifo_pool').then(() => order.push(1))
+    await new Promise(r => setTimeout(r, scaled(50)))   // let waiter 1 enqueue before waiter 2 (each does a DB lookup first)
     const p2 = acquirePool(db, 'fifo_pool').then(() => order.push(2))
 
     releasePool('fifo_pool')
@@ -128,7 +130,7 @@ describe('acquirePool / releasePool — slot enforcement', () => {
     let bResolved = false
     acquirePool(db, 'pool_b').then(() => { bResolved = true })
 
-    await new Promise(r => setTimeout(r, 10))
+    await new Promise(r => setTimeout(r, scaled(10)))
     expect(bResolved).toBe(true)  // pool_b unaffected
 
     releasePool('pool_a')
@@ -332,12 +334,12 @@ describe('acquirePool / releasePool — multi-slot tasks', () => {
 
     let resolved = false
     void acquirePool(db, 'wide_pool', 2).then(() => { resolved = true })
-    await new Promise(r => setTimeout(r, 30))
+    await new Promise(r => setTimeout(r, scaled(30)))
     expect(resolved).toBe(false)
     expect(poolQueueDepth('wide_pool')).toBe(1)
 
     releasePool('wide_pool', 2)
-    await new Promise(r => setTimeout(r, 30))
+    await new Promise(r => setTimeout(r, scaled(30)))
     expect(resolved).toBe(true)
     expect(poolActiveCount('wide_pool')).toBe(2)
   })
@@ -355,16 +357,16 @@ describe('acquirePool / releasePool — multi-slot tasks', () => {
     await acquirePool(db, 'fifo_w', 1)             // 1/2 held
     const order: string[] = []
     void acquirePool(db, 'fifo_w', 2).then(() => order.push('big'))     // needs both slots → waits
-    await new Promise(r => setTimeout(r, 20))
+    await new Promise(r => setTimeout(r, scaled(20)))
     void acquirePool(db, 'fifo_w', 1).then(() => order.push('small'))   // would fit, but must queue behind big
-    await new Promise(r => setTimeout(r, 20))
+    await new Promise(r => setTimeout(r, scaled(20)))
     expect(order).toEqual([])
 
     releasePool('fifo_w', 1)
-    await new Promise(r => setTimeout(r, 30))
+    await new Promise(r => setTimeout(r, scaled(30)))
     expect(order).toEqual(['big'])
     releasePool('fifo_w', 2)
-    await new Promise(r => setTimeout(r, 30))
+    await new Promise(r => setTimeout(r, scaled(30)))
     expect(order).toEqual(['big', 'small'])
   })
 

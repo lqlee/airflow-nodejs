@@ -19,3 +19,9 @@ export async function waitFor<T>(
   }
   return value
 }
+
+/**
+ * Scales a short "let the event loop settle" sleep for slower database backends: a Spanner round trip
+ * is ~20x a local MongoDB one, so tests asserting "X has NOT happened yet" after a fixed delay need more time.
+ */
+export const scaled = (ms: number): number => ms * (process.env.DB_BACKEND === 'spanner' ? 20 : 1)

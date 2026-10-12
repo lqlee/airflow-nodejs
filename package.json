@@ -2,7 +2,7 @@
   "name": "airflow-nodejs",
   "version": "0.1.0",
   "type": "module",
-  "//files": "explicit allowlist for npm pack — .gitignore excludes dist/, which would otherwise strip the built output when installed as a git dependency",
+  "//files": "explicit allowlist for npm pack \u2014 .gitignore excludes dist/, which would otherwise strip the built output when installed as a git dependency",
   "files": [
     "dags",
     "!dags/images",
@@ -28,12 +28,15 @@
     "dev:start": "tsx src/main.ts",
     "test": "vitest run",
     "//prepare": "runs tsc build when installed as a git dependency (for wcnp node_modules inclusion)",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "test:spanner": "vitest run -c vitest.spanner.config.ts",
+    "spanner:ddl": "tsx src/db/spanner/print-ddl.ts"
   },
   "dependencies": {
     "@fastify/multipart": "^10.1.0",
     "@fastify/rate-limit": "^11.1.0",
     "@fastify/static": "^10.1.0",
+    "@google-cloud/spanner": "^9.0.0",
     "bullmq": "^5.80.2",
     "fastify": "^5.4.0",
     "ioredis": "^5.11.1",

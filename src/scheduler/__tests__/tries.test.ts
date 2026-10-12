@@ -86,7 +86,10 @@ describe('successful task — try record', () => {
     const runId = await createRun(db, dag)
     await advanceRun(db, runId)
 
-    const t = await db.collection('task_instance_tries').findOne({ dag_run_id: runId })
+    const t = await waitFor(
+      () => db.collection('task_instance_tries').findOne({ dag_run_id: runId }),
+      x => x !== null,
+    )
     expect(t?.started_at).toBeTruthy()
     expect(t?.ended_at).toBeTruthy()
   })
@@ -104,8 +107,10 @@ describe('failed task (no retries) — try record', () => {
     const runId = await createRun(db, dag)
     await advanceRun(db, runId)
 
-    const tries = await db.collection('task_instance_tries')
-      .find({ dag_run_id: runId, task_id: 'boom' }).toArray()
+    const tries = await waitFor(
+      () => db.collection('task_instance_tries').find({ dag_run_id: runId, task_id: 'boom' }).toArray(),
+      ts => ts.length >= 1,
+    )
     expect(tries).toHaveLength(1)
     expect(tries[0].state).toBe('failed')
     expect(tries[0].error).toContain('injected failure')
@@ -131,10 +136,10 @@ describe('task with retries — try records per attempt', () => {
     const runId = await createRun(db, dag)
     await advanceRun(db, runId)
 
-    const tries = await db.collection('task_instance_tries')
-      .find({ dag_run_id: runId, task_id: 'flaky' })
-      .sort({ try_number: 1 })
-      .toArray()
+    const tries = await waitFor(
+      () => db.collection('task_instance_tries').find({ dag_run_id: runId, task_id: 'flaky' }).sort({ try_number: 1 }).toArray(),
+      ts => ts.length >= 3,
+    )
 
     // 3 failed tries (try 0, 1, 2)
     expect(tries).toHaveLength(3)
@@ -165,8 +170,10 @@ describe('task with retries — try records per attempt', () => {
     const runId = await createRun(db, dag)
     await advanceRun(db, runId)
 
-    const tries = await db.collection('task_instance_tries')
-      .find({ dag_run_id: runId }).sort({ try_number: 1 }).toArray()
+    const tries = await waitFor(
+      () => db.collection('task_instance_tries').find({ dag_run_id: runId }).sort({ try_number: 1 }).toArray(),
+      ts => ts.length >= 2,
+    )
     expect(tries).toHaveLength(2)
     expect(tries[0].try_number).toBe(0)
     expect(tries[1].try_number).toBe(1)
@@ -186,10 +193,10 @@ describe('mapped task tries — map_index stored', () => {
     const runId = await createRun(db, dag)
     await advanceRun(db, runId)
 
-    const tries = await db.collection('task_instance_tries')
-      .find({ dag_run_id: runId, task_id: 'fan' })
-      .sort({ map_index: 1 })
-      .toArray()
+    const tries = await waitFor(
+      () => db.collection('task_instance_tries').find({ dag_run_id: runId, task_id: 'fan' }).sort({ map_index: 1 }).toArray(),
+      ts => ts.length >= 2,
+    )
     expect(tries).toHaveLength(2)
     expect(tries[0].map_index).toBe(0)
     expect(tries[1].map_index).toBe(1)
@@ -223,6 +230,7 @@ describe('GET /dag-runs/:runId/tasks/:taskId/tries', () => {
     register(dag)
     const runId = await createRun(db, dag)
     await advanceRun(db, runId)
+    await waitFor(() => db.collection('task_instance_tries').countDocuments({ dag_run_id: runId }), n => n >= 1)
 
     const res = await app.inject({ method: 'GET', url: `/dag-runs/${runId}/tasks/step/tries` })
     expect(res.statusCode).toBe(200)
@@ -246,6 +254,7 @@ describe('GET /dag-runs/:runId/tasks/:taskId/tries', () => {
     register(dag)
     const runId = await createRun(db, dag)
     await advanceRun(db, runId)
+    await waitFor(() => db.collection('task_instance_tries').countDocuments({ dag_run_id: runId }), n => n >= 2)
 
     const res = await app.inject({ method: 'GET', url: `/dag-runs/${runId}/tasks/flaky/tries` })
     const tries = res.json() as Array<{ state: string; try_number: number }>
@@ -262,6 +271,7 @@ describe('GET /dag-runs/:runId/tasks/:taskId/tries', () => {
     register(dag)
     const runId = await createRun(db, dag)
     await advanceRun(db, runId)
+    await waitFor(() => db.collection('task_instance_tries').countDocuments({ dag_run_id: runId }), n => n >= 3)
 
     const res = await app.inject({ method: 'GET', url: `/dag-runs/${runId}/tasks/fan/tries?map_index=1` })
     expect(res.statusCode).toBe(200)
@@ -278,6 +288,7 @@ describe('GET /dag-runs/:runId/tasks/:taskId/tries', () => {
     register(dag)
     const runId = await createRun(db, dag)
     await advanceRun(db, runId)
+    await waitFor(() => db.collection('task_instance_tries').countDocuments({ dag_run_id: runId }), n => n >= 1)
 
     const res = await app.inject({ method: 'GET', url: `/dag-runs/${runId}/tasks/step/tries` })
     const t = res.json()[0] as Record<string, unknown>

@@ -16,6 +16,7 @@ import { pauseDag, resumeDag } from '../../dag/pause.js'
 import { recordEvent, buildEventFilter } from '../index.js'
 import type { DagDefinition } from '../../dag/types.js'
 import type { FastifyInstance } from 'fastify'
+import { waitFor } from '../../scheduler/__tests__/wait-for.js'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 let client: MongoClient
@@ -221,9 +222,11 @@ describe('run_cancelled event on POST cancel', () => {
     const runId = await createRun(db, dag)
 
     await app.inject({ method: 'POST', url: `/dag-runs/${runId}/cancel` })
-    await new Promise(r => setTimeout(r, 50))
 
-    const events = await db.collection('event_logs').find({ event_type: 'run_cancelled', dag_run_id: runId }).toArray()
+    const events = await waitFor(
+      () => db.collection('event_logs').find({ event_type: 'run_cancelled', dag_run_id: runId }).toArray(),
+      evs => evs.length > 0,
+    )
     expect(events).toHaveLength(1)
     expect(events[0].dag_id).toBe('audit_cancel_dag')
   })

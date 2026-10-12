@@ -156,15 +156,15 @@ async function resolveCatchupBaseline(db: Db, dag: DagDefinition, now: Date): Pr
  * Create a queued run for every scheduled occurrence (UTC) of each `catchup: true` Dag that
  * has come due and has no run yet. Idempotent — existing (dag_id, logical_date) pairs are
  * skipped, so it is safe on every tick and across restarts. Oldest dates first.
- * `now` is injectable for tests.
+ * `now` and `maxPerTick` are injectable for tests.
  */
-export async function tickCatchup(db: Db, dags: DagDefinition[], now: Date = new Date()): Promise<number> {
+export async function tickCatchup(db: Db, dags: DagDefinition[], now: Date = new Date(), maxPerTick: number = CATCHUP_MAX_RUNS_PER_TICK): Promise<number> {
   // setInterval doesn't wait for the previous tick — overlapping calls would both see the
   // same missing dates and create duplicate runs. Skip if one is already in flight.
   if (catchupInFlight) return 0
   catchupInFlight = true
   try {
-    return await runCatchup(db, dags, now)
+    return await runCatchup(db, dags, now, maxPerTick)
   } finally {
     catchupInFlight = false
   }
@@ -172,7 +172,7 @@ export async function tickCatchup(db: Db, dags: DagDefinition[], now: Date = new
 
 let catchupInFlight = false
 
-async function runCatchup(db: Db, dags: DagDefinition[], now: Date): Promise<number> {
+async function runCatchup(db: Db, dags: DagDefinition[], now: Date, maxPerTick: number): Promise<number> {
   let created = 0
   for (const dag of dags) {
     if (!dag.catchup || !dag.schedule) continue
@@ -190,7 +190,7 @@ async function runCatchup(db: Db, dags: DagDefinition[], now: Date): Promise<num
       .toArray()
     const have = new Set(existing.map(r => new Date(r.logical_date as Date).getTime()))
 
-    const missing = dates.filter(d => !have.has(d.getTime())).slice(0, CATCHUP_MAX_RUNS_PER_TICK)
+    const missing = dates.filter(d => !have.has(d.getTime())).slice(0, maxPerTick)
     for (const date of missing) {
       await createRun(db, dag, { logicalDate: date, triggerType: 'catchup' })
       created++

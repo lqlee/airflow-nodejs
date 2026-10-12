@@ -132,6 +132,51 @@ describe('isSatisfied', () => {
   })
 })
 
+describe('isSatisfied — extended rules', () => {
+  it('one_done: needs a success or failure; skipped-only does not count', () => {
+    expect(isSatisfied('one_done', ['success', 'skipped'])).toBe(true)
+    expect(isSatisfied('one_done', ['failed', 'skipped'])).toBe(true)
+    expect(isSatisfied('one_done', ['skipped', 'skipped'])).toBe(false)
+    expect(isSatisfied('one_done', ['success', 'pending'])).toBe(false)
+  })
+
+  it('none_skipped: success/failed pass, any skipped blocks', () => {
+    expect(isSatisfied('none_skipped', ['success', 'failed'])).toBe(true)
+    expect(isSatisfied('none_skipped', ['success', 'skipped'])).toBe(false)
+    expect(isSatisfied('none_skipped', ['success', 'pending'])).toBe(false)
+  })
+
+  it('all_skipped: only when every upstream skipped', () => {
+    expect(isSatisfied('all_skipped', ['skipped', 'skipped'])).toBe(true)
+    expect(isSatisfied('all_skipped', ['skipped', 'success'])).toBe(false)
+    expect(isSatisfied('all_skipped', ['skipped', 'failed'])).toBe(false)
+  })
+
+  it('none_failed_min_one_success: success+skipped with ≥1 success', () => {
+    expect(isSatisfied('none_failed_min_one_success', ['success', 'skipped'])).toBe(true)
+    expect(isSatisfied('none_failed_min_one_success', ['skipped', 'skipped'])).toBe(false)
+    expect(isSatisfied('none_failed_min_one_success', ['success', 'failed'])).toBe(false)
+  })
+
+  it('all_done_min_one_success: skipped upstream blocks; needs ≥1 success', () => {
+    expect(isSatisfied('all_done_min_one_success', ['success', 'failed'])).toBe(true)
+    expect(isSatisfied('all_done_min_one_success', ['success', 'skipped'])).toBe(false)
+    expect(isSatisfied('all_done_min_one_success', ['failed', 'failed'])).toBe(false)
+  })
+
+  it('always: satisfied in every state, including pending upstreams', () => {
+    expect(isSatisfied('always', ['pending', 'failed'])).toBe(true)
+    expect(isSatisfied('always', ['skipped'])).toBe(true)
+    expect(isSatisfied('always', [])).toBe(true)
+  })
+
+  it('always is never unsatisfiable; others stay waiting while pending', () => {
+    expect(isUnsatisfiable('always', ['failed', 'skipped'])).toBe(false)
+    expect(isUnsatisfiable('one_done', ['pending', 'skipped'])).toBe(false)
+    expect(isUnsatisfiable('one_done', ['skipped', 'skipped'])).toBe(true)
+  })
+})
+
 describe('isUnsatisfiable', () => {
   it('all_success becomes unsatisfiable when any upstream failed', () => {
     expect(isUnsatisfiable('all_success', ['success', 'failed'])).toBe(true)
@@ -416,5 +461,110 @@ describe('trigger rules — integration', () => {
     // Run must be terminal
     const state = await runState(runId)
     expect(state).not.toBe('running')
+  })
+  // ── extended rules ────────────────────────────────────────────────────────
+
+  it('always: runs while its upstream is still running, and the run still terminates', async () => {
+    const dag: DagDefinition = {
+      id: 'tr_always_concurrent',
+      schedule: null,
+      tasks: {
+        slow:   { run: async () => { await new Promise(r => setTimeout(r, 600)); return 'slow' } },
+        always: { dependsOn: ['slow'], triggerRule: 'always', run: async () => { return 'a' } },
+        after:  { dependsOn: ['slow'], run: async () => 'after' },
+      }
+    }
+    register(dag)
+    const runId = await createRun(db, dag)
+    // First wave: `always` is claimed even though `slow` hasn't finished
+    await advanceRun(db, runId)
+    for (let i = 0; i < 10; i++) await advanceRun(db, runId)
+    expect(await taskState(runId, 'always')).toBe('success')
+    const a = await db.collection('task_instances').findOne({ dag_run_id: runId, task_id: 'always' })
+    const s = await db.collection('task_instances').findOne({ dag_run_id: runId, task_id: 'slow' })
+    expect(a?.started_at.getTime()).toBeLessThan(s?.ended_at.getTime())
+    expect(await taskState(runId, 'after')).toBe('success')
+    expect(await runState(runId)).toBe('success')
+  })
+
+  it('always: runs after upstream failure', async () => {
+    const dag: DagDefinition = {
+      id: 'tr_always_fail',
+      schedule: null,
+      tasks: {
+        up:      { run: async () => { throw new Error('boom') } },
+        cleanup: { dependsOn: ['up'], triggerRule: 'always', run: async () => 'cleaned' },
+      }
+    }
+    const runId = await runDag(dag)
+    expect(await taskState(runId, 'cleanup')).toBe('success')
+  })
+
+  it('none_failed_min_one_success: runs after branch skip, skipped when every upstream skipped', async () => {
+    const dag: DagDefinition = {
+      id: 'tr_nfmos',
+      schedule: null,
+      tasks: {
+        a:    { run: async () => 'a' },
+        b:    { dependsOn: ['a'], triggerRule: 'all_failed', run: async () => 'b' },  // skipped (a succeeded)
+        join: { dependsOn: ['a', 'b'], triggerRule: 'none_failed_min_one_success', run: async () => 'joined' },
+        dead: { dependsOn: ['b'], triggerRule: 'none_failed_min_one_success', run: async () => 'dead' },
+      }
+    }
+    const runId = await runDag(dag)
+    expect(await taskState(runId, 'b')).toBe('skipped')
+    expect(await taskState(runId, 'join')).toBe('success')
+    expect(await taskState(runId, 'dead')).toBe('skipped')
+  })
+
+  it('all_skipped: runs only when every upstream was skipped', async () => {
+    const dag: DagDefinition = {
+      id: 'tr_all_skipped',
+      schedule: null,
+      tasks: {
+        a:       { run: async () => 'a' },
+        b:       { dependsOn: ['a'], triggerRule: 'all_failed', run: async () => 'b' },  // skipped
+        fallback: { dependsOn: ['b'], triggerRule: 'all_skipped', run: async () => 'fallback' },
+        no:      { dependsOn: ['a', 'b'], triggerRule: 'all_skipped', run: async () => 'no' },  // a succeeded
+      }
+    }
+    const runId = await runDag(dag)
+    expect(await taskState(runId, 'fallback')).toBe('success')
+    expect(await taskState(runId, 'no')).toBe('skipped')
+  })
+
+  it('one_done: runs after failure, skipped when only skipped upstreams', async () => {
+    const dag: DagDefinition = {
+      id: 'tr_one_done',
+      schedule: null,
+      tasks: {
+        bad:     { run: async () => { throw new Error('x') } },
+        skipper: { dependsOn: ['bad'], run: async () => 's' },  // skipped (upstream failed)
+        ran:     { dependsOn: ['bad'], triggerRule: 'one_done', run: async () => 'r' },
+        none:    { dependsOn: ['skipper'], triggerRule: 'one_done', run: async () => 'n' },
+      }
+    }
+    const runId = await runDag(dag)
+    expect(await taskState(runId, 'ran')).toBe('success')
+    expect(await taskState(runId, 'none')).toBe('skipped')
+  })
+
+  it('none_skipped and all_done_min_one_success: skipped when an upstream was skipped', async () => {
+    const dag: DagDefinition = {
+      id: 'tr_skip_blockers',
+      schedule: null,
+      tasks: {
+        a:  { run: async () => 'a' },
+        b:  { dependsOn: ['a'], triggerRule: 'all_failed', run: async () => 'b' },  // skipped
+        ns: { dependsOn: ['a', 'b'], triggerRule: 'none_skipped', run: async () => 'x' },
+        dm: { dependsOn: ['a', 'b'], triggerRule: 'all_done_min_one_success', run: async () => 'x' },
+        ok: { dependsOn: ['a'], triggerRule: 'all_done_min_one_success', run: async () => 'ok' },
+      }
+    }
+    const runId = await runDag(dag)
+    expect(await taskState(runId, 'ns')).toBe('skipped')
+    expect(await taskState(runId, 'dm')).toBe('skipped')
+    expect(await taskState(runId, 'ok')).toBe('success')
+    expect(await runState(runId)).toBe('success')
   })
 })

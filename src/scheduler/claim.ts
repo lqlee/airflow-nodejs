@@ -27,6 +27,9 @@ export function isSatisfied(
   triggerRule: string,
   upstreamStates: Array<'success' | 'failed' | 'skipped' | 'pending'>,
 ): boolean {
+  // 'always' ignores upstream state entirely — runs even while upstreams are pending
+  if (triggerRule === 'always') return true
+
   // If any upstream is still pending, rule cannot be evaluated yet — not satisfied
   if (upstreamStates.some(s => s === 'pending')) return false
 
@@ -43,6 +46,17 @@ export function isSatisfied(
       return upstreamStates.some(s => s === 'failed')
     case 'none_failed':
       return upstreamStates.every(s => s === 'success' || s === 'skipped')
+    case 'one_done':
+      return upstreamStates.some(s => s === 'success' || s === 'failed')
+    case 'none_skipped':
+      return upstreamStates.every(s => s !== 'skipped')
+    case 'all_skipped':
+      return upstreamStates.every(s => s === 'skipped')
+    case 'none_failed_min_one_success':
+      return upstreamStates.every(s => s !== 'failed') && upstreamStates.some(s => s === 'success')
+    case 'all_done_min_one_success':
+      // Skipped upstreams are not "done" for this rule
+      return upstreamStates.every(s => s !== 'skipped') && upstreamStates.some(s => s === 'success')
     default:
       return upstreamStates.every(s => s === 'success')  // unknown rule → all_success
   }

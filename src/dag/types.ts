@@ -117,9 +117,21 @@ export interface TaskContext {
  * | `one_success` | At least one succeeded.                          |
  * | `one_failed`  | At least one failed.                             |
  * | `none_failed` | None failed (all success or skipped).            |
+ * | `one_done`    | At least one succeeded or failed.                |
+ * | `none_skipped`| None skipped (all success or failed).           |
+ * | `all_skipped` | All skipped.                                     |
+ * | `none_failed_min_one_success` | None failed, at least one succeeded. |
+ * | `all_done_min_one_success`    | None skipped, at least one succeeded. |
+ * | `always`      | Run immediately, regardless of upstream state (even while they are still running). |
  *
+ * Every rule except `always` waits until ALL upstreams are terminal.
  * Tasks whose rule can never be satisfied are automatically marked `skipped`
  * so the run can still reach a terminal state.
+ *
+ * There is no `upstream_failed` state: a task skipped because an upstream failed is
+ * indistinguishable from a branch skip, so `all_skipped` / `none_failed_min_one_success`
+ * treat a cascade-skipped upstream as skipped. `all_done_setup_success` is not supported
+ * (no setup/teardown tasks).
  */
 export type TriggerRule =
   | 'all_success'   // default — all upstreams succeeded
@@ -128,6 +140,12 @@ export type TriggerRule =
   | 'one_success'   // at least one upstream succeeded
   | 'one_failed'    // at least one upstream failed
   | 'none_failed'   // no upstream failed (success or skipped only)
+  | 'one_done'      // at least one upstream succeeded or failed
+  | 'none_skipped'  // no upstream skipped
+  | 'all_skipped'   // all upstreams skipped
+  | 'none_failed_min_one_success'  // none failed and at least one succeeded
+  | 'all_done_min_one_success'     // none skipped and at least one succeeded
+  | 'always'        // ignore upstream state; run immediately
 
 /**
  * XCom-driven dynamic expand source.

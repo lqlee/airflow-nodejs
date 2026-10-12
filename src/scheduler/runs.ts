@@ -1,5 +1,5 @@
 import type { Db, WithId } from 'mongodb'
-import type { DagDefinition } from '../dag/types.js'
+import type { DagDefinition, TriggerRule } from '../dag/types.js'
 import { planExpansion, isLiteralMapped, isDynamicMapped, isMappedTask } from './mapping.js'
 import { recordEvent } from '../events/index.js'
 
@@ -47,7 +47,7 @@ export interface TaskInstance {
   state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled' | 'skipped' | 'deferred'
   depends_on: string[]
   /** Trigger rule — controls when this task runs. Default: 'all_success'. */
-  trigger_rule: 'all_success' | 'all_failed' | 'all_done' | 'one_success' | 'one_failed' | 'none_failed'
+  trigger_rule: TriggerRule
   /** Priority weight — higher values claimed first. Default: 0. */
   priority: number
   try_number: number

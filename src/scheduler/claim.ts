@@ -26,6 +26,8 @@ function taskAggState(states: string[]): 'success' | 'failed' | 'skipped' | 'pen
 export function isSatisfied(
   triggerRule: string,
   upstreamStates: Array<'success' | 'failed' | 'skipped' | 'pending'>,
+  /** Parallel to upstreamStates: true where that upstream is a setup task. Only `all_done_setup_success` reads it. */
+  setupFlags: boolean[] = [],
 ): boolean {
   // 'always' ignores upstream state entirely — runs even while upstreams are pending
   if (triggerRule === 'always') return true
@@ -57,9 +59,23 @@ export function isSatisfied(
     case 'all_done_min_one_success':
       // Skipped upstreams are not "done" for this rule
       return upstreamStates.every(s => s !== 'skipped') && upstreamStates.some(s => s === 'success')
+    case 'all_done_setup_success': {
+      // All upstreams done (pending check above); if any are setups, at least one must have succeeded
+      const setupStates = upstreamStates.filter((_, i) => setupFlags[i])
+      return setupStates.length === 0 || setupStates.some(s => s === 'success')
+    }
     default:
       return upstreamStates.every(s => s === 'success')  // unknown rule → all_success
   }
+}
+
+/** Setup flags for a task's upstreams, parallel to the `depends_on` order. */
+function setupFlagsFor(inst: TaskInstance, setupIds: Set<string>): boolean[] {
+  return inst.depends_on.map(dep => setupIds.has(dep))
+}
+
+function collectSetupIds(instances: TaskInstance[]): Set<string> {
+  return new Set(instances.filter(i => i.is_setup).map(i => i.task_id))
 }
 
 /**
@@ -71,11 +87,12 @@ export function isSatisfied(
 export function isUnsatisfiable(
   triggerRule: string,
   upstreamStates: Array<'success' | 'failed' | 'skipped' | 'pending'>,
+  setupFlags: boolean[] = [],
 ): boolean {
   // Still waiting on upstreams — not yet unsatisfiable
   if (upstreamStates.some(s => s === 'pending')) return false
   // All upstreams terminal: if not satisfied now, can never be
-  return !isSatisfied(triggerRule, upstreamStates)
+  return !isSatisfied(triggerRule, upstreamStates, setupFlags)
 }
 
 /** depends_on_past passes when the task is absent from the previous run or every instance succeeded/was skipped. */
@@ -166,6 +183,7 @@ export async function claimReadyTasks(
 
   const now = new Date()
   const claimed: TaskInstance[] = []
+  const setupIds = collectSetupIds(allInstances)
 
   // depends_on_past gate — resolve the previous run's task states once per claim
   const pastStates = allInstances.some(i => i.depends_on_past && i.state === 'queued')
@@ -199,7 +217,7 @@ export async function claimReadyTasks(
     const upstreamStates = inst.depends_on.map(dep => aggState.get(dep) ?? 'pending')
     const rule = inst.trigger_rule ?? 'all_success'
 
-    if (!isSatisfied(rule, upstreamStates)) continue
+    if (!isSatisfied(rule, upstreamStates, setupFlagsFor(inst, setupIds))) continue
 
     // Per-task concurrency gates
     const perRun = inst.max_active_tis_per_run ?? 0
@@ -275,12 +293,13 @@ export async function skipUnsatisfiableTasks(db: Db, dagRunId: string): Promise<
     }
 
     // Find all queued instances that are now unsatisfiable
+    const setupIds = collectSetupIds(allInstances)
     const toSkip: TaskInstance[] = []
     for (const inst of allInstances) {
       if (inst.state !== 'queued') continue
       const upstreamStates = inst.depends_on.map(dep => aggState.get(dep) ?? 'pending')
       const rule = inst.trigger_rule ?? 'all_success'
-      if (isUnsatisfiable(rule, upstreamStates)) {
+      if (isUnsatisfiable(rule, upstreamStates, setupFlagsFor(inst, setupIds))) {
         toSkip.push(inst)
       }
     }
@@ -356,6 +375,7 @@ export async function applyBranchDecisions(db: Db, dagRunId: string): Promise<nu
       if (!ti.depends_on.includes(branchTi.task_id)) continue
       if (ti.state !== 'queued') continue
       if (selected.has(ti.task_id)) continue
+      if (ti.is_teardown) continue  // teardowns must still run to release what their setup acquired
 
       // This dependent was not selected — skip it
       await db.collection<TaskInstance>('task_instances').updateOne(
@@ -393,7 +413,9 @@ export async function applyShortCircuitDecisions(db: Db, dagRunId: string): Prom
     while (frontier.length > 0) {
       const current = frontier.pop()!
       for (const t of all) {
-        if (t.depends_on.includes(current) && !doomed.has(t.task_id)) {
+        // Teardowns are exempt (they must still release what their setup acquired) and
+        // the walk does not continue through them.
+        if (t.depends_on.includes(current) && !doomed.has(t.task_id) && !t.is_teardown) {
           doomed.add(t.task_id)
           frontier.push(t.task_id)
         }

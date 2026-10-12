@@ -134,6 +134,7 @@ export interface RetryCallbackInfo {
  * | `all_skipped` | All skipped.                                     |
  * | `none_failed_min_one_success` | None failed, at least one succeeded. |
  * | `all_done_min_one_success`    | None skipped, at least one succeeded. |
+ * | `all_done_setup_success` | All finished, and (if it has setup upstreams) at least one setup succeeded. **Default for teardown tasks.** |
  * | `always`      | Run immediately, regardless of upstream state (even while they are still running). |
  *
  * Every rule except `always` waits until ALL upstreams are terminal.
@@ -142,8 +143,7 @@ export interface RetryCallbackInfo {
  *
  * There is no `upstream_failed` state: a task skipped because an upstream failed is
  * indistinguishable from a branch skip, so `all_skipped` / `none_failed_min_one_success`
- * treat a cascade-skipped upstream as skipped. `all_done_setup_success` is not supported
- * (no setup/teardown tasks).
+ * treat a cascade-skipped upstream as skipped.
  */
 export type TriggerRule =
   | 'all_success'   // default — all upstreams succeeded
@@ -157,6 +157,7 @@ export type TriggerRule =
   | 'all_skipped'   // all upstreams skipped
   | 'none_failed_min_one_success'  // none failed and at least one succeeded
   | 'all_done_min_one_success'     // none skipped and at least one succeeded
+  | 'all_done_setup_success'  // all done; needs ≥1 successful setup upstream (teardown default)
   | 'always'        // ignore upstream state; run immediately
 
 /**
@@ -225,6 +226,25 @@ export interface TaskDefinition {
    * Each related task is counted once, however many paths lead to it.
    */
   weightRule?: 'absolute' | 'downstream' | 'upstream'
+  /**
+   * Setup task (Airflow `@setup`): provisions a resource that a teardown releases.
+   * Runs like any task; a teardown that depends on it only runs if at least one of its
+   * setups succeeded.
+   */
+  setup?: boolean
+  /**
+   * Teardown task (Airflow `@teardown`): releases resources. List its setup(s) AND the work
+   * tasks it cleans up after in `dependsOn` — it waits only for those declared upstreams
+   * (Airflow's implicit "scope" between setup and teardown is not inferred).
+   *  - Default `triggerRule` is `all_done_setup_success`: runs after upstreams finish, even
+   *    if work failed; skipped when every setup failed/was skipped.
+   *  - Not skipped by a ShortCircuit or by an unselected branch.
+   *  - A failed teardown does not fail the run unless `onFailureFailDagrun` is set.
+   *  - Dropped (not run) if the run is cancelled or hits `runTimeout`.
+   */
+  teardown?: boolean
+  /** Teardown only: fail the run when this teardown fails (Airflow `on_failure_fail_dagrun`). Default false. */
+  onFailureFailDagrun?: boolean
   /**
    * Max instances of THIS task running at once across ALL runs of the Dag
    * (Airflow `max_active_tis_per_dag`). Others stay queued. Default: unlimited.

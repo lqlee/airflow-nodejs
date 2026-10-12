@@ -17,6 +17,7 @@ export type WarningType =
   | 'no_tasks'              // dag has zero tasks
   | 'sensor_no_timeout'     // sensor task has no sensorTimeout (could run forever)
   | 'circular_dependency'   // cycle in depends_on graph
+  | 'setup_and_teardown'    // task flagged both setup and teardown
 
 export interface DagWarning {
   dag_id: string
@@ -52,6 +53,13 @@ export function analyzeWarnings(dag: DagDefinition, now = new Date()): DagWarnin
     if (!task.run && !task.poke && !task.shell && !task.python && !task.java && !task.container && !Array.isArray(task.expand)) {
       warn('no_run_logic',
         `Task '${taskId}' has no run, poke, or expand — it will succeed immediately`,
+        [taskId])
+    }
+
+    // A task cannot be both setup and teardown
+    if (task.setup && task.teardown) {
+      warn('setup_and_teardown',
+        `Task '${taskId}' is marked both setup and teardown — it will be treated as a teardown`,
         [taskId])
     }
 

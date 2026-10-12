@@ -172,7 +172,8 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
   // 'deferred' is non-terminal — task is waiting for trigger, must not finalize the run
   const TERMINAL_STATES = new Set(['success', 'failed', 'cancelled', 'skipped'])
   const allDone = tasks.every(t => TERMINAL_STATES.has(t.state))
-  const anyFailed = tasks.some(t => t.state === 'failed')
+  // A failed teardown does not fail the run unless it opted in (Airflow on_failure_fail_dagrun)
+  const anyFailed = tasks.some(t => t.state === 'failed' && (!t.is_teardown || t.on_failure_fail_dagrun))
 
   if (allDone) {
     const finalState = anyFailed ? 'failed' : 'success'

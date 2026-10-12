@@ -90,6 +90,11 @@ export interface TaskInstance {
   is_branch: boolean
   /** true if this task is a ShortCircuit task (has a shortCircuit: fn) */
   is_short_circuit?: boolean
+  /** Setup task — a teardown's `all_done_setup_success` rule looks at these upstreams. */
+  is_setup?: boolean
+  /** Teardown task — always runs once upstreams finish; its failure doesn't fail the run unless on_failure_fail_dagrun. */
+  is_teardown?: boolean
+  on_failure_fail_dagrun?: boolean
   /** Run started by a TriggerDagRun task, polled while the task is deferred. */
   triggered_run_id?: string | null
   /**
@@ -198,7 +203,7 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
         map_value,
         state: 'queued',
         depends_on: task.dependsOn ?? [],
-        trigger_rule: task.triggerRule ?? 'all_success',
+        trigger_rule: task.triggerRule ?? (task.teardown === true ? 'all_done_setup_success' : 'all_success'),
         priority: weights.get(taskId) ?? 0,
         try_number: 0,
         max_retries: task.retries ?? 0,
@@ -227,6 +232,9 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
         defer_timeout_ms: task.timeout ?? 0,
         is_branch: isBranch,
         is_short_circuit: typeof task.shortCircuit === 'function',
+        is_setup: task.setup === true,
+        is_teardown: task.teardown === true,
+        on_failure_fail_dagrun: task.teardown === true && task.onFailureFailDagrun === true,
         is_dynamic_placeholder: isDynamic,
         dynamic_expand_source: dynamicExpandSource,
         is_hitl: task.requiresApproval === true,

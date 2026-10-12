@@ -226,3 +226,21 @@ describe('Dag metadata and task controls in the API', () => {
     })
   })
 })
+
+describe('setup/teardown flags in the API', () => {
+  it('GET /dags/:id/tasks returns is_setup, is_teardown, on_failure_fail_dagrun', async () => {
+    register({
+      id: 'st_api', schedule: null,
+      tasks: {
+        s: { setup: true, run: async () => {} },
+        t: { teardown: true, onFailureFailDagrun: true, dependsOn: ['s'], run: async () => {} },
+        p: { onFailureFailDagrun: true, run: async () => {} },
+      },
+    })
+    const tasks = (await app.inject({ method: 'GET', url: '/dags/st_api/tasks' })).json() as Array<Record<string, unknown>>
+    const by = (id: string) => tasks.find(t => t.task_id === id)
+    expect(by('s')).toMatchObject({ is_setup: true, is_teardown: false, on_failure_fail_dagrun: false })
+    expect(by('t')).toMatchObject({ is_setup: false, is_teardown: true, on_failure_fail_dagrun: true })
+    expect(by('p')).toMatchObject({ is_teardown: false, on_failure_fail_dagrun: false })
+  })
+})

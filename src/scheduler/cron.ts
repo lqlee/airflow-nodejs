@@ -2,10 +2,21 @@ import cron from 'node-cron'
 import type { Db } from 'mongodb'
 import type { DagDefinition } from '../dag/types.js'
 import { getDag } from '../dag/registry.js'
-import { createRun } from './runs.js'
+import { createRun, DuplicateRunError } from './runs.js'
 import { advanceRun } from './index.js'
 import { isDagPaused } from '../dag/pause.js'
 import { enumerateDates } from './backfill.js'
+import { isLeader } from './lease.js'
+
+/**
+ * Logical date of a cron firing: the scheduled instant, truncated to the expression's resolution
+ * (minute for 5-field expressions, second for 6-field ones) so every replica derives the same value.
+ * Matches Airflow 3's CronTriggerTimetable, where the logical date is the trigger time.
+ */
+export function cronLogicalDate(expression: string, firedAt: Date): Date {
+  const unit = expression.trim().split(/\s+/).length >= 6 ? 1_000 : 60_000
+  return new Date(Math.floor(firedAt.getTime() / unit) * unit)
+}
 
 // Store both the task and the expression so we can detect schedule changes.
 // Previously only the task was stored — this prevented syncCronJobs from
@@ -37,25 +48,47 @@ export function scheduleDag(db: Db, dag: DagDefinition): void {
   // Stop and remove existing job (handles both "new" and "schedule changed" cases)
   unscheduleDag(dag.id)
 
-  const task = cron.schedule(dag.schedule, async () => {
-    // Skip if paused — check DB each time so pause/resume takes effect immediately
-    const paused = await isDagPaused(db, dag.id)
-    if (paused) {
-      console.log(`[cron] ⏸  dag '${dag.id}' is paused — skipping scheduled run`)
-      return
-    }
-
-    console.log(`[cron] ⏰ dag '${dag.id}' triggered by schedule '${dag.schedule}'`)
-    try {
-      const runId = await createRun(db, dag, { triggerType: 'cron' })
-      await advanceRun(db, runId)
-    } catch (err) {
-      console.error(`[cron] error running dag '${dag.id}':`, err)
-    }
+  const expression = dag.schedule
+  const task = cron.schedule(expression, async (firedAt) => {
+    await fireCronRun(db, dag, expression, firedAt instanceof Date ? firedAt : new Date())
   })
 
   cronJobs.set(dag.id, { task, expression: dag.schedule })
   console.log(`[cron] scheduled dag '${dag.id}' → '${dag.schedule}'`)
+}
+
+/**
+ * What a cron job does when it fires: create (and start) the run for this occurrence.
+ * Returns the run id, or null when skipped — not the leader, Dag paused, or the occurrence
+ * already has a run (another replica fired it first). Never throws.
+ */
+export async function fireCronRun(
+  db: Db,
+  dag: DagDefinition,
+  expression: string,
+  firedAt: Date,
+  opts: { advance?: boolean } = {},
+): Promise<string | null> {
+  // Leadership can move between ticks; only the current leader creates scheduled runs
+  if (!isLeader()) return null
+  try {
+    // Skip if paused — check DB each time so pause/resume takes effect immediately
+    if (await isDagPaused(db, dag.id)) {
+      console.log(`[cron] ⏸  dag '${dag.id}' is paused — skipping scheduled run`)
+      return null
+    }
+    console.log(`[cron] ⏰ dag '${dag.id}' triggered by schedule '${expression}'`)
+    const runId = await createRun(db, dag, { triggerType: 'cron', logicalDate: cronLogicalDate(expression, firedAt) })
+    if (opts.advance !== false) await advanceRun(db, runId)
+    return runId
+  } catch (err) {
+    if (err instanceof DuplicateRunError) {
+      console.log(`[cron] dag '${dag.id}' already has a run for ${err.logicalDate.toISOString()} — skipping`)
+    } else {
+      console.error(`[cron] error running dag '${dag.id}':`, err)
+    }
+    return null
+  }
 }
 
 /**
@@ -191,12 +224,18 @@ async function runCatchup(db: Db, dags: DagDefinition[], now: Date, maxPerTick: 
     const have = new Set(existing.map(r => new Date(r.logical_date as Date).getTime()))
 
     const missing = dates.filter(d => !have.has(d.getTime())).slice(0, maxPerTick)
+    let createdForDag = 0
     for (const date of missing) {
-      await createRun(db, dag, { logicalDate: date, triggerType: 'catchup' })
-      created++
+      try {
+        await createRun(db, dag, { logicalDate: date, triggerType: 'catchup' })
+        createdForDag++
+      } catch (err) {
+        if (!(err instanceof DuplicateRunError)) throw err   // raced another scheduler or a backfill
+      }
     }
-    if (missing.length > 0) {
-      console.log(`[catchup] dag '${dag.id}' → created ${missing.length} run(s) up to ${missing[missing.length - 1].toISOString()}`)
+    created += createdForDag
+    if (createdForDag > 0) {
+      console.log(`[catchup] dag '${dag.id}' → created ${createdForDag} run(s) up to ${missing[missing.length - 1].toISOString()}`)
     }
   }
   return created
@@ -314,6 +353,14 @@ export async function tickTimetables(db: Db, dags: DagDefinition[]): Promise<voi
  */
 export function resetTimetable(dagId: string): void {
   timetableEntries.delete(dagId)
+}
+
+/**
+ * Forget every in-memory timetable entry. Called when this process loses leadership: the next leader
+ * fires the runs meanwhile, so entries must be rebuilt from the DB if leadership comes back.
+ */
+export function resetAllTimetables(): void {
+  timetableEntries.clear()
 }
 
 /** Number of active timetable entries (for testing). */

@@ -60,6 +60,7 @@ function chooseIndex(schema: TableSchema, filter: Filter): string | null {
   const keys = new Set(Object.keys(filter).filter(k => !k.startsWith('$')))
   let best: { name: string; score: number } | null = null
   for (const ix of schema.indexes) {
+    if (ix.nullFiltered) continue   // it omits NULL rows — forcing it could silently drop matches
     let score = 0
     for (const col of ix.columns) { if (keys.has(col)) score++; else break }
     if (score > 0 && (!best || score > best.score)) best = { name: ix.name, score }

@@ -2,7 +2,9 @@ import { connectDb, closeDb } from './db/client.js'
 import { ensureIndexes } from './db/indexes.js'
 import { loadDags } from './dag/loader.js'
 import { startScheduler, stopScheduler } from './scheduler/index.js'
-import { recoverOrphanedRuns } from './scheduler/recovery.js'
+import { releaseOwnedTasks } from './scheduler/zombies.js'
+import { shutdownLiveness, INSTANCE_ID } from './scheduler/instance.js'
+import { releaseLease } from './scheduler/lease.js'
 import { buildServer } from './api/server.js'
 import { startWorker, stopWorker } from './queue/consumer.js'
 import { closeQueue } from './queue/producer.js'
@@ -16,7 +18,9 @@ const DRAIN_TIMEOUT_MS = Number(process.env.DRAIN_TIMEOUT_MS ?? 20_000)
 async function main(): Promise<void> {
   const db = await connectDb()
   await ensureIndexes(db)
-  await recoverOrphanedRuns(db)
+  // No startup recovery: tasks left running by a dead process are reaped as zombies once its
+  // heartbeat goes stale (zombies.ts) — safe with several replicas sharing one database.
+  console.log(`[main] instance ${INSTANCE_ID}`)
   await loadDags(db)
 
   startScheduler(db)
@@ -48,6 +52,8 @@ async function main(): Promise<void> {
     // 1. Stop scheduler — no new ticks, no new cron fires, no new advanceRun calls.
     //    advanceRun's claim loop checks isShuttingDown() and bails after current wave.
     stopScheduler()
+    //    Give up leadership now so another replica takes over cron/catch-up without waiting for expiry.
+    await releaseLease(db, INSTANCE_ID).catch(err => console.warn('[main] lease release failed:', (err as Error).message))
 
     // 2. Drain HTTP — wait for in-flight requests (including POST /trigger → advanceRun).
     //    Fastify closes the server and waits for outstanding keep-alive/in-flight requests.
@@ -77,7 +83,11 @@ async function main(): Promise<void> {
     await stopWorker()
     await closeQueue()
 
-    // 5. Close DB last — all in-flight writes are done.
+    // 5. Hand tasks this process still owns back to the queue (no retry spent), then deregister.
+    await releaseOwnedTasks(db).catch(err => console.warn('[main] task hand-back failed:', (err as Error).message))
+    await shutdownLiveness(db)
+
+    // 6. Close DB last — all in-flight writes are done.
     await closeDb()
 
     console.log('[main] shutdown complete')

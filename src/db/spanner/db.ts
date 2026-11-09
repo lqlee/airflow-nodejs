@@ -77,20 +77,46 @@ export async function ensureSchema(spanner: Spanner, cfg: SpannerConnectionConfi
       catch (e) { if (!isCode(e, 6)) throw e }
     }
   }
-  const [tableRows] = await database.run({ sql: "SELECT table_name FROM information_schema.tables WHERE table_schema = ''", json: true }) as unknown as [Array<{ table_name: string }>]
-  const [indexRows] = await database.run({ sql: "SELECT index_name FROM information_schema.indexes WHERE table_schema = '' AND index_type != 'PRIMARY_KEY'", json: true }) as unknown as [Array<{ index_name: string }>]
-  const haveTables = new Set(tableRows.map(r => r.table_name))
-  const haveIndexes = new Set(indexRows.map(r => r.index_name))
+  // Several processes may start at once: when another one's DDL is still running, our attempt reports
+  // "already exists" before the objects are visible — so re-check until everything exists.
+  const skipped = new Set<string>()
+  for (let attempt = 0; ; attempt++) {
+    const [tableRows] = await database.run({ sql: "SELECT table_name FROM information_schema.tables WHERE table_schema = ''", json: true }) as unknown as [Array<{ table_name: string }>]
+    const [indexRows] = await database.run({ sql: "SELECT index_name FROM information_schema.indexes WHERE table_schema = '' AND index_type != 'PRIMARY_KEY'", json: true }) as unknown as [Array<{ index_name: string }>]
+    const haveTables = new Set(tableRows.map(r => r.table_name))
+    const haveIndexes = new Set(indexRows.map(r => r.index_name))
 
-  const missing = buildDdl().filter(stmt => {
-    const t = /^CREATE TABLE (\w+)/.exec(stmt)
-    if (t) return !haveTables.has(t[1])
-    const i = /^CREATE (?:UNIQUE )?INDEX (\w+)/.exec(stmt)
-    return i ? !haveIndexes.has(i[1]) : true
-  })
-  if (missing.length === 0) return
+    const missing = buildDdl().filter(stmt => {
+      if (skipped.has(stmt)) return false
+      const t = /^CREATE TABLE (\w+)/.exec(stmt)
+      if (t) return !haveTables.has(t[1])
+      const i = INDEX_NAME.exec(stmt)
+      return i ? !haveIndexes.has(i[1]) : true
+    })
+    if (missing.length === 0) return
+    if (attempt >= 60) throw new Error(`Spanner schema still incomplete after waiting: ${missing.map(s => s.split('\n')[0]).join('; ')}`)
+    if (attempt > 0) await new Promise(r => setTimeout(r, 1_000))
+
+    // A unique index added to an EXISTING table can fail on rows that already violate it — apply
+    // those one at a time so a failure only loses that constraint instead of blocking startup.
+    const onExistingTable = (stmt: string) => stmt.startsWith('CREATE UNIQUE ') && haveTables.has(INDEX_TABLE.exec(stmt)?.[1] ?? '')
+    await applyDdl(database, missing.filter(stmt => !onExistingTable(stmt)))
+    for (const stmt of missing.filter(onExistingTable)) {
+      try { await applyDdl(database, [stmt]) } catch (e) {
+        skipped.add(stmt)
+        console.warn(`[spanner] index '${INDEX_NAME.exec(stmt)?.[1]}' NOT created — existing rows violate it, so it is not enforced: ${(e as Error).message}`)
+      }
+    }
+  }
+}
+
+const INDEX_NAME = /^CREATE (?:UNIQUE )?(?:NULL_FILTERED )?INDEX (\w+)/
+const INDEX_TABLE = / ON (\w+)\(/
+
+async function applyDdl(database: Database, statements: string[]): Promise<void> {
+  if (statements.length === 0) return
   try {
-    const [op] = await database.updateSchema(missing)
+    const [op] = await database.updateSchema(statements)
     await op.promise()
   } catch (e) {
     // A concurrent process created the same objects first

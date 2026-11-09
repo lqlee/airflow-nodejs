@@ -14,7 +14,9 @@ import { resolve as pathResolve, dirname } from 'node:path'
 import { createRedisConnection, QUEUE_NAME } from './connection.js'
 import { appendLog } from '../logs/index.js'
 import { xcomPush, xcomPull } from '../xcom/index.js'
+import type { Db } from 'mongodb'
 import type { TaskJobData } from './producer.js'
+import { INSTANCE_ID, startLiveness, shutdownLiveness } from '../scheduler/instance.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WORKER_SCRIPT = pathResolve(__dirname, '../scheduler/worker.ts')
@@ -24,6 +26,21 @@ const CONCURRENCY = Number(process.env.WORKER_CONCURRENCY ?? 4)
 
 let bullWorker: Worker<TaskJobData> | null = null
 
+/**
+ * Adopt the claim of a queued job: the scheduler marked the instance running under its own id; this
+ * process now owns it, so its heartbeat is what keeps the task from being reaped. Returns the filter
+ * that matches the instance only while this process still owns that running try (use it for result
+ * writes), or null when the claim changed since the job was queued (reaped, cancelled, re-claimed).
+ */
+export async function adoptClaim(db: Db, ti: TaskJobData['ti']): Promise<Record<string, unknown> | null> {
+  const tiKey = { dag_run_id: ti.dag_run_id, task_id: ti.task_id, map_index: ti.map_index ?? null }
+  const adopted = await db.collection('task_instances').updateOne(
+    { ...tiKey, state: 'running', claimed_by: ti.claimed_by ?? null, try_number: ti.try_number },
+    { $set: { claimed_by: INSTANCE_ID, started_at: new Date() } },
+  )
+  return adopted.matchedCount === 0 ? null : { ...tiKey, state: 'running', claimed_by: INSTANCE_ID }
+}
+
 async function processJob(job: Job<TaskJobData>): Promise<void> {
   const { ti, fn } = job.data
   const client = createDbClient()
@@ -32,11 +49,11 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
     await client.connect({ light: true })
     const db = client.db(DB_NAME)
 
-    // Mark task running
-    await db.collection('task_instances').updateOne(
-      { dag_run_id: ti.dag_run_id, task_id: ti.task_id },
-      { $set: { state: 'running', started_at: new Date() } }
-    )
+    const owned = await adoptClaim(db, ti)
+    if (!owned) {
+      console.warn(`[worker] skipping stale job ${job.id}: ${ti.dag_id}.${ti.task_id} is no longer running under the claim that queued it`)
+      return
+    }
 
     // Fork the worker script
     await new Promise<void>((resolve, reject) => {
@@ -64,7 +81,7 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
         if (msg.type !== 'done') return
         if (msg.success) {
           await db.collection('task_instances').updateOne(
-            { dag_run_id: ti.dag_run_id, task_id: ti.task_id },
+            owned,
             { $set: { state: 'success', ended_at: new Date() } }
           )
           console.log(`[worker] ✓ ${ti.dag_id}.${ti.task_id}`)
@@ -74,13 +91,13 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
           if (ti.try_number < ti.max_retries) {
             // Requeue for retry
             await db.collection('task_instances').updateOne(
-              { dag_run_id: ti.dag_run_id, task_id: ti.task_id },
+              owned,
               { $set: { state: 'queued', started_at: null, ended_at: null, error }, $inc: { try_number: 1 } }
             )
             console.warn(`[worker] ↩ ${ti.dag_id}.${ti.task_id} retrying (${ti.try_number + 1}/${ti.max_retries + 1})`)
           } else {
             await db.collection('task_instances').updateOne(
-              { dag_run_id: ti.dag_run_id, task_id: ti.task_id },
+              owned,
               { $set: { state: 'failed', ended_at: new Date(), error } }
             )
             console.error(`[worker] ✗ ${ti.dag_id}.${ti.task_id}: ${error}`)
@@ -91,7 +108,7 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
 
       child.on('error', async (err) => {
         await db.collection('task_instances').updateOne(
-          { dag_run_id: ti.dag_run_id, task_id: ti.task_id },
+          owned,
           { $set: { state: 'failed', ended_at: new Date(), error: err.message } }
         )
         reject(err)
@@ -133,6 +150,20 @@ export async function stopWorker(): Promise<void> {
 
 // Allow running as standalone: npx tsx src/queue/consumer.ts
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  // A standalone worker owns the tasks it adopts, so it must heartbeat (never leads the scheduler)
+  const livenessClient = createDbClient()
+  await livenessClient.connect({ light: true })
+  const livenessDb = livenessClient.db(DB_NAME)
+  await startLiveness(livenessDb, { lease: false, role: 'worker' })
   startWorker()
-  console.log('[worker] standalone mode — Ctrl+C to stop')
+  console.log(`[worker] standalone mode (${INSTANCE_ID}) — Ctrl+C to stop`)
+
+  const stop = async () => {
+    await stopWorker()   // waits for active jobs
+    await shutdownLiveness(livenessDb)
+    await livenessClient.close()
+    process.exit(0)
+  }
+  process.once('SIGTERM', () => void stop())
+  process.once('SIGINT', () => void stop())
 }

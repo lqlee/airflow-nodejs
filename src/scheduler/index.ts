@@ -4,7 +4,12 @@ import { getDag, listDags } from '../dag/registry.js'
 import { claimReadyTasks, skipUnsatisfiableTasks, applyBranchDecisions, applyShortCircuitDecisions, expandDynamicMapped } from './claim.js'
 import { pollDeferredTasks } from './executor.js'
 import { executeTask } from './executor.js'
-import { syncCronJobs, stopAllCronJobs, tickTimetables, tickCatchup } from './cron.js'
+import { syncCronJobs, stopAllCronJobs, tickTimetables, tickCatchup, resetAllTimetables } from './cron.js'
+import { isLeader } from './lease.js'
+import type { DagDefinition } from '../dag/types.js'
+import { startLiveness, stopLiveness } from './instance.js'
+import { reapZombies } from './zombies.js'
+import { maybePurge } from '../db/cleanup.js'
 import { checkSlaBreaches } from '../sla/index.js'
 import { emitOutlets, triggerDatasetConsumers } from '../datasets/index.js'
 import { createRun } from './runs.js'
@@ -21,9 +26,12 @@ let timer: ReturnType<typeof setInterval> | null = null
 /**
  * Set to true during graceful shutdown so advanceRun's claim loop bails
  * rather than forking new child processes after SIGTERM is received.
- * Rows left as queued/running are recovered by recoverOrphanedRuns() on next boot.
+ * Rows left running are handed back by releaseOwnedTasks() (graceful exit) or reaped as zombies.
  */
 let _shuttingDown = false
+
+/** Leadership seen by the previous tick — losing it resets leader-only in-memory state. */
+let _wasLeader = false
 
 /** Exposed for graceful shutdown and testing. */
 export function setShuttingDown(value: boolean): void {
@@ -36,10 +44,12 @@ export function isShuttingDown(): boolean {
 
 export function startScheduler(db: Db): void {
   _shuttingDown = false
+  _wasLeader = false
   console.log(`[scheduler] starting — polling every ${POLL_INTERVAL_MS / 1000}s`)
 
-  void tick(db)
+  // Register + heartbeat + leader election first, so the first tick already knows whether it leads
   timer = setInterval(() => void tick(db), POLL_INTERVAL_MS)
+  void startLiveness(db, { lease: true }).then(() => { if (timer) void tick(db) })
 }
 
 export function stopScheduler(): void {
@@ -48,6 +58,7 @@ export function stopScheduler(): void {
     clearInterval(timer)
     timer = null
   }
+  stopLiveness()
   stopAllCronJobs()
   console.log('[scheduler] stopped')
 }
@@ -57,8 +68,30 @@ async function tick(db: Db): Promise<void> {
   let ok = true
   try {
     await loadDags(db)
-    const dags = listDags()
+    await runTickWork(db, listDags())
+  } catch (err) {
+    ok = false
+    console.error('[scheduler] tick error:', err)
+  } finally {
+    recordSchedulerTick((performance.now() - startedAt) / 1000, ok)
+  }
+}
 
+/**
+ * One scheduler pass over the loaded Dags (everything a tick does after reloading Dag files).
+ * Exported for tests — the tick itself reloads the registry from DAG_DIR.
+ */
+export async function runTickWork(db: Db, dags: DagDefinition[]): Promise<void> {
+  // Work that CREATES runs or changes task state on a timer runs on one replica only (the leader).
+  // Every replica advances runs below — claims are atomic per task instance.
+  const leader = isLeader()
+  if (!leader && _wasLeader) {
+    stopAllCronJobs()
+    resetAllTimetables()
+  }
+  _wasLeader = leader
+
+  if (leader) {
     // Sync cron jobs whenever dags reload (picks up schedule changes)
     syncCronJobs(db, dags)
 
@@ -74,28 +107,29 @@ async function tick(db: Db): Promise<void> {
     // Check SLA breaches for all active runs
     await checkSlaBreaches(db, dags)
 
-    // Advance any active runs — cancelled/success/failed are excluded.
-    // Runs belonging to paused backfills are also excluded (resume re-enables them).
-    const pausedBackfillIds = [...(await getPausedBackfillIds(db))]
-    const activeRuns = await db
-      .collection('dag_runs')
-      .find(buildActiveRunFilter(pausedBackfillIds))
-      .sort({ ordering_date: 1, created_at: 1 })   // timeline order — with maxActiveRuns + depends_on_past an
-      // earlier-dated run must get the slot before a later-dated one that waits on it
-      .toArray()
+    // Running tasks whose owner process stopped heartbeating → retry / fail
+    await reapZombies(db)
 
-    for (const run of activeRuns) {
-      await advanceRun(db, run._id.toString())
-    }
-
-    // Trigger dataset-aware consumers whose datasets have new events
-    await triggerDatasetConsumers(db, dags, createRun, isDagPaused)
-  } catch (err) {
-    ok = false
-    console.error('[scheduler] tick error:', err)
-  } finally {
-    recordSchedulerTick((performance.now() - startedAt) / 1000, ok)
+    // Retention purge (RETENTION_DAYS) — throttled internally, never throws
+    await maybePurge(db)
   }
+
+  // Advance any active runs — cancelled/success/failed are excluded.
+  // Runs belonging to paused backfills are also excluded (resume re-enables them).
+  const pausedBackfillIds = [...(await getPausedBackfillIds(db))]
+  const activeRuns = await db
+    .collection('dag_runs')
+    .find(buildActiveRunFilter(pausedBackfillIds))
+    .sort({ ordering_date: 1, created_at: 1 })   // timeline order — with maxActiveRuns + depends_on_past an
+    // earlier-dated run must get the slot before a later-dated one that waits on it
+    .toArray()
+
+  for (const run of activeRuns) {
+    await advanceRun(db, run._id.toString())
+  }
+
+  // Trigger dataset-aware consumers whose datasets have new events
+  if (leader) await triggerDatasetConsumers(db, dags, createRun, isDagPaused)
 }
 
 /**
@@ -131,8 +165,8 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
   // Claim all currently-ready tasks and execute in parallel.
   // After each wave, skip any tasks whose trigger rule can never be satisfied.
   // Re-check cancellation and shutdown flag before each wave.
-  // On shutdown: bail without forking new children — recoverOrphanedRuns()
-  // will re-claim any queued/running rows on next boot.
+  // On shutdown: bail without forking new children — the claimed rows are handed
+  // back to the queue by releaseOwnedTasks() before the process exits.
   let claimed = timedOut ? [] : await claimReadyTasks(db, dagRunId)
   while (claimed.length > 0) {
     if (_shuttingDown) return

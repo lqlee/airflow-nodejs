@@ -242,11 +242,11 @@ describe('ctx.log integration', () => {
     register(dag)
     const runId = await createRun(db, dag)
     for (let i = 0; i < 15; i++) await advanceRun(db, runId)
-    await new Promise(r => setTimeout(r, 500))
 
-    const infoLogs = await db.collection('task_logs')
-      .find({ dag_run_id: runId, task_id: 'step', level: 'info' })
-      .toArray()
+    const infoLogs = await waitFor(
+      () => db.collection('task_logs').find({ dag_run_id: runId, task_id: 'step', level: 'info' }).toArray(),
+      logs => logs.some(l => (l.line as string).includes('"records":42')),
+    )
     expect(infoLogs.some(l => (l.line as string).includes('"records":42'))).toBe(true)
   })
 })

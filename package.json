@@ -30,7 +30,8 @@
     "//prepare": "runs tsc build when installed as a git dependency (for wcnp node_modules inclusion)",
     "prepare": "npm run build",
     "test:spanner": "vitest run -c vitest.spanner.config.ts",
-    "spanner:ddl": "tsx src/db/spanner/print-ddl.ts"
+    "spanner:ddl": "tsx src/db/spanner/print-ddl.ts",
+    "db:cleanup": "node dist/db/cleanup-cli.js"
   },
   "dependencies": {
     "@fastify/multipart": "^10.1.0",

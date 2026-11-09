@@ -1,5 +1,6 @@
 import { ObjectId, type Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
+import { INSTANCE_ID } from './instance.js'
 
 // Terminal states — a task is done once it reaches one of these
 // 'deferred' is non-terminal but not claimable — polled separately by pollDeferredTasks
@@ -228,7 +229,8 @@ export async function claimReadyTasks(
     // Atomically claim this specific instance
     const claimed_inst = await db.collection<TaskInstance>('task_instances').findOneAndUpdate(
       { dag_run_id: dagRunId, task_id: inst.task_id, map_index: inst.map_index ?? null, state: 'queued' },
-      { $set: { state: 'running', started_at: new Date() } },
+      // claimed_by: the owner whose heartbeat keeps this task from being reaped as a zombie
+      { $set: { state: 'running', started_at: new Date(), claimed_by: INSTANCE_ID } },
       { returnDocument: 'after' },
     )
     if (claimed_inst) {

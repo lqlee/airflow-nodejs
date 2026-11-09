@@ -15,21 +15,23 @@ export type ColType = 'string' | 'float64' | 'bool' | 'timestamp'
 export interface TableSchema {
   collection: string
   columns: Array<{ name: string; type: ColType }>
-  indexes: Array<{ name: string; columns: string[]; unique?: boolean }>
+  /** nullFiltered: rows with a NULL in any indexed column are left out (GoogleSQL NULL_FILTERED) —
+   *  needed for "unique when set" constraints, since Spanner unique indexes treat NULLs as equal. */
+  indexes: Array<{ name: string; columns: string[]; unique?: boolean; nullFiltered?: boolean }>
 }
 
 const S = (name: string) => ({ name, type: 'string' as const })
 const N = (name: string) => ({ name, type: 'float64' as const })
 const B = (name: string) => ({ name, type: 'bool' as const })
 const T = (name: string) => ({ name, type: 'timestamp' as const })
-const idx = (collection: string, columns: string[], unique = false) =>
-  ({ name: `${collection}_${columns.join('_')}${unique ? '_uq' : ''}`.slice(0, 120), columns, unique })
+const idx = (collection: string, columns: string[], unique = false, nullFiltered = false) =>
+  ({ name: `${collection}_${columns.join('_')}${unique ? '_uq' : ''}`.slice(0, 120), columns, unique, nullFiltered })
 
 export const SCHEMAS: TableSchema[] = [
   {
     collection: 'dag_runs',
     columns: [S('dag_id'), S('state'), T('created_at'), T('ordering_date'), T('logical_date'), T('run_after'), S('backfill_id'), S('trigger_type')],
-    indexes: [idx('dag_runs', ['dag_id', 'state']), idx('dag_runs', ['state']), idx('dag_runs', ['dag_id', 'ordering_date']), idx('dag_runs', ['dag_id', 'logical_date']), idx('dag_runs', ['dag_id', 'created_at']), idx('dag_runs', ['backfill_id']), idx('dag_runs', ['run_after'])],
+    indexes: [idx('dag_runs', ['dag_id', 'state']), idx('dag_runs', ['state']), idx('dag_runs', ['dag_id', 'ordering_date']), idx('dag_runs', ['dag_id', 'logical_date']), idx('dag_runs', ['dag_id', 'logical_date'], true, true), idx('dag_runs', ['dag_id', 'created_at']), idx('dag_runs', ['backfill_id']), idx('dag_runs', ['run_after'])],
   },
   {
     collection: 'task_instances',
@@ -49,6 +51,8 @@ export const SCHEMAS: TableSchema[] = [
   { collection: 'dag_versions', columns: [S('dag_id'), S('version'), T('first_seen')], indexes: [idx('dag_versions', ['dag_id', 'version'], true), idx('dag_versions', ['dag_id', 'first_seen'])] },
   { collection: 'pools', columns: [S('name')], indexes: [idx('pools', ['name'], true)] },
   { collection: 'backfills', columns: [S('dag_id'), S('state'), T('created_at')], indexes: [idx('backfills', ['dag_id', 'created_at']), idx('backfills', ['state'])] },
+  { collection: 'scheduler_instances', columns: [T('heartbeat_at')], indexes: [idx('scheduler_instances', ['heartbeat_at'])] },
+  { collection: 'scheduler_leases', columns: [], indexes: [] },
   { collection: 'event_logs', columns: [S('dag_id'), S('dag_run_id'), S('event_type'), T('created_at')], indexes: [idx('event_logs', ['dag_id', 'created_at']), idx('event_logs', ['dag_run_id', 'created_at']), idx('event_logs', ['event_type', 'created_at'])] },
 ]
 
@@ -60,10 +64,10 @@ const SQL_TYPE: Record<ColType, string> = { string: 'STRING(2048)', float64: 'FL
 export function buildDdl(): string[] {
   const out: string[] = []
   for (const s of SCHEMAS) {
-    const cols = s.columns.map(c => `  ${c.name} ${SQL_TYPE[c.type]}`).join(',\n')
-    out.push(`CREATE TABLE ${s.collection} (\n  ns STRING(128) NOT NULL,\n  id STRING(64) NOT NULL,\n  doc STRING(MAX) NOT NULL,\n${cols}\n) PRIMARY KEY (ns, id)`)
+    const cols = ['  ns STRING(128) NOT NULL', '  id STRING(64) NOT NULL', '  doc STRING(MAX) NOT NULL', ...s.columns.map(c => `  ${c.name} ${SQL_TYPE[c.type]}`)]
+    out.push(`CREATE TABLE ${s.collection} (\n${cols.join(',\n')}\n) PRIMARY KEY (ns, id)`)
     for (const i of s.indexes) {
-      out.push(`CREATE ${i.unique ? 'UNIQUE ' : ''}INDEX ${i.name} ON ${s.collection}(ns, ${i.columns.join(', ')})`)
+      out.push(`CREATE ${i.unique ? 'UNIQUE ' : ''}${i.nullFiltered ? 'NULL_FILTERED ' : ''}INDEX ${i.name} ON ${s.collection}(ns, ${i.columns.join(', ')})`)
     }
   }
   return out

@@ -1,12 +1,13 @@
 /**
  * OpenAPI 3.1 document generated from the registered Fastify routes.
  *
- * Covers paths, methods, path parameters, tags (first path segment), auth requirements and
- * the minimum role per operation. It does NOT describe request/response bodies — routes
- * carry no schemas — so treat it as an index of the API, not a typed contract.
+ * Covers paths, methods, path parameters, tags (first path segment), auth requirements, the minimum
+ * role per operation, and — from openapi-schemas.ts — query parameters and request bodies.
+ * Response bodies are not described.
  */
 import type { FastifyInstance } from 'fastify'
 import { AUTH_ENABLED, isPublicPath, requiredRoleForRoute, type Role } from '../auth/index.js'
+import { OPERATION_DOCS, type OperationDoc } from './openapi-schemas.js'
 
 export interface RouteInfo {
   method: string
@@ -14,7 +15,8 @@ export interface RouteInfo {
   requiredRole?: Role
 }
 
-const BODY_METHODS = new Set(['post', 'put', 'patch'])
+export const BODY_METHODS = new Set(['post', 'put', 'patch'])
+const ERROR_SCHEMA = { type: 'object', properties: { error: { type: 'string' } }, required: ['error'] }
 
 /** Convert Fastify `:param` segments to OpenAPI `{param}`; returns the param names too. */
 export function toOpenApiPath(url: string): { path: string; params: string[] } {
@@ -23,7 +25,11 @@ export function toOpenApiPath(url: string): { path: string; params: string[] } {
   return { path, params }
 }
 
-export function buildOpenApiDocument(routes: RouteInfo[], opts: { title: string; version: string; authEnabled: boolean }) {
+export function buildOpenApiDocument(
+  routes: RouteInfo[],
+  opts: { title: string; version: string; authEnabled: boolean; docs?: Record<string, OperationDoc> },
+) {
+  const docs = opts.docs ?? OPERATION_DOCS
   const paths: Record<string, Record<string, unknown>> = {}
   for (const r of routes) {
     const method = r.method.toLowerCase()
@@ -32,17 +38,26 @@ export function buildOpenApiDocument(routes: RouteInfo[], opts: { title: string;
     const role = requiredRoleForRoute(method, path, r.requiredRole)
     const isPublic = isPublicPath(path)
     const segment = path.split('/').filter(Boolean)[0] ?? 'root'
+    const doc = docs[`${method.toUpperCase()} ${r.url}`]
 
     const operation: Record<string, unknown> = {
       operationId: `${method}_${path.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'root'}`,
+      ...(doc?.summary ? { summary: doc.summary } : {}),
       tags: [segment],
-      parameters: params.map(name => ({ name, in: 'path', required: true, schema: { type: 'string' } })),
+      parameters: [
+        ...params.map(name => ({ name, in: 'path', required: true, schema: { type: 'string' } })),
+        ...Object.entries(doc?.query ?? {}).map(([name, { description, ...schema }]) =>
+          ({ name, in: 'query', required: false, ...(description ? { description } : {}), schema })),
+      ],
       responses: {
         '200': { description: 'Success' },
+        ...(doc?.body || doc?.query ? { '400': { description: 'Invalid input', content: { 'application/json': { schema: ERROR_SCHEMA } } } } : {}),
         ...(opts.authEnabled && !isPublic ? { '401': { description: 'Missing or invalid credentials' }, '403': { description: `Requires the '${role}' role` } } : {}),
       },
     }
-    if (BODY_METHODS.has(method)) operation.requestBody = { required: false, content: { 'application/json': { schema: { type: 'object' } } } }
+    if (doc?.body) operation.requestBody = { required: true, content: { 'application/json': { schema: doc.body } } }
+    else if (doc?.content) operation.requestBody = { required: true, content: doc.content }
+    else if (BODY_METHODS.has(method) && !doc?.noBody) operation.requestBody = { required: false, content: { 'application/json': { schema: { type: 'object' } } } }
     if (opts.authEnabled && !isPublic) {
       operation.security = [{ bearerAuth: [] }]
       operation['x-required-role'] = role

@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { MongoClient, type Db } from 'mongodb'
 import { buildServer } from '../server.js'
-import { buildOpenApiDocument, toOpenApiPath } from '../openapi.js'
+import { buildOpenApiDocument, toOpenApiPath, BODY_METHODS } from '../openapi.js'
+import { OPERATION_DOCS } from '../openapi-schemas.js'
 import type { FastifyInstance } from 'fastify'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
@@ -82,6 +83,33 @@ describe('GET /openapi.json', () => {
     for (const p of ['/dags', '/dags/{dagId}', '/dags/{dagId}/trigger', '/dags/{dagId}/tasks', '/metrics', '/health', '/api-keys', '/openapi.json']) {
       expect(doc.paths[p], p).toBeDefined()
     }
+  })
+
+  it('documents typed request bodies, query parameters and file uploads', async () => {
+    const doc = (await app.inject({ method: 'GET', url: '/openapi.json' })).json()
+    const trigger = doc.paths['/dags/{dagId}/trigger'].post
+    expect(Object.keys(trigger.requestBody.content['application/json'].schema.properties)).toEqual(['conf', 'tags', 'note'])
+    expect(doc.paths['/dags/{dagId}/backfill'].post.requestBody.content['application/json'].schema.required).toEqual(['start', 'end'])
+    expect(doc.paths['/hitl/{runId}/{taskId}'].post.requestBody.content['application/json'].schema.properties.decision.enum).toEqual(['approve', 'reject'])
+
+    const runsQuery = doc.paths['/dags/{dagId}/runs'].get.parameters.filter((p: { in: string }) => p.in === 'query').map((p: { name: string }) => p.name)
+    expect(runsQuery).toEqual(['limit', 'cursor', 'tag'])
+    expect(doc.paths['/dags/{dagId}/runs'].get.responses['400']).toBeDefined()
+
+    expect(doc.paths['/images/upload'].post.requestBody.content['multipart/form-data']).toBeDefined()
+    expect(doc.paths['/dags/{dagId}/pause'].post.requestBody).toBeUndefined()   // documented as taking no body
+  })
+
+  it('every write route is documented, and every documented operation exists', async () => {
+    const doc = (await app.inject({ method: 'GET', url: '/openapi.json' })).json()
+    const served = new Set(Object.entries(doc.paths).flatMap(([p, ops]) => Object.keys(ops as object).map(m => `${m.toUpperCase()} ${p}`)))
+    const documented = new Set(Object.keys(OPERATION_DOCS).map(k => { const [m, url] = k.split(' '); return `${m} ${toOpenApiPath(url).path}` }))
+
+    const stale = [...documented].filter(op => !served.has(op))
+    expect(stale, 'entries in openapi-schemas.ts with no matching route').toEqual([])
+
+    const undocumentedWrites = [...served].filter(op => BODY_METHODS.has(op.split(' ')[0].toLowerCase()) && !documented.has(op))
+    expect(undocumentedWrites, 'POST/PUT/PATCH routes missing from openapi-schemas.ts (add a body or noBody: true)').toEqual([])
   })
 
   it('routes from across the route modules appear in the document', async () => {

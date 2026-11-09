@@ -1,7 +1,7 @@
 import cronParser from 'cron-parser'
 import { ObjectId, type Db } from 'mongodb'
 import type { DagDefinition } from '../dag/types.js'
-import { createRun } from './runs.js'
+import { createRun, DuplicateRunError } from './runs.js'
 
 export const BACKFILL_MAX_RUNS = 500
 
@@ -134,13 +134,19 @@ export async function backfill(
       skipped++
       continue
     }
-    const runId = await createRun(db, dag, {
-      logicalDate: date,
-      tags: ['backfill'],
-      triggerType: 'backfill',
-      backfillId,
-    })
-    created.push(runId)
+    try {
+      const runId = await createRun(db, dag, {
+        logicalDate: date,
+        tags: ['backfill'],
+        triggerType: 'backfill',
+        backfillId,
+      })
+      created.push(runId)
+    } catch (err) {
+      // A scheduler created this date between our existence check and the insert
+      if (!(err instanceof DuplicateRunError)) throw err
+      skipped++
+    }
   }
 
   // Update the backfill doc with final counts and run list

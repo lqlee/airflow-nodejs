@@ -1,8 +1,8 @@
 # airflow-nodejs
 
-A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB**, built to be lightweight, self-contained, and deployable as a single Docker image.
+A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB (or Cloud Spanner)**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-935 tests · 16 API route modules · multi-user RBAC · Docker-ready
+1,300+ tests · 18 API route modules · multi-user RBAC · multi-replica safe · Docker-ready
 
 ---
 
@@ -248,12 +248,19 @@ GET  /config | /config/:section                runtime configuration (admin only
 ## Architecture
 
 ```
+Liveness loop (HEARTBEAT_INTERVAL_MS)
+  ├── Heartbeat          scheduler_instances.heartbeat_at for this process
+  └── Leader lease       scheduler_leases — one replica leads at a time
+
 Scheduler loop (5s poll)
   ├── Dag loader         scans dags/ every tick, registers in memory
   │     └── analyzeWarnings()   soft validation (missing run logic, cycles, etc.)
-  ├── Cron scheduler     node-cron fires runs on schedule
+  ├── Leader only        cron, catch-up, timetables, deferred polling, SLA,
+  │                      dataset triggers, zombie reaping, retention purge
+  ├── Cron scheduler     node-cron fires runs on schedule (logical_date = fire time)
   ├── Claim              atomic findOneAndUpdate (safe for concurrent schedulers)
   │     └── Gates: dependency, sensor poke_at, HITL approval, backfill pause
+  │     └── Stamps claimed_by = this process, so its heartbeat vouches for the task
   └── Executor
         ├── local mode   fork child_process per task
         │     ├── Resource pool semaphore (per-pool slot limit)
@@ -279,7 +286,27 @@ MongoDB collections:
   event_logs           audit trail
   sla_alerts           breach records
   api_keys             scrypt-hashed tokens + roles
+  scheduler_instances  process registry + heartbeats (zombie detection)
+  scheduler_leases     leader lease
 ```
+
+### Running several replicas
+
+Any number of replicas can share one database:
+
+- **Every replica** claims and executes tasks — a claim is an atomic per-task update.
+- **One replica (the leader)** creates scheduled work: cron, catch-up, timetables, dataset triggers,
+  deferred-task polling, SLA checks, zombie reaping and retention. Leadership is a lease renewed every
+  `HEARTBEAT_INTERVAL_MS`; if the leader dies, another replica takes over within `SCHEDULER_LEASE_TTL_MS`.
+- **One run per `(dag_id, logical_date)`** is enforced by a unique index, so a leadership hand-over or a
+  backfill racing the scheduler cannot create the same scheduled run twice. Manual runs have no logical date.
+- **Zombie tasks:** a task stays `running` only while the process that claimed it keeps heartbeating.
+  Once its owner is silent for `ZOMBIE_THRESHOLD_MS`, the task is retried (if it has retries left) or failed,
+  with the lost attempt recorded in its try history. A graceful shutdown hands its running tasks back
+  to the queue instead.
+
+Not covered: pods started by the Kubernetes executor keep running if the replica that launched them dies;
+the task is then retried elsewhere while the old pod finishes.
 
 ---
 
@@ -311,6 +338,12 @@ MongoDB collections:
 | `KUBERNETES_EXECUTOR` | _(unset)_ | Set to `true` to dispatch all tasks as K8s pods |
 | `KUBERNETES_NAMESPACE` | `default` | Kubernetes namespace for executor pods |
 | `KUBERNETES_IMAGE` | `airflow-nodejs:local` | Container image used by K8s executor pods |
+| `DB_BACKEND` | `mongo` | `mongo` or `spanner` (Cloud Spanner, GoogleSQL) |
+| `HEARTBEAT_INTERVAL_MS` | `10000` | How often each process heartbeats and the leader renews its lease |
+| `ZOMBIE_THRESHOLD_MS` | `60000` | Heartbeat age after which a task's owner counts as dead (min 3× interval) |
+| `SCHEDULER_LEASE_TTL_MS` | `30000` | Leader lease lifetime — failover time after a leader crash (min 2× interval) |
+| `RETENTION_DAYS` | _(unset)_ | Purge finished runs (and their tasks, tries, XComs, logs, events) older than this; unset = keep forever |
+| `RETENTION_INTERVAL_MS` | `3600000` | How often the leader runs the retention purge |
 
 ---
 
@@ -322,7 +355,11 @@ npm run dev:bullmq   # BullMQ distributed mode with hot reload
 npm run build        # compile TypeScript → dist/
 npm start            # production: node dist/main.js
 npm run worker       # standalone BullMQ worker: node dist/queue/consumer.js
-npm test             # run all 618 tests (requires MongoDB at localhost:27017)
+npm test             # run the test suite (requires MongoDB at localhost:27017)
+npm run test:spanner # run the same suite against the Spanner emulator (localhost:9010)
+npm run spanner:ddl  # print the Spanner DDL (for DBA-managed schemas)
+npm run db:cleanup -- --days 30 [--dry-run] [--batch-size 100]
+                     # purge finished runs older than N days (needs npm run build first)
 ```
 
 ---
@@ -835,11 +872,12 @@ Each test suite uses an isolated database (`airflow_test_*`) and cleans up after
 
 The server handles `SIGTERM` and `SIGINT` with a bounded drain sequence:
 
-1. Stop scheduler (no new ticks)
+1. Stop scheduler (no new ticks) and release the leader lease, so another replica takes over at once
 2. Close HTTP server (drain in-flight requests)
 3. Drain worker pool (wait for active forks + queue to reach 0)
-4. Close BullMQ queue and MongoDB connection
-5. Exit 0
+4. Close the BullMQ queue
+5. Hand any task this process still owns back to the queue (no retry spent), deregister the process
+6. Close the database connection and exit 0
 
 Timeout: 20s (`DRAIN_TIMEOUT_MS`). Second signal forces exit 1.
 

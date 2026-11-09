@@ -114,6 +114,8 @@ export interface TaskInstance {
   hitl_prompt: string | null                    // optional prompt text for the approver
   hitl_note: string | null                      // human-supplied note when responding
   hitl_responded_at: Date | null                // when the response was recorded
+  /** INSTANCE_ID of the process that claimed the running try (zombie detection). Absent on legacy rows. */
+  claimed_by?: string | null
 }
 
 export interface CreateRunOptions {
@@ -140,9 +142,18 @@ function positiveInt(n: number | undefined): number {
   return n !== undefined && Number.isFinite(n) && n >= 1 ? Math.floor(n) : 0
 }
 
+/** A run for this (dag_id, logical_date) already exists — another scheduler or a backfill made it. */
+export class DuplicateRunError extends Error {
+  constructor(readonly dagId: string, readonly logicalDate: Date) {
+    super(`Dag '${dagId}' already has a run for ${logicalDate.toISOString()}`)
+    this.name = 'DuplicateRunError'
+  }
+}
+
 /**
  * Create a dag_run + one task_instance per task for the given Dag.
  * Returns the run id (string).
+ * Throws DuplicateRunError when `logicalDate` is set and the Dag already has a run for it.
  */
 export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptions = {}): Promise<string> {
   const now = new Date()
@@ -161,6 +172,10 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
     ordering_date: opts.logicalDate ?? now,
     triggered_by: opts.triggeredBy ?? null,
     backfill_id: opts.backfillId ?? null,
+  }).catch((err: unknown) => {
+    // Unique (dag_id, logical_date) index — see ensureIndexes()
+    if (opts.logicalDate && (err as { code?: number }).code === 11000) throw new DuplicateRunError(dag.id, opts.logicalDate)
+    throw err
   })
   const runId = runResult.insertedId.toString()
 

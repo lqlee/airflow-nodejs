@@ -141,6 +141,18 @@ describe.each(backends)('%s backend contract', (name, open, enabled) => {
       await expect(col.insertOne(ti({ map_index: 0 }))).rejects.toMatchObject({ code: 11000 })
     })
 
+    it('unique-when-set index: one dag_run per (dag_id, logical_date), any number without a date', async () => {
+      const col = db.collection('dag_runs')
+      const date = new Date('2026-01-01T00:00:00Z')
+      await col.insertOne({ dag_id: 'd', logical_date: date, state: 'queued' })
+      await expect(col.insertOne({ dag_id: 'd', logical_date: date, state: 'queued' })).rejects.toMatchObject({ code: 11000 })
+      await col.insertOne({ dag_id: 'other', logical_date: date, state: 'queued' })
+      await col.insertMany([{ dag_id: 'd', logical_date: null, state: 'queued' }, { dag_id: 'd', logical_date: null, state: 'queued' }])
+      // Queries on the indexed columns must still see the rows the null-filtered index leaves out
+      expect(await col.countDocuments({ dag_id: 'd' })).toBe(3)
+      expect(await col.find({ dag_id: 'd', logical_date: null }).toArray()).toHaveLength(2)
+    })
+
     it('unique index: a racing upsert does not create two documents', async () => {
       const col = db.collection('dataset_watermarks')
       const f = { consumer_dag_id: 'c', dataset_uri: 'u' }

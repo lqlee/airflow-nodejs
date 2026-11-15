@@ -13,7 +13,7 @@ import type { FastifyInstance } from 'fastify'
 import { readFile } from 'node:fs/promises'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { listProviders, getProvider } from '../../providers/registry.js'
+import { listProviders } from '../../providers/registry.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PKG_PATH = resolve(__dirname, '../../../package.json')
@@ -105,14 +105,14 @@ export async function providersRoutes(app: FastifyInstance): Promise<void> {
     const name = decodeURIComponent(req.params.packageName)
 
     // Check local providers first
-    const localDef = getProvider(name)
+    const localDef = listProviders().find(p => p.name === name)
     if (localDef) {
       return reply.send({
         package_name: localDef.name,
         version: localDef.version,
         description: localDef.description,
-        operator_names: Object.keys(localDef.operators),
-        connection_types: localDef.connectionTypes,
+        operator_names: localDef.operator_names,
+        connection_types: localDef.connection_types,
         provider_type: 'local',
         source: 'dags/providers',
       })

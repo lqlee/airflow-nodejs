@@ -26,10 +26,13 @@ import { dagWarningsRoutes } from './routes/dag-warnings.js'
 import { configRoutes } from './routes/config.js'
 import { imagesRoutes } from './routes/images.js'
 import { metricsRoutes } from './routes/metrics.js'
+import { authRoutes } from './routes/auth.js'
 import { recordHttpRequest } from '../metrics/registry.js'
 import { activeWorkers, queueDepth } from '../scheduler/pool.js'
 import { authHook, AUTH_ENABLED, setDb } from '../auth/index.js'
 import { setupOpenApi } from './openapi.js'
+import { registerUiAssets } from './ui-assets.js'
+import { executionRoutes } from './routes/execution.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PUBLIC_DIR = resolve(__dirname, '../../public')
@@ -96,6 +99,8 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
 
   // Serve static assets; disable automatic Cache-Control so we control it via onSend.
   app.register(fastifyStatic, { root: PUBLIC_DIR, prefix: '/', cacheControl: false })
+  // React + the compiled UI (no CDN), and CSP / security headers on every response
+  registerUiAssets(app)
 
   // Set cache headers per resource type:
   // - index.html: no-store so browsers always fetch fresh HTML after image rebuild
@@ -127,6 +132,8 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
       }),
     )
 
+    app.register(authRoutes)
+    app.register(executionRoutes)
     app.register(dagsRoutes)
     app.register(dagRunsRoutes)
     app.register(taskActionsRoutes)

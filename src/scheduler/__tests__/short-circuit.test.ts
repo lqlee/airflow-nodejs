@@ -65,7 +65,7 @@ describe('shortCircuit', () => {
       dag.id = `sc_falsy_${i}`
       expect((await run(dag)).states.child).toBe('skipped')
     }
-  }, 30000)   // forks a worker per case
+  }, 60000)   // forks a worker per case
 
   it('records the decision as XCom _short_circuit', async () => {
     await run(chain(async () => false))

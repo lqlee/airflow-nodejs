@@ -32,6 +32,27 @@ const page = { limit: int('Page size'), cursor: str('Opaque cursor from the prev
 
 export const OPERATION_DOCS: Record<string, OperationDoc> = {
   // ── Dags ──
+  'GET /auth/session': { summary: 'Who am I: auth mode, role, user, CSRF token and the sign-in methods on offer' },
+  'GET /auth/login': { summary: 'Start the OIDC browser login (authorization code + PKCE) — redirects to the identity provider', query: { return_to: str('UI path to come back to (same-origin paths only)') } },
+  'GET /auth/callback': { summary: 'OIDC redirect target — exchanges the code, creates the session, redirects into the UI', query: { code: str(), state: str(), error: str() } },
+  'POST /auth/key-login': { summary: 'Exchange an API key for a UI session cookie', body: obj({ key: str() }, ['key']) },
+  'POST /auth/logout': { summary: 'End the UI session (needs X-CSRF-Token); returns the identity provider logout URL, if any', noBody: true },
+  // ── Execution API (workers; task token, not user auth) ──
+  'GET /execution/v1/context': { summary: 'Execution API: run conf, params, dates and mapValue of the token’s task instance' },
+  'POST /execution/v1/xcom/:key': { summary: 'Execution API: push an XCom as the token’s task instance', body: obj({ value: {} }) },
+  'GET /execution/v1/xcom/:taskId/:key': { summary: 'Execution API: pull an XCom from a task of the same run' },
+  'GET /execution/v1/connections/:connId': { summary: 'Execution API: a decrypted connection (DB, then the secrets backend)' },
+  'GET /execution/v1/variables/:key': { summary: 'Execution API: a variable value, and whether the worker must mask it' },
+  'POST /execution/v1/datasets': {
+    summary: 'Execution API: record the dataset events the task emitted',
+    body: obj({ events: { type: 'array', items: obj({ uri: str(), alias: str(), extra: { type: 'object', additionalProperties: true } }, ['uri']) } }, ['events']),
+  },
+  'POST /execution/v1/logs': {
+    summary: 'Execution API: append task log lines',
+    body: obj({ lines: { type: 'array', maxItems: 1000, items: obj({ stream: { enum: ['stdout', 'stderr'] }, line: str(), level: { enum: ['debug', 'info', 'warn', 'error'] } }, ['line']) } }, ['lines']),
+  },
+  'GET /execution/v1/task': { summary: 'Execution API: the task’s Dag file name and run-function source' },
+  'POST /execution/v1/token/refresh': { summary: 'Execution API: a fresh task token for the same running try', noBody: true },
   'GET /dags': { summary: 'List Dags', query: { tag: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }], description: 'Only Dags with this tag (repeatable)' } } },
   'POST /dags/:dagId/trigger': {
     summary: 'Trigger a manual run (conf is validated against the Dag params; defaults are merged in)',

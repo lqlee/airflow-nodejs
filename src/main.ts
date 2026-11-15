@@ -1,6 +1,7 @@
 import { connectDb, closeDb } from './db/client.js'
 import { ensureIndexes } from './db/indexes.js'
-import { loadDags } from './dag/loader.js'
+import { isProcessorEmbedded, maybeRunDagProcessor } from './dag/processor.js'
+import { syncDagsFromDb } from './dag/sync.js'
 import { startScheduler, stopScheduler } from './scheduler/index.js'
 import { releaseOwnedTasks } from './scheduler/zombies.js'
 import { shutdownLiveness, INSTANCE_ID } from './scheduler/instance.js'
@@ -21,7 +22,10 @@ async function main(): Promise<void> {
   // No startup recovery: tasks left running by a dead process are reaped as zombies once its
   // heartbeat goes stale (zombies.ts) — safe with several replicas sharing one database.
   console.log(`[main] instance ${INSTANCE_ID}`)
-  await loadDags(db)
+  // Parse Dag files in a child process into serialized_dags, then load those — this process never
+  // imports user code (DAG_PROCESSOR=external: a separate dag-processor process does the parsing)
+  if (isProcessorEmbedded()) await maybeRunDagProcessor(db, { force: true })
+  await syncDagsFromDb(db)
 
   startScheduler(db)
 

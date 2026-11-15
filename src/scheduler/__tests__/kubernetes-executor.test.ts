@@ -12,7 +12,7 @@
  *  - Does buildKubectlArgs produce correct pod name, image, namespace?
  *  - Are --restart Never, --rm, --attach flags present?
  *  - Are task identity env vars (K8S_EXEC_*) included?
- *  - Are MONGO_URL/DB_NAME passed to the pod env?
+ *  - Does the pod get EXECUTION_API_URL + a task token, and no DB credentials or keys?
  *  - Are optional fields (kubeconfig, context, serviceAccount, resources) forwarded?
  *  - Does the pod command end with `-- node dist/scheduler/worker-cli.js`?
  *  - Is USE_KUBERNETES_EXECUTOR toggled by env var?
@@ -30,6 +30,7 @@ import {
   USE_KUBERNETES_EXECUTOR,
 } from '../kubernetes-executor.js'
 import type { TaskInstance } from '../runs.js'
+import { verifyTaskToken } from '../../execution/token.js'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 let client: MongoClient
@@ -177,6 +178,23 @@ describe('buildKubectlArgs', () => {
     expect(envValues.some(v => v.startsWith('K8S_EXEC_DAG_ID=my_dag'))).toBe(true)
     expect(envValues.some(v => v.startsWith('K8S_EXEC_RUN_ID=run123'))).toBe(true)
     expect(envValues.some(v => v.startsWith('K8S_EXEC_TASK_ID=step1'))).toBe(true)
+  })
+
+  it('gives the pod the execution API and a token for this try — never DB credentials or keys', () => {
+    const saved = { ...process.env }
+    process.env.MONGO_URL = 'mongodb://secret:pw@db'
+    process.env.ENCRYPTION_KEYS = '5'.repeat(64)
+    try {
+      const ti = makeTi({ dag_id: 'my_dag', dag_run_id: 'run123', task_id: 'step1', try_number: 2 })
+      const args = buildKubectlArgs(ti, { ...cfg, executionApiUrl: 'http://airflow.svc:3000' })
+      const env = Object.fromEntries(args.flatMap((a, i) => a === '--env' ? [args[i + 1].split(/=(.*)/s).slice(0, 2)] : []))
+      expect(env.EXECUTION_API_URL).toBe('http://airflow.svc:3000')
+      expect(verifyTaskToken(env.EXECUTION_API_TOKEN)).toEqual({ dagId: 'my_dag', runId: 'run123', taskId: 'step1', mapIndex: null, tryNumber: 2 })
+      expect(Object.keys(env).filter(k => /MONGO|DB_NAME|ENCRYPTION|SPANNER/.test(k))).toEqual([])
+      expect(args.join(' ')).not.toContain('secret:pw')
+    } finally {
+      process.env = saved
+    }
   })
 
   it('command ends with -- node dist/scheduler/worker-cli.js', () => {

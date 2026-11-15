@@ -1,25 +1,26 @@
 /**
  * Worker process — runs a single task function in isolation.
- * Connects directly to MongoDB for XCom, Connections, Variables, and run conf.
- * Secrets are decrypted HERE in the worker — never passed as plaintext over IPC.
+ * Holds no database credentials: XCom, connections, variables, run conf and dataset events go through
+ * the execution API (execution/client.ts) — over IPC to the parent that forked it, or over HTTP with a
+ * task token when EXECUTION_API_URL / EXECUTION_API_TOKEN are set.
+ * Secrets are decrypted by the control plane and masked in everything this process prints.
  *
  * IPC protocol:
  *   parent → worker (regular task):   { type: 'run',  fn, ctx }
  *   parent → worker (sensor task):    { type: 'poke', fn, ctx }
  *   worker → parent:                  { type: 'done', outcome: 'success'|'reschedule'|'fail'|'deferred', error?, triggerFn?, deferInterval? }
+ *   worker ⇄ parent:                  { type: 'exec', … } / { type: 'exec-result', … }   (execution/ipc.ts)
  *
  * ctx includes: dagId, runId, taskId, mapIndex, mapValue
- * Injected in worker: conf (from DB), xcom, connections, variables, defer
+ * Injected in worker: conf, xcom, connections, variables, defer, log, emitDataset
  */
-import { createDbClient } from '../db/factory.js'
-import { xcomPush, xcomPull } from '../xcom/index.js'
-import { getConnectionRuntime } from '../connections/index.js'
-import { getVariableRuntime } from '../variables/index.js'
-import { getRunContextFields } from './run-conf.js'
-import { recordTaskDatasetEvents, type EmittedDataset } from '../datasets/index.js'
 import type { LogLevel } from '../logs/index.js'
+import { installStreamMasking, redact } from '../secrets/masker.js'
+import { executionClientFromEnv } from '../execution/client.js'
+import { buildApiTaskContext } from '../execution/task-context.js'
 
-const DB_NAME = process.env.DB_NAME ?? 'airflow'
+// Secrets the task reads (connections, secret variables) are masked in everything it prints
+installStreamMasking()
 
 type WorkerCtx = {
   dagId: string
@@ -45,36 +46,32 @@ class DeferSignal {
   ) {}
 }
 
+// ctx.log — structured logging with severity levels. Writes ONLY to stdout/stderr with a [LEVEL]
+// prefix; the parent captures the lines and stores them with the right level (parseLevelFromLine).
+const makeLogFn = (level: LogLevel, stream: 'stdout' | 'stderr') =>
+  (msg: unknown) => {
+    const line = typeof msg === 'string' ? msg : JSON.stringify(msg)
+    const prefixed = `[${level.toUpperCase()}] ${line}`
+    if (stream === 'stdout') process.stdout.write(prefixed + '\n')
+    else process.stderr.write(prefixed + '\n')
+  }
+
+const log = {
+  debug: makeLogFn('debug', 'stdout'),
+  info:  makeLogFn('info',  'stdout'),
+  warn:  makeLogFn('warn',  'stderr'),
+  error: makeLogFn('error', 'stderr'),
+}
+
 process.on('message', async (msg: WorkerMsg) => {
-  if (msg.type !== 'run' && msg.type !== 'poke') return
+  if (msg?.type !== 'run' && msg?.type !== 'poke') return
 
   const { fn, ctx } = msg
-  const client = createDbClient()
+  const api = executionClientFromEnv()
+  let result: Record<string, unknown> = { type: 'done', outcome: 'fail', error: 'worker did not finish' }
 
   try {
-    await client.connect({ light: true })
-    const db = client.db(DB_NAME)
-
-    // Trigger-time conf and the run's dates — read from DB, not IPC (conf could be large)
-    const runFields = await getRunContextFields(db, ctx.runId)
-
-    // XCom helpers — run-scoped; mapIndex threads through push for mapped instances
-    const xcom = {
-      push: (key: string, value: unknown) =>
-        xcomPush(db, ctx.runId, ctx.dagId, ctx.taskId, ctx.mapIndex, key, value),
-      pull: (fromTaskId: string, key: string) =>
-        xcomPull(db, ctx.runId, fromTaskId, key),
-    }
-
-    // Connection helper — global (not run-scoped); decrypts in worker
-    const connections = {
-      get: (connId: string) => getConnectionRuntime(db, connId),
-    }
-
-    // Variable helper — global (not run-scoped); decrypts secrets in worker
-    const variables = {
-      get: (key: string) => getVariableRuntime(db, key),
-    }
+    const { ctx: apiCtx, recordDatasets } = await buildApiTaskContext(api, ctx)
 
     // defer() — suspends the task and frees the worker slot.
     // Throws DeferSignal which is caught below and sent as 'deferred' outcome.
@@ -87,62 +84,28 @@ process.on('message', async (msg: WorkerMsg) => {
     }
 
     // eslint-disable-next-line no-new-func
-    const fn_ = new Function(`return (${fn})`)() as (
-      ctx: WorkerCtx & {
-        conf: Record<string, unknown>
-        xcom: typeof xcom
-        connections: typeof connections
-        variables: typeof variables
-        defer: typeof defer
-      }
-    ) => Promise<unknown>
+    const fn_ = new Function(`return (${fn})`)() as (ctx: unknown) => Promise<unknown>
 
-    // ctx.log — structured logging with severity levels.
-    // Writes ONLY to process stdout/stderr with a [LEVEL] prefix.
-    // The executor's readline handler captures these lines and stores them
-    // in the DB with the correct level (parseLevelFromLine detects the prefix).
-    // Single writer: executor readline → no double writes.
-    const makeLogFn = (level: LogLevel, stream: 'stdout' | 'stderr') =>
-      (msg: unknown) => {
-        const line = typeof msg === 'string' ? msg : JSON.stringify(msg)
-        const prefixed = `[${level.toUpperCase()}] ${line}`
-        if (stream === 'stdout') process.stdout.write(prefixed + '\n')
-        else process.stderr.write(prefixed + '\n')
-      }
-
-    const log = {
-      debug: makeLogFn('debug', 'stdout'),
-      info:  makeLogFn('info',  'stdout'),
-      warn:  makeLogFn('warn',  'stderr'),
-      error: makeLogFn('error', 'stderr'),
-    }
-
-    // Dataset events the task emits — recorded only once the run function succeeds
-    const emitted: EmittedDataset[] = []
-    const emitDataset = (uri: string, opts: { alias?: string; extra?: Record<string, unknown> } = {}) => {
-      emitted.push({ uri, ...opts })
-    }
-
-    const fullCtx = { ...ctx, ...runFields, xcom, connections, variables, defer, log, emitDataset }
+    const fullCtx = { ...apiCtx, ...ctx, defer, log }
 
     if (msg.type === 'poke') {
       const ready = await fn_(fullCtx) as boolean
-      process.send!({ type: 'done', outcome: ready ? 'success' : 'reschedule' })
+      result = { type: 'done', outcome: ready ? 'success' : 'reschedule' }
     } else {
       await fn_(fullCtx)
-      await recordTaskDatasetEvents(db, { dagId: ctx.dagId, runId: ctx.runId, taskId: ctx.taskId }, emitted)
-      process.send!({ type: 'done', outcome: 'success' })
+      await recordDatasets()
+      result = { type: 'done', outcome: 'success' }
     }
   } catch (err: unknown) {
     if (err instanceof DeferSignal) {
       // Task chose to defer — send triggerFn and interval back to parent
-      process.send!({ type: 'done', outcome: 'deferred', triggerFn: err.triggerFn, deferInterval: err.interval, deferTimeout: err.timeout })
+      result = { type: 'done', outcome: 'deferred', triggerFn: err.triggerFn, deferInterval: err.interval, deferTimeout: err.timeout }
     } else {
-      const error = err instanceof Error ? err.message : String(err)
-      process.send!({ type: 'done', outcome: 'fail', error })
+      result = { type: 'done', outcome: 'fail', error: redact(err instanceof Error ? err.message : String(err)) }
     }
   } finally {
-    await client.close()
-    process.exit(0)
+    api.close()
+    // Exit once the result is on its way to the parent
+    process.send!(result, () => process.exit(0))
   }
 })

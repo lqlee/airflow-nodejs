@@ -1,6 +1,7 @@
 /**
  * BullMQ Worker — can run on any machine with access to Redis + MongoDB.
- * Pulls task jobs from the queue and executes them.
+ * Pulls task jobs from the queue and runs each in a forked worker; the fork gets no database
+ * credentials and reaches the control plane through this process (execution API over IPC).
  *
  * Start with: npx tsx src/queue/consumer.ts
  * Or alongside the scheduler: the scheduler calls startWorker() on boot.
@@ -8,20 +9,17 @@
 import { Worker, type Job } from 'bullmq'
 import { createDbClient } from '../db/factory.js'
 import { createInterface } from 'node:readline'
-import { fork } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { resolve as pathResolve, dirname } from 'node:path'
 import { createRedisConnection, QUEUE_NAME } from './connection.js'
 import { appendLog } from '../logs/index.js'
-import { xcomPush, xcomPull } from '../xcom/index.js'
 import type { Db } from 'mongodb'
 import type { TaskJobData } from './producer.js'
 import { INSTANCE_ID, startLiveness, shutdownLiveness } from '../scheduler/instance.js'
 import { retryUpdate, successUpdate, failedUpdate } from '../scheduler/ti-writes.js'
+import { forkTaskWorker } from '../sandbox/fork.js'
+import { serveExecutionApi } from '../execution/ipc.js'
+import { taskScope } from '../execution/scope.js'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const WORKER_SCRIPT = pathResolve(__dirname, '../scheduler/worker.ts')
-const TSX_BIN = pathResolve(__dirname, '../../node_modules/.bin/tsx')
 const DB_NAME   = process.env.DB_NAME   ?? 'airflow'
 const CONCURRENCY = Number(process.env.WORKER_CONCURRENCY ?? 4)
 
@@ -58,11 +56,9 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
 
     // Fork the worker script
     await new Promise<void>((resolve, reject) => {
-      const child = fork(WORKER_SCRIPT, [], {
-        execPath: TSX_BIN,
-        env: { ...process.env },
-        silent: true,
-      })
+      // No database credentials in the worker: it reaches XCom, connections etc. through this process
+      const child = forkTaskWorker()
+      serveExecutionApi(child, db, taskScope(ti))
 
       const rl_out = createInterface({ input: child.stdout! })
       rl_out.on('line', (line) => {
@@ -78,14 +74,16 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
 
       child.send({ type: 'run', fn, ctx: { dagId: ti.dag_id, runId: ti.dag_run_id, taskId: ti.task_id, mapIndex: ti.map_index ?? null, mapValue: ti.map_value ?? null } })
 
-      child.on('message', async (msg: { type: string; success: boolean; error?: string }) => {
+      child.on('message', async (msg: { type: string; outcome?: string; error?: string }) => {
         if (msg.type !== 'done') return
-        if (msg.success) {
+        if (msg.outcome === 'success') {
           await db.collection('task_instances').updateOne(owned, successUpdate())
           console.log(`[worker] ✓ ${ti.dag_id}.${ti.task_id}`)
           resolve()
         } else {
-          const error = msg.error ?? 'unknown error'
+          const error = msg.outcome === 'fail' || !msg.outcome
+            ? (msg.error ?? 'unknown error')
+            : `outcome '${msg.outcome}' (sensors and ctx.defer()) is not supported by BullMQ workers`
           if (ti.try_number < ti.max_retries) {
             // Requeue for retry
             // up_for_retry with next_retry_at — the scheduler re-claims and re-enqueues once the delay passes

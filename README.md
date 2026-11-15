@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB (or Cloud Spanner)**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-1,450+ tests · 20 API route modules · multi-user RBAC · multi-replica safe · Docker-ready
+1,560+ tests · 22 API route modules · multi-user RBAC + OIDC SSO · multi-replica safe · user code isolated from the control plane · Docker-ready
 
 ---
 
@@ -16,7 +16,8 @@ A production-grade reimplementation of Apache Airflow's core concepts in **Node.
 | **Data flow** | XCom push/pull (full CRUD), connections store (encrypted), variables store (encrypted), per-run conf/tags/notes |
 | **Lifecycle** | Task and Dag callbacks / notifiers (functions, `{ notify }` objects, webhooks), templated fields with macros, Human-in-the-Loop (HITL) approval gates, clear (with downstream / upstream / failed only), re-run, mark task or run success / failed |
 | **Operations** | Graceful shutdown with worker drain, config API, providers API, plugins API |
-| **Auth** | Multi-user RBAC (viewer / editor / admin roles), scrypt-hashed DB-backed API keys, env-key fallback |
+| **Auth** | Multi-user RBAC (viewer / editor / admin roles), OIDC SSO for the UI (authorization code + PKCE) and OIDC bearer tokens for the API, scrypt-hashed DB-backed API keys, env-key fallback |
+| **Security** | Dag files parsed in a separate process into serialized Dags — the scheduler and API never import user code; callbacks and timetables run in a sandbox process; task workers hold no database credentials (execution API with task-scoped tokens); encryption key rotation; secret masking in task logs; Vault / Akeyless secrets backends; HttpOnly session cookie + CSRF token; strict Content-Security-Policy with React served locally |
 | **Versioning** | Dag version history (sha256 hash), source code snapshots, backfill_id linkage on runs |
 | **Docker** | 56 MB image, multi-stage build, Bun runtime, Walmart Artifactory registry |
 
@@ -105,6 +106,35 @@ curl -X POST http://localhost:3000/api-keys \
   -H "Authorization: Bearer $ADMIN_KEY" \
   -d '{"name": "ci-bot", "role": "editor"}'
 ```
+
+### OIDC (SSO)
+
+API clients can send an OIDC access token instead of an API key; the browser UI signs in through
+the identity provider. A claim maps users to roles:
+
+```bash
+OIDC_ISSUER=https://login.example.com/realms/data       # enables OIDC bearer tokens
+OIDC_ROLE_CLAIM=groups                                   # default roles; dotted paths ok (realm_access.roles)
+OIDC_ADMIN_VALUES=airflow-admins  OIDC_EDITOR_VALUES=airflow-editors  OIDC_VIEWER_VALUES=everyone
+OIDC_CLIENT_ID=airflow-nodejs                            # + this enables the UI's "Sign in with SSO"
+OIDC_CLIENT_SECRET=...                                   # only for a confidential client
+```
+
+The UI login is the authorization-code flow with PKCE (S256), `state` bound to the browser and a
+`nonce` checked in the ID token. The IdP must allow the redirect URI `https://<host>/auth/callback`
+(or set `OIDC_REDIRECT_URI`). Sign-out also ends the IdP session when it publishes an
+`end_session_endpoint`.
+
+### Browser sessions
+
+The UI never keeps a token or API key in the browser. Signing in (SSO, or pasting an API key once)
+creates a server-side session (`ui_sessions`, only its hash is stored) and an `HttpOnly`,
+`SameSite=Strict` cookie (`Secure` behind HTTPS). Every write from the UI carries an `X-CSRF-Token`
+header matching the session. Requests with `Authorization: Bearer …` (scripts, CI) are unaffected.
+
+Every response carries a strict `Content-Security-Policy` (`script-src 'self'`, no inline scripts,
+no CDN): React is served from the package's own `node_modules` and the UI is compiled from
+`src/ui/app.jsx` at build time (`npm run build` writes `dist/public/app.js`; `npm run dev` compiles on request).
 
 ---
 
@@ -285,6 +315,24 @@ DELETE /api-keys/:keyId                        revoke API key (admin only)
 GET  /providers                                installed npm runtime packages
 GET  /plugins                                  registered route modules
 GET  /config | /config/:section                runtime configuration (admin only)
+GET  /auth/session                             who am I + CSRF token + sign-in methods (UI)
+GET  /auth/login | /auth/callback              OIDC browser login (authorization code + PKCE)
+POST /auth/key-login | /auth/logout            API-key sign-in → session cookie; sign out
+```
+
+### Execution API (task workers only)
+
+Called by task workers with a task token (not a user credential) — see *Security model* below.
+
+```
+GET  /execution/v1/context                     run conf, params, dates, mapValue
+POST /execution/v1/xcom/:key                   push an XCom as this task instance
+GET  /execution/v1/xcom/:taskId/:key           pull an XCom from the same run
+GET  /execution/v1/connections/:connId         decrypted connection
+GET  /execution/v1/variables/:key              variable value (+ whether to mask it)
+POST /execution/v1/datasets | /logs            dataset events; task log lines
+GET  /execution/v1/task                        Dag file name + run-function source (Kubernetes pods)
+POST /execution/v1/token/refresh               fresh token for the same running try
 ```
 
 ---
@@ -296,9 +344,12 @@ Liveness loop (HEARTBEAT_INTERVAL_MS)
   ├── Heartbeat          scheduler_instances.heartbeat_at for this process
   └── Leader lease       scheduler_leases — one replica leads at a time
 
+Dag processor (leader, or `npm run dag-processor`)
+  └── on file change     parse child process imports every Dag file → serialized_dags,
+                         import errors + warnings → dag_processor (per-file timeout)
+
 Scheduler loop (5s poll)
-  ├── Dag loader         scans dags/ every tick, registers in memory
-  │     └── analyzeWarnings()   soft validation (missing run logic, cycles, etc.)
+  ├── Dag sync           loads changed serialized Dags from the DB (no user code imported)
   ├── Leader only        cron, catch-up, timetables, deferred polling, deadlines / SLA,
   │                      dataset triggers, zombie reaping, retention purge
   ├── Cron scheduler     node-cron fires runs on schedule (logical_date = fire time)
@@ -308,16 +359,19 @@ Scheduler loop (5s poll)
   │                 at most as many claims as this process has free workers (MAX_WORKERS)
   │     └── Stamps claimed_by = this process, so its heartbeat vouches for the task
   ├── Callbacks          results flag callback_pending; the scheduler fires each flag once (CAS)
+  ├── Sandbox process    runs callbacks, notifiers, timetables, deadline callbacks and deferred
+  │                      triggers for the scheduler (re-imports the Dag file, so closures work)
   └── Executor
-        ├── local mode   fork child_process per task
-        │     └── EXEC_PATH auto-detects dev (tsx) vs prod (node)
-        └── BullMQ mode  enqueue to Redis → worker picks up
+        ├── local mode   fork child_process per task (tsx loader in dev, node when built)
+        ├── BullMQ mode  enqueue to Redis → worker picks up and forks
+        └── Kubernetes   kubectl run per task → worker-cli in the pod
 
-Worker process (isolated)
+Worker process (isolated, no database credentials or encryption keys)
   ├── Injects: ctx.conf / params, run dates (ds, logicalDate, data interval), ctx.connections,
   │            ctx.variables, ctx.xcom, ctx.emitDataset
-  ├── Reads all state from MongoDB directly (never over IPC)
-  └── Reports outcome via IPC message → executor records try history
+  ├── Reaches all of them through the execution API — IPC to the forking process, or HTTP with a
+  │   task token from a Kubernetes pod
+  └── Reports outcome via IPC message / exit code → executor records try history
 
 MongoDB collections:
   dag_runs             each dag execution + state + backfill_id
@@ -340,7 +394,40 @@ MongoDB collections:
   scheduler_instances  process registry + heartbeats (zombie detection)
   scheduler_leases     leader lease
   claim_locks          short locks serializing claims per pool / capped task
+  serialized_dags      Dags as the Dag processor parsed them (functions as source)
+  dag_processor        last parse: import errors, warnings, provider records
+  ui_sessions          browser sessions + in-flight OIDC logins (hashed ids)
 ```
+
+### Security model
+
+What runs where — the Airflow 3 split, so a Dag author's code cannot reach the metadata database
+or the encryption keys:
+
+| Process | Runs user code? | Database / keys |
+|---|---|---|
+| API + scheduler | **No** — reads serialized Dags | yes |
+| Dag parse child (per parse) | yes — imports Dag files and providers | **no** |
+| Sandbox (callbacks, timetables, triggers) | yes | **no** |
+| Task worker (fork, BullMQ fork, Kubernetes pod) | yes | **no** — execution API only |
+
+- **Dag processor.** Dag files are imported only in a short-lived child process; the result is
+  stored as JSON in `serialized_dags` (functions as their source). The scheduler and API rebuild Dags
+  from it — every function is a stub that cannot run in-process. A file that fails to import keeps
+  its last good Dags and shows an import error; a file that hangs past `DAG_PARSE_TIMEOUT_MS` or
+  crashes the child is reported and skipped. Values that cannot be serialized (class instances,
+  `Map`, bound functions) are import errors.
+- **Sandbox.** Callbacks, notifiers, timetables, deadline callbacks and deferred-task triggers run
+  in one long-lived child process that re-imports the Dag file (closures over the file's imports
+  work). A call that blocks it past `SANDBOX_CALL_TIMEOUT_MS` gets the process replaced.
+- **Execution API.** Workers get no `MONGO_URL` / Spanner settings / `ENCRYPTION_KEYS` / API keys.
+  Forked workers call their parent over IPC; Kubernetes pods call `/execution/v1/*` with a JWT scoped
+  to one try of one task instance (`EXECUTION_TOKEN_TTL_MS`, refreshed while the task runs). Every
+  call checks that this try is still running, so a token dies with its attempt. Tokens are signed
+  with `EXECUTION_API_SECRET`, else a key derived from `ENCRYPTION_KEYS`.
+- **Secrets.** Connections and secret variables are decrypted by the control plane and masked as
+  `***` in task logs (worker output and stored lines), including JSON-escaped and URL-encoded forms.
+
 
 ### Task instance states
 
@@ -386,7 +473,7 @@ the task is then retried elsewhere while the old pod finishes.
 |----------|---------|-------------|
 | `MONGO_URL` | `mongodb://localhost:27017` | MongoDB connection URL |
 | `DB_NAME` | `airflow` | MongoDB database name |
-| `ENCRYPTION_KEY` | _(required for secrets)_ | 64 hex chars — AES-256-GCM key for connections/variables |
+| `ENCRYPTION_KEYS` | _(required for secrets)_ | Comma-separated 64-hex-char AES-256-GCM keys; the first encrypts, all decrypt (rotation). `ENCRYPTION_KEY` (one key) still works |
 | `API_KEYS` | _(unset)_ | Comma-separated static API keys (all have admin role) |
 | `ADMIN_KEY` | _(unset)_ | Bootstrap admin key for DB-backed key management |
 | `REDIS_URL` | _(unset)_ | Redis URL — enables BullMQ distributed mode |
@@ -403,7 +490,7 @@ the task is then retried elsewhere while the old pod finishes.
 | `GLOBAL_FAILURE_WEBHOOK` | _(unset)_ | Generic JSON webhook — fires on every failure run |
 | `LOG_BACKEND` | `file` | Task log storage: `file` (default) or `mongodb` |
 | `LOG_DIR` | `./logs` | Directory for task log files (when `LOG_BACKEND=file`) |
-| `SECRETS_BACKEND` | `none` | Secrets fallback: `none`, `env`, `file` |
+| `SECRETS_BACKEND` | `none` | Secrets fallback: `none`, `env`, `file`, `vault`, `akeyless` |
 | `SECRETS_FILE_PATH` | _(unset)_ | Path to secrets JSON file (when `SECRETS_BACKEND=file`) |
 | `KUBERNETES_EXECUTOR` | _(unset)_ | Set to `true` to dispatch all tasks as K8s pods |
 | `KUBERNETES_NAMESPACE` | `default` | Kubernetes namespace for executor pods |
@@ -414,6 +501,27 @@ the task is then retried elsewhere while the old pod finishes.
 | `SCHEDULER_LEASE_TTL_MS` | `30000` | Leader lease lifetime — failover time after a leader crash (min 2× interval) |
 | `RETENTION_DAYS` | _(unset)_ | Purge finished runs (and their tasks, tries, XComs, logs, events) older than this; unset = keep forever |
 | `RETENTION_INTERVAL_MS` | `3600000` | How often the leader runs the retention purge |
+| `SECRETS_TIMEOUT_MS` | `10000` | Per-request timeout for the Vault / Akeyless backends |
+| `SECRETS_CACHE_TTL_MS` | `0` | Cache found Vault / Akeyless secrets in-process (0 = off) |
+| `MASK_MIN_LENGTH` | `5` | Secrets shorter than this are not masked in task logs |
+| `SENSITIVE_FIELD_NAMES` | _(unset)_ | Extra name fragments (comma-separated) whose values are masked, on top of Airflow's defaults (`password`, `secret`, `token`, `api_key`, …) |
+| `OIDC_ISSUER` | _(unset)_ | Enables OIDC bearer tokens (discovery at `/.well-known/openid-configuration`) |
+| `OIDC_AUDIENCE` | `OIDC_CLIENT_ID` | Required `aud` of access tokens |
+| `OIDC_ROLE_CLAIM` / `OIDC_*_VALUES` / `OIDC_DEFAULT_ROLE` | `roles` | Claim → role mapping (see *OIDC (SSO)*) |
+| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | _(unset)_ | Enables the UI's SSO login; the secret only for confidential clients |
+| `OIDC_REDIRECT_URI` | `<origin>/auth/callback` | Redirect URI registered at the IdP |
+| `OIDC_SCOPES` | `openid profile email` | Scopes requested at login |
+| `OIDC_POST_LOGOUT_REDIRECT_URI` | _(unset)_ | Where the IdP returns after sign-out |
+| `SESSION_TTL_MS` | `28800000` | UI session lifetime (8 h) |
+| `SESSION_COOKIE_SECURE` | _(auto)_ | Force the `Secure` cookie flag (automatic behind HTTPS / `X-Forwarded-Proto: https`) |
+| `DAG_PROCESSOR` | `embedded` | `embedded`: the leader re-parses changed Dag files; `external`: run `npm run dag-processor` separately |
+| `DAG_PARSE_TIMEOUT_MS` | `30000` | Per-file import timeout in the parse child |
+| `DAG_REPARSE_INTERVAL_MS` | `300000` | Re-parse even without file changes this often |
+| `DAG_PROCESSOR_POLL_MS` | `5000` | External processor: how often it checks the Dag folder |
+| `SANDBOX_CALL_TIMEOUT_MS` | `30000` | Limit per callback / timetable / trigger call in the sandbox |
+| `EXECUTION_API_URL` | _(unset)_ | This deployment as reached from Kubernetes task pods (required for the Kubernetes executor) |
+| `EXECUTION_API_SECRET` | _(derived)_ | Task-token signing secret; default: derived from `ENCRYPTION_KEYS` (same on every replica) |
+| `EXECUTION_TOKEN_TTL_MS` | `1800000` | Task-token lifetime; workers refresh it while the try runs |
 
 ---
 
@@ -425,6 +533,9 @@ npm run dev:bullmq   # BullMQ distributed mode with hot reload
 npm run build        # compile TypeScript → dist/
 npm start            # production: node dist/main.js
 npm run worker       # standalone BullMQ worker: node dist/queue/consumer.js
+npm run dag-processor  # standalone Dag processor (use with DAG_PROCESSOR=external)
+npm run rotate-keys [-- --dry-run]
+                     # re-encrypt stored secrets with the first key in ENCRYPTION_KEYS
 npm test             # run the test suite (requires MongoDB at localhost:27017)
 npm run test:spanner # run the same suite against the Spanner emulator (localhost:9010)
 npm run spanner:ddl  # print the Spanner DDL (for DBA-managed schemas)
@@ -1099,7 +1210,7 @@ See `dags/templating_demo.js` for a full working example.
 
 Runs every task as an ephemeral Kubernetes Pod — the equivalent of Airflow's `KubernetesExecutor`. Enable by setting `KUBERNETES_EXECUTOR=true`.
 
-**How it works:** Instead of forking a child process, the scheduler dispatches each task as a `kubectl run --restart=Never --rm --attach` pod. The pod runs the same `worker-cli.js` entry point, connecting back to MongoDB to execute the task function.
+**How it works:** Instead of forking a child process, the scheduler dispatches each task as a `kubectl run --restart=Never --rm --attach` pod. The pod runs the same `worker-cli.js` entry point: it imports the task's Dag file from the image (falling back to the run-function source from the API) and reaches XCom, connections, variables and run context only through the execution API, with a token scoped to that try (`EXECUTION_API_URL` + `EXECUTION_API_TOKEN` in the pod env). The pod gets no database credentials or encryption keys.
 
 **Configuration:**
 
@@ -1112,12 +1223,13 @@ KUBERNETES_CONTEXT=my-cluster         # optional
 KUBERNETES_SERVICE_ACCOUNT=airflow-sa # optional (IRSA/Workload Identity)
 KUBERNETES_CPU_REQUEST=100m           # optional
 KUBERNETES_MEMORY_REQUEST=256Mi       # optional
+EXECUTION_API_URL=http://airflow-nodejs.airflow.svc:3000   # required: this deployment, reachable from pods
 ```
 
 **Requirements:**
 - `kubectl` on PATH, configured for the target cluster
 - Scheduler service account has `pods/create` + `pods/delete` RBAC permissions
-- MongoDB reachable from within the cluster (`MONGO_URL` must use cluster-internal DNS)
+- The API service reachable from task pods at `EXECUTION_API_URL` (pods no longer need database access)
 - `KUBERNETES_IMAGE` must be pullable from within the cluster
 
 **Limitations:**
@@ -1197,8 +1309,48 @@ run: async (ctx) => {
 | `none` (default) | DB only — no fallback |
 | `env` | `AIRFLOW_VAR_<KEY>` and `AIRFLOW_CONN_<ID>` env vars |
 | `file` | JSON file at `SECRETS_FILE_PATH` |
+| `vault` | HashiCorp Vault KV v1/v2 — token, AppRole or Kubernetes auth (same layout as Airflow's `VaultBackend`) |
+| `akeyless` | Akeyless static secrets — token, access key or Kubernetes auth |
+
+```bash
+# Vault: secret/connections/<conn_id> holds {conn_uri} or {conn_type, host, login, password, …};
+#        secret/variables/<key> holds {value}
+SECRETS_BACKEND=vault
+VAULT_ADDR=https://vault.example.com
+VAULT_ROLE=airflow            # Kubernetes auth with the pod's service account (or VAULT_TOKEN, or VAULT_ROLE_ID + VAULT_SECRET_ID)
+VAULT_MOUNT=secret  VAULT_KV_VERSION=2  VAULT_NAMESPACE=team-a   # optional
+
+# Akeyless: /airflow/connections/<conn_id> holds JSON or a connection URI; /airflow/variables/<key> the value
+SECRETS_BACKEND=akeyless
+AKEYLESS_API_URL=https://gateway.example.com/api/v2
+AKEYLESS_ACCESS_ID=p-xxxx  AKEYLESS_ACCESS_KEY=...   # or AKEYLESS_K8S_AUTH_CONFIG_NAME (+ AKEYLESS_GATEWAY_URL), or AKEYLESS_TOKEN
+```
+
+A backend that cannot be reached fails the lookup (and the task) with the real cause, rather than
+reporting the secret as missing.
 
 See `dags/secrets_demo.js` for a working example.
+
+### Masking secrets in task logs
+
+A connection's password and sensitive `extra` fields, secret variables, and variables with a
+sensitive name are masked as `***` in everything the task prints and in its error message — also
+their JSON-escaped and URL-encoded forms, and each line of a multi-line secret. Tune with
+`MASK_MIN_LENGTH` and `SENSITIVE_FIELD_NAMES`.
+
+### Rotating the encryption key
+
+```bash
+# 1. Put the new key first; keep the old one so existing values still decrypt
+ENCRYPTION_KEYS=<new-64-hex>,<old-64-hex>      # restart every replica with this
+# 2. Re-encrypt every stored connection and variable with the new key
+npm run rotate-keys -- --dry-run && npm run rotate-keys
+# 3. Drop the old key
+ENCRYPTION_KEYS=<new-64-hex>
+```
+
+Each value records the id of the key that encrypted it (`GET /config/encryption` shows the key ids).
+`rotate-keys` is safe to re-run and to run while the scheduler is up.
 
 ---
 

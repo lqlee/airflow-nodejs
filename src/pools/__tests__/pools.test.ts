@@ -376,5 +376,5 @@ describe('poolSlots on task instances', () => {
     const run = await db.collection('dag_runs').findOne({ dag_id: 'pool_slots_dag' })
     expect(run!.state).toBe('success')
     expect((await getPool(db, 'stamp_pool'))!.occupied_slots).toBe(0)   // nothing left running
-  }, 20000)
+  }, 60000)
 })

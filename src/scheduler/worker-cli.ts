@@ -4,98 +4,86 @@
  * Run by the pod spawned by the Kubernetes executor:
  *   node dist/scheduler/worker-cli.js
  *
- * Reads task identity from environment variables:
+ * Reads from environment variables:
  *   K8S_EXEC_DAG_ID       — DAG id
  *   K8S_EXEC_RUN_ID       — run id
  *   K8S_EXEC_TASK_ID      — task id
  *   K8S_EXEC_MAP_INDEX    — map index (empty string = null)
+ *   EXECUTION_API_URL     — the deployment's API, reachable from the pod
+ *   EXECUTION_API_TOKEN   — task token scoped to this try (execution/token.ts)
  *
- * Connects to the database (DB_BACKEND, MONGO_URL or SPANNER_*, DB_NAME), loads the dag from registry,
- * executes the task function, then exits.
+ * Holds no database credentials: run context, XCom, connections, variables and dataset events go
+ * through the execution API. The task function comes from the Dag file in the image (so closures over
+ * the file's imports work); if the image does not have it, from the run-function source the API sends.
+ * Output goes to the pod log, which the executor streams into the task log.
  *
  * Exit codes:
  *   0 — task succeeded
  *   1 — task failed (error logged to stderr)
- *   2 — configuration error (missing env var, dag not found, etc.)
+ *   2 — configuration error (missing env var, task not found, etc.)
  */
+import { existsSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { getDagsDir, parseDagFile } from '../dag/loader.js'
+import { httpExecutionClient } from '../execution/client.js'
+import { buildApiTaskContext } from '../execution/task-context.js'
+import { installStreamMasking, redact } from '../secrets/masker.js'
 
-import { createDbClient } from '../db/factory.js'
-import { loadDags } from '../dag/loader.js'
-import { getDag } from '../dag/registry.js'
-import { getRunContextFields } from './run-conf.js'
-import { recordTaskDatasetEvents, type EmittedDataset } from '../datasets/index.js'
-import { xcomPush, xcomPull } from '../xcom/index.js'
-import { getConnectionRuntime } from '../connections/index.js'
-import { getVariableRuntime } from '../variables/index.js'
-
-const DB_NAME   = process.env.DB_NAME   ?? 'airflow'
+// Secrets the task reads are masked in everything the pod prints (its stdout is the task log)
+installStreamMasking()
 
 const dagId    = process.env.K8S_EXEC_DAG_ID   ?? ''
 const runId    = process.env.K8S_EXEC_RUN_ID   ?? ''
 const taskId   = process.env.K8S_EXEC_TASK_ID  ?? ''
 const mapIdxRaw = process.env.K8S_EXEC_MAP_INDEX ?? ''
 const mapIndex = mapIdxRaw !== '' ? parseInt(mapIdxRaw, 10) : null
+const apiUrl   = process.env.EXECUTION_API_URL ?? ''
+const apiToken = process.env.EXECUTION_API_TOKEN ?? ''
 
 if (!dagId || !runId || !taskId) {
   console.error('[worker-cli] Missing required env: K8S_EXEC_DAG_ID, K8S_EXEC_RUN_ID, K8S_EXEC_TASK_ID')
   process.exit(2)
 }
-
-const client = createDbClient()
-
-try {
-  await client.connect({ light: true })
-  const db = client.db(DB_NAME)
-
-  // Load dags so the registry is populated
-  await loadDags(db)
-
-  const dag = getDag(dagId)
-  if (!dag) {
-    console.error(`[worker-cli] Dag '${dagId}' not found in registry`)
-    process.exit(2)
-  }
-
-  const taskDef = dag.tasks[taskId]
-  if (!taskDef) {
-    console.error(`[worker-cli] Task '${taskId}' not found in dag '${dagId}'`)
-    process.exit(2)
-  }
-
-  if (!taskDef.run) {
-    console.error(`[worker-cli] Task '${taskId}' has no run: function — only run: tasks are supported by the Kubernetes executor`)
-    process.exit(2)
-  }
-
-  const runFields = await getRunContextFields(db, runId)
-
-  const xcom = {
-    push: (key: string, value: unknown) => xcomPush(db, runId, dagId, taskId, mapIndex, key, value),
-    pull: (fromTaskId: string, key: string) => xcomPull(db, runId, fromTaskId, key),
-  }
-  const connections = { get: (connId: string) => getConnectionRuntime(db, connId) }
-  const variables   = { get: (key: string)   => getVariableRuntime(db, key) }
-
-  const ctx = {
-    dagId, runId, taskId,
-    mapIndex,
-    mapValue: null,  // map_value not passed via env (large values); use XCom
-    ...runFields,
-    xcom, connections, variables,
-    defer: () => { throw new Error('ctx.defer() is not supported in Kubernetes executor mode') },
-    emitDataset: (uri: string, opts: { alias?: string; extra?: Record<string, unknown> } = {}) => { emitted.push({ uri, ...opts }) },
-  }
-  const emitted: EmittedDataset[] = []
-
-  await taskDef.run(ctx as any)
-  await recordTaskDatasetEvents(db, { dagId, runId, taskId }, emitted)
-  console.log(`[worker-cli] ✓ ${dagId}.${taskId}`)
-  process.exit(0)
-
-} catch (err: unknown) {
-  const msg = err instanceof Error ? err.message : String(err)
-  console.error(`[worker-cli] ✗ ${dagId}.${taskId}: ${msg}`)
-  process.exit(1)
-} finally {
-  await client.close()
+if (!apiUrl || !apiToken) {
+  console.error('[worker-cli] Missing required env: EXECUTION_API_URL, EXECUTION_API_TOKEN (set EXECUTION_API_URL on the scheduler)')
+  process.exit(2)
 }
+
+type RunFn = (ctx: unknown) => Promise<unknown>
+
+/** The task's run function: from the Dag file in the image when it is there, else from the source. */
+async function resolveRunFn(source: { file: string | null; run: string }): Promise<RunFn> {
+  const filePath = source.file ? resolve(getDagsDir(), source.file) : null
+  if (filePath && existsSync(filePath)) {
+    try {
+      const { dag } = await parseDagFile(filePath)
+      const run = dag.id === dagId ? dag.tasks[taskId]?.run : undefined
+      if (run) return run as RunFn
+    } catch (err) {
+      console.warn(`[worker-cli] cannot import ${source.file}: ${(err as Error).message} — using the parsed source`)
+    }
+  }
+  return new Function(`return (${source.run})`)() as RunFn   // eslint-disable-line no-new-func
+}
+
+const api = httpExecutionClient(apiUrl, apiToken)
+let exitCode = 0
+try {
+  const source = await api.call('task.source') as { file: string | null; run: string }
+  const run = await resolveRunFn(source)
+  const { ctx, recordDatasets } = await buildApiTaskContext(api, { dagId, runId, taskId, mapIndex })
+  await run({
+    ...ctx,
+    defer: () => { throw new Error('ctx.defer() is not supported in Kubernetes executor mode') },
+  })
+  await recordDatasets()
+  console.log(`[worker-cli] ✓ ${dagId}.${taskId}`)
+} catch (err: unknown) {
+  const status = (err as { status?: number }).status
+  const msg = redact(err instanceof Error ? err.message : String(err))
+  console.error(`[worker-cli] ✗ ${dagId}.${taskId}: ${msg}`)
+  exitCode = status === 404 ? 2 : 1
+} finally {
+  api.close()
+}
+process.exit(exitCode)

@@ -3,8 +3,8 @@
  *
  * Equivalent to Airflow's KubernetesExecutor. When enabled, every task that
  * would normally fork a child process is instead dispatched as a `kubectl run`
- * pod. The pod runs the same worker image and worker CLI, connecting back to
- * the same MongoDB instance.
+ * pod. The pod runs the same worker image and worker CLI and talks to the control plane only through
+ * the execution API (no database credentials in the pod).
  *
  * Enable via environment variables:
  *   KUBERNETES_EXECUTOR=true
@@ -15,17 +15,20 @@
  *   KUBERNETES_SERVICE_ACCOUNT=airflow-sa (optional; for IRSA/Workload Identity)
  *   KUBERNETES_CPU_REQUEST=100m           (optional)
  *   KUBERNETES_MEMORY_REQUEST=256Mi       (optional)
+ *   EXECUTION_API_URL=http://airflow-nodejs.airflow.svc:3000  (required: this deployment, reachable from pods)
  *
  * The pod runs:
  *   node dist/scheduler/worker-cli.js --dag-run-id <id> --task-id <id>
  *
- * The worker-cli reads the task function from DB (by dag_id+task_id),
- * executes it, and exits. The pod is ephemeral (--restart=Never --rm).
+ * The worker-cli imports the task's Dag file from the image (falling back to the run-function source
+ * from the execution API), executes it, and exits. The pod is ephemeral (--restart=Never --rm).
+ * It gets EXECUTION_API_URL and EXECUTION_API_TOKEN — a short-lived token (EXECUTION_TOKEN_TTL_MS,
+ * refreshed by the pod) that only works while this try is running.
  *
  * Requirements:
  *   - kubectl on PATH, configured for the target cluster
  *   - The scheduler has `pods/create` + `pods/delete` RBAC permissions
- *   - MongoDB reachable from within the cluster (MONGO_URL must be cluster-internal)
+ *   - The API service reachable from task pods (EXECUTION_API_URL)
  *   - AIRFLOW_IMAGE must be pullable from within the cluster
  *
  * Limitations (same as Airflow KubernetesExecutor):
@@ -46,8 +49,12 @@ import { acquire, release } from './pool.js'
 import { appendLog } from '../logs/index.js'
 import { createInterface } from 'node:readline'
 import { recordTry } from './tries.js'
+import { signTaskToken } from '../execution/token.js'
+import { taskScope } from '../execution/scope.js'
 
 export const USE_KUBERNETES_EXECUTOR = Boolean(process.env.KUBERNETES_EXECUTOR)
+
+let warnedNoApiUrl = false
 
 export interface KubernetesExecutorConfig {
   namespace:       string
@@ -57,6 +64,8 @@ export interface KubernetesExecutorConfig {
   serviceAccount?: string
   cpuRequest?:     string
   memoryRequest?:  string
+  /** Base URL of this deployment as seen from task pods, e.g. http://airflow-nodejs.airflow.svc:3000 */
+  executionApiUrl?: string
 }
 
 export function getKubernetesExecutorConfig(): KubernetesExecutorConfig {
@@ -68,6 +77,7 @@ export function getKubernetesExecutorConfig(): KubernetesExecutorConfig {
     serviceAccount: process.env.KUBERNETES_SERVICE_ACCOUNT,
     cpuRequest:     process.env.KUBERNETES_CPU_REQUEST,
     memoryRequest:  process.env.KUBERNETES_MEMORY_REQUEST,
+    executionApiUrl: process.env.EXECUTION_API_URL,
   }
 }
 
@@ -108,11 +118,11 @@ export function buildKubectlArgs(
   if (limits.length)   args.push(`--limits=${limits.join(',')}`)
   if (requests.length) args.push(`--requests=${requests.join(',')}`)
 
-  // Pass through env vars the worker needs to connect back to MongoDB
+  // No database credentials or encryption keys in the pod: it reaches XCom, connections, variables and
+  // run context through the execution API with a token scoped to this try of this task instance
   const envVars: Record<string, string | undefined> = {
-    MONGO_URL:        process.env.MONGO_URL,
-    DB_NAME:          process.env.DB_NAME,
-    ENCRYPTION_KEY:   process.env.ENCRYPTION_KEY,
+    EXECUTION_API_URL:   cfg.executionApiUrl,
+    EXECUTION_API_TOKEN: signTaskToken(taskScope(ti)),
     // Task identity — worker-cli reads these
     K8S_EXEC_DAG_ID:      ti.dag_id,
     K8S_EXEC_RUN_ID:      ti.dag_run_id,
@@ -144,6 +154,10 @@ export async function executeTaskOnKubernetes(
   }
 
   const cfg = getKubernetesExecutorConfig()
+  if (!cfg.executionApiUrl && !warnedNoApiUrl) {
+    warnedNoApiUrl = true
+    console.warn('[k8s-executor] EXECUTION_API_URL is not set — task pods cannot reach the execution API and will fail')
+  }
   const args = buildKubectlArgs(ti, cfg)
   const podName = args[1]  // second arg is the pod name
 

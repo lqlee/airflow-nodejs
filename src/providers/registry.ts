@@ -47,7 +47,15 @@ export function getProvider(name: string): ProviderDefinition | undefined {
   return _providers.get(name)
 }
 
+/** Provider records reported by the Dag processor — what the API lists when it loads no providers itself. */
+let _synced: ProviderRecord[] = []
+
+export function setSyncedProviders(records: ProviderRecord[]): void {
+  _synced = records
+}
+
 export function listProviders(): ProviderRecord[] {
+  if (_providers.size === 0) return [..._synced]
   return [..._providers.values()].map(p => ({
     name: p.name,
     version: p.version,

@@ -1,7 +1,7 @@
 /**
- * In-memory registry of Dag import errors and warnings from the most recent loadDags() call.
- * Both are replaced wholesale on each reload.
- * Not persisted to DB: reset on process restart (source of truth is the filesystem).
+ * This process's copy of the Dag import errors and warnings, replaced wholesale on each update.
+ * The Dag processor stores them in the database (dag_processor state row) and syncDagsFromDb copies
+ * them here; loadDags() (in-process loading, used by workers and dev scripts) sets them directly.
  */
 
 import type { DagWarning } from './warnings.js'

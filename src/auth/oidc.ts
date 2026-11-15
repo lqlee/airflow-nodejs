@@ -1,16 +1,22 @@
 /**
- * OIDC bearer-token validation (resource-server mode).
+ * OIDC token validation and provider discovery.
  *
  * Verifies JWT access/ID tokens issued by an OIDC provider (PingFed, Azure AD, Okta, ...)
  * against its JWKS, then maps a claim (roles/groups) to an airflow-nodejs role.
- * There is NO browser login flow here — callers obtain a token from the IdP themselves.
+ * API callers send a token from the IdP as a Bearer token; the browser login flow
+ * (authorization code + PKCE, see ./browser-login.ts) uses the same verifier for ID tokens.
  *
  * No dependencies: signature checks use node:crypto. Only RS*, ES* are accepted (never `none`
  * or HS*), and the JWK's key type must match the token's `alg`.
  *
  * Env:
  *   OIDC_ISSUER        required to enable; exact `iss` the token must carry
- *   OIDC_AUDIENCE      required; token `aud` (string or array) must contain it
+ *   OIDC_AUDIENCE      Bearer tokens' `aud` (string or array) must contain it (default: OIDC_CLIENT_ID)
+ *   OIDC_CLIENT_ID     enables browser login (UI "Sign in with SSO"); ID tokens' `aud` must contain it
+ *   OIDC_CLIENT_SECRET optional — confidential client; without it the UI logs in as a public client (PKCE only)
+ *   OIDC_REDIRECT_URI  optional — default <request origin>/auth/callback; must be registered with the IdP
+ *   OIDC_SCOPES        default 'openid profile email'
+ *   OIDC_POST_LOGOUT_REDIRECT_URI  optional — where the IdP sends the browser after logout
  *   OIDC_JWKS_URI      optional; defaults to the `jwks_uri` in <issuer>/.well-known/openid-configuration
  *   OIDC_ROLE_CLAIM    claim holding roles/groups (default `roles`; dotted path ok, e.g. `realm_access.roles`)
  *   OIDC_ADMIN_VALUES / OIDC_EDITOR_VALUES / OIDC_VIEWER_VALUES   comma-separated claim values per role
@@ -26,6 +32,12 @@ export interface OidcConfig {
   roleClaim: string
   roleValues: Record<Role, string[]>
   defaultRole: Role | null
+  /** Browser login (authorization code + PKCE) is enabled when set. */
+  clientId: string | null
+  clientSecret: string | null
+  redirectUri: string | null
+  scopes: string
+  postLogoutRedirectUri: string | null
 }
 
 export type OidcConfigResult =
@@ -39,8 +51,9 @@ const csv = (v: string | undefined) => (v ?? '').split(',').map(s => s.trim()).f
 export function loadOidcConfig(env: NodeJS.ProcessEnv): OidcConfigResult {
   const issuer = env.OIDC_ISSUER?.trim()
   if (!issuer) return { enabled: false }
-  const audience = env.OIDC_AUDIENCE?.trim()
-  if (!audience) return { enabled: true, error: 'OIDC_ISSUER is set but OIDC_AUDIENCE is missing — refusing to accept any token' }
+  const clientId = env.OIDC_CLIENT_ID?.trim() || null
+  const audience = env.OIDC_AUDIENCE?.trim() || clientId
+  if (!audience) return { enabled: true, error: 'OIDC_ISSUER is set but neither OIDC_AUDIENCE nor OIDC_CLIENT_ID is — refusing to accept any token' }
   const defaultRole = env.OIDC_DEFAULT_ROLE?.trim() as Role | undefined
   if (defaultRole && !ROLES.includes(defaultRole)) {
     return { enabled: true, error: `OIDC_DEFAULT_ROLE '${defaultRole}' is not one of ${ROLES.join('/')}` }
@@ -54,8 +67,22 @@ export function loadOidcConfig(env: NodeJS.ProcessEnv): OidcConfigResult {
       roleClaim: env.OIDC_ROLE_CLAIM?.trim() || 'roles',
       roleValues: { admin: csv(env.OIDC_ADMIN_VALUES), editor: csv(env.OIDC_EDITOR_VALUES), viewer: csv(env.OIDC_VIEWER_VALUES) },
       defaultRole: defaultRole ?? null,
+      clientId,
+      clientSecret: env.OIDC_CLIENT_SECRET?.trim() || null,
+      redirectUri: env.OIDC_REDIRECT_URI?.trim() || null,
+      scopes: env.OIDC_SCOPES?.trim() || 'openid profile email',
+      postLogoutRedirectUri: env.OIDC_POST_LOGOUT_REDIRECT_URI?.trim() || null,
     },
   }
+}
+
+/** The parts of the provider's discovery document the server uses. */
+export interface OidcDiscovery {
+  issuer?: string
+  authorization_endpoint?: string
+  token_endpoint?: string
+  end_session_endpoint?: string
+  jwks_uri?: string
 }
 
 // ── JWT verification ────────────────────────────────────────────────────────
@@ -80,9 +107,18 @@ export interface OidcVerifierOptions {
   jwksRefreshMs?: number
 }
 
+export interface VerifyOptions {
+  /** Audience to require instead of the configured one (ID tokens: the client id). */
+  audience?: string
+  /** Required `nonce` claim (ID tokens from the browser login). */
+  nonce?: string
+}
+
 export interface OidcVerifier {
   /** Resolves the validated claims, or null when the token is invalid for ANY reason. */
-  verify(token: string): Promise<Record<string, unknown> | null>
+  verify(token: string, opts?: VerifyOptions): Promise<Record<string, unknown> | null>
+  /** The provider's discovery document (fetched once, then cached; retried after a failure). */
+  discovery(): Promise<OidcDiscovery>
   /** Role granted by the claims, or null when none applies. */
   roleFor(claims: Record<string, unknown>): Role | null
 }
@@ -110,6 +146,7 @@ export function createOidcVerifier(config: OidcConfig, opts: OidcVerifierOptions
   let lastFetch = -Infinity
   let inflight: Promise<void> | null = null
   let jwksUri = config.jwksUri
+  let disco: Promise<OidcDiscovery> | null = null
 
   async function getJson(url: string): Promise<unknown> {
     const ctl = new AbortController()
@@ -121,6 +158,15 @@ export function createOidcVerifier(config: OidcConfig, opts: OidcVerifierOptions
     } finally { clearTimeout(timer) }
   }
 
+  function discovery(): Promise<OidcDiscovery> {
+    if (!disco) {
+      disco = getJson(`${config.issuer.replace(/\/$/, '')}/.well-known/openid-configuration`)
+        .then(d => (d && typeof d === 'object' ? d : {}) as OidcDiscovery)
+      disco.catch(() => { disco = null })   // retry on the next call
+    }
+    return disco
+  }
+
   function refreshKeys(): Promise<void> {
     if (inflight) return inflight
     if (now() - lastFetch < refreshMs) return Promise.resolve()
@@ -128,9 +174,9 @@ export function createOidcVerifier(config: OidcConfig, opts: OidcVerifierOptions
     inflight = (async () => {
       try {
         if (!jwksUri) {
-          const disco = await getJson(`${config.issuer.replace(/\/$/, '')}/.well-known/openid-configuration`) as { jwks_uri?: string }
-          if (!disco?.jwks_uri) throw new Error('discovery document has no jwks_uri')
-          jwksUri = disco.jwks_uri
+          const doc = await discovery()
+          if (!doc.jwks_uri) throw new Error('discovery document has no jwks_uri')
+          jwksUri = doc.jwks_uri
         }
         const doc = await getJson(jwksUri) as { keys?: JsonWebKey[] }
         const next = new Map<string, JsonWebKey>()
@@ -148,7 +194,7 @@ export function createOidcVerifier(config: OidcConfig, opts: OidcVerifierOptions
     return keys.get(kid)
   }
 
-  async function verifyToken(token: string): Promise<Record<string, unknown> | null> {
+  async function verifyToken(token: string, opts: VerifyOptions = {}): Promise<Record<string, unknown> | null> {
     const parts = token.split('.')
     if (parts.length !== 3 || parts.some(p => p.length === 0)) return null
     const header = parseJson(b64urlToBuf(parts[0]))
@@ -183,14 +229,17 @@ export function createOidcVerifier(config: OidcConfig, opts: OidcVerifierOptions
     const nowSec = Math.floor(now() / 1000)
     if (claims.iss !== config.issuer) return null
     const aud = claims.aud
-    if (!(typeof aud === 'string' ? aud === config.audience : Array.isArray(aud) && aud.includes(config.audience))) return null
+    const audience = opts.audience ?? config.audience
+    if (!(typeof aud === 'string' ? aud === audience : Array.isArray(aud) && aud.includes(audience))) return null
+    if (opts.nonce !== undefined && claims.nonce !== opts.nonce) return null
     if (typeof claims.exp !== 'number' || nowSec > claims.exp + leeway) return null
     if (claims.nbf !== undefined && (typeof claims.nbf !== 'number' || nowSec < claims.nbf - leeway)) return null
     return claims
   }
 
   return {
-    verify: token => verifyToken(token).catch(() => null),
+    verify: (token, opts) => verifyToken(token, opts).catch(() => null),
+    discovery,
     roleFor(claims) {
       const raw = getPath(claims, config.roleClaim)
       const values = new Set((Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]).filter((v): v is string => typeof v === 'string'))

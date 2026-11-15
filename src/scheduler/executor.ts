@@ -1,6 +1,4 @@
-import { fork, spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
-import { resolve as pathResolve, dirname } from 'node:path'
+import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import type { Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
@@ -14,23 +12,12 @@ import { recordTry } from './tries.js'
 import { getRunMeta, getRunContextFields } from './run-conf.js'
 import { USE_KUBERNETES_EXECUTOR, executeTaskOnKubernetes } from './kubernetes-executor.js'
 import { xcomPush, xcomPull } from '../xcom/index.js'
+import { runTriggerInSandbox } from '../sandbox/client.js'
+import { forkTaskWorker } from '../sandbox/fork.js'
+import { serveExecutionApi } from '../execution/ipc.js'
+import { taskScope } from '../execution/scope.js'
 import { renderTemplate, renderArgs, renderEnv, type TemplateContext } from './template.js'
 import { triggerDagRun, checkTriggeredRun, checkExternalTask, validateExternalTask, type WaitResult } from './cross-dag.js'
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
-
-// In production (compiled JS), import.meta.url points to dist/scheduler/executor.js
-// and worker.js exists alongside it. In development tsx runs .ts directly.
-// Detect by checking whether the current file ends with .js (compiled) or .ts (dev).
-const IS_COMPILED = import.meta.url.endsWith('.js')
-const WORKER_SCRIPT = IS_COMPILED
-  ? pathResolve(__dirname, 'worker.js')        // production: compiled JS
-  : pathResolve(__dirname, 'worker.ts')        // development: tsx source
-
-// In production use the system node binary; in dev use tsx.
-const EXEC_PATH = IS_COMPILED
-  ? process.execPath                           // production: same node process
-  : pathResolve(__dirname, '../../node_modules/.bin/tsx')  // dev: tsx transpiler
 
 // When REDIS_URL is set, use BullMQ (distributed). Otherwise use local fork.
 const USE_BULLMQ = Boolean(process.env.REDIS_URL)
@@ -132,11 +119,9 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
   console.log(`[executor] ${label} ${ti.dag_id}.${ti.task_id} (run: ${ti.dag_run_id})`)
 
   return new Promise((done) => {
-    const child = fork(WORKER_SCRIPT, [], {
-      execPath: EXEC_PATH,
-      env: { ...process.env },
-      silent: true,
-    })
+    // No database credentials in the worker: it reaches XCom, connections etc. through us (execution API)
+    const child = forkTaskWorker()
+    serveExecutionApi(child, db, taskScope(ti))
 
     // ── Timeout (task-level, not sensor deadline) ─────────────────────
     let timedOut = false
@@ -812,11 +797,9 @@ async function executeRunFn(
   console.log(`[executor] ${label} ${ti.dag_id}.${ti.task_id} (run: ${ti.dag_run_id})`)
 
   return new Promise((done) => {
-    const child = fork(WORKER_SCRIPT, [], {
-      execPath: EXEC_PATH,
-      env: { ...process.env },
-      silent: true,
-    })
+    // No database credentials in the worker: it reaches XCom, connections etc. through us (execution API)
+    const child = forkTaskWorker()
+    serveExecutionApi(child, db, taskScope(ti))
 
     let timedOut = false
     let killTimer: ReturnType<typeof setTimeout> | null = null
@@ -932,8 +915,8 @@ export { computeRetryDelay, scheduleRetry }
 
 /**
  * Poll all deferred tasks whose next_poke_at has arrived.
- * Runs the stored trigger function IN the scheduler process (no fork) —
- * so trigger functions must be self-contained (no module-scope closures).
+ * Evaluates the stored trigger function in the sandbox process (sandbox/client.ts), never in the
+ * scheduler — trigger functions must be self-contained (no module-scope closures).
  *
  * On trigger() === true  → mark task success
  * On trigger() === false → reschedule to next check
@@ -975,12 +958,7 @@ export async function pollDeferredTasks(db: Db): Promise<void> {
     }
 
     try {
-      // Re-hydrate the trigger function
-      // eslint-disable-next-line no-new-func
-      const triggerFn = new Function(`return (${ti.deferred_trigger_fn})`)() as
-        (ctx: unknown) => Promise<boolean>
-
-      // Build minimal trigger context (in-process, no DB_NAME env needed — uses same DB)
+      // The trigger is user code: evaluate it in the sandbox process, never here
       const runFields = await getRunContextFields(db, ti.dag_run_id)
       const tctx = {
         dagId:    ti.dag_id,
@@ -989,15 +967,11 @@ export async function pollDeferredTasks(db: Db): Promise<void> {
         mapIndex: ti.map_index,
         mapValue: ti.map_value,
         ...runFields,
-        xcom: {
-          push: (key: string, value: unknown) =>
-            xcomPush(db, ti.dag_run_id, ti.dag_id, ti.task_id, ti.map_index, key, value),
-          pull: (fromTaskId: string, key: string) =>
-            xcomPull(db, ti.dag_run_id, fromTaskId, key),
-        },
       }
-
-      const ready = await triggerFn(tctx)
+      const ready = await runTriggerInSandbox(ti.deferred_trigger_fn, tctx, {
+        xcomPush: (key, value) => xcomPush(db, ti.dag_run_id, ti.dag_id, ti.task_id, ti.map_index, key, value),
+        xcomPull: (fromTaskId, key) => xcomPull(db, ti.dag_run_id, fromTaskId, key),
+      })
 
       if (ready) {
         void recordTry(db, ti, 'success', now)

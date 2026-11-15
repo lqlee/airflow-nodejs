@@ -21,17 +21,19 @@
   "scripts": {
     "dev": "tsx watch --ignore 'src/**/__tests__/**' --ignore 'dist/**' src/main.ts",
     "dev:bullmq": "REDIS_URL=redis://localhost:6379 tsx watch --ignore 'src/**/__tests__/**' --ignore 'dist/**' src/main.ts",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node dist/ui/build.js",
     "start": "node dist/main.js",
     "start:bullmq": "REDIS_URL=${REDIS_URL} node dist/main.js",
     "worker": "node dist/queue/consumer.js",
+    "dag-processor": "node dist/dag/processor-cli.js",
     "dev:start": "tsx src/main.ts",
     "test": "vitest run",
     "//prepare": "runs tsc build when installed as a git dependency (for wcnp node_modules inclusion)",
     "prepare": "npm run build",
     "test:spanner": "vitest run -c vitest.spanner.config.ts",
     "spanner:ddl": "tsx src/db/spanner/print-ddl.ts",
-    "db:cleanup": "node dist/db/cleanup-cli.js"
+    "db:cleanup": "node dist/db/cleanup-cli.js",
+    "rotate-keys": "node dist/crypto/rotate-cli.js"
   },
   "dependencies": {
     "@fastify/multipart": "^10.1.0",
@@ -39,11 +41,14 @@
     "@fastify/static": "^10.1.0",
     "@google-cloud/spanner": "^9.0.0",
     "bullmq": "^5.80.2",
+    "cron-parser": "^4.9.0",
     "fastify": "^5.4.0",
     "ioredis": "^5.11.1",
     "mongodb": "^6.16.0",
     "node-cron": "^3.0.3",
-    "pino": "^9.7.0"
+    "pino": "^9.7.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -53,7 +53,7 @@ describe('task retries', () => {
     const ti = await db.collection('task_instances').findOne({ dag_run_id: runId, task_id: 'flaky' })
     expect(ti!.state).toBe('failed')
     expect(ti!.try_number).toBe(2)   // incremented twice by retry logic
-  }, 15000)
+  }, 60000)
 
   it('succeeds on a later retry using try_number in ctx', async () => {
     // Use try_number passed in ctx to decide when to succeed

@@ -3,7 +3,7 @@
  *
  * Unlike import errors (hard failures that prevent loading), warnings are
  * advisory: the dag loads and runs, but something may not behave as expected.
- * Warnings are in-memory, reset on each loadDags() call.
+ * Warnings come from the most recent Dag processor run (see dag/processor.ts).
  */
 
 import type { FastifyInstance } from 'fastify'

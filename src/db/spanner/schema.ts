@@ -53,11 +53,14 @@ export const SCHEMAS: TableSchema[] = [
   { collection: 'connections', columns: [S('conn_id'), S('conn_type')], indexes: [idx('connections', ['conn_id'], true), idx('connections', ['conn_type'])] },
   { collection: 'variables', columns: [S('key')], indexes: [idx('variables', ['key'], true)] },
   { collection: 'dag_versions', columns: [S('dag_id'), S('version'), T('first_seen')], indexes: [idx('dag_versions', ['dag_id', 'version'], true), idx('dag_versions', ['dag_id', 'first_seen'])] },
+  { collection: 'serialized_dags', columns: [S('dag_id')], indexes: [idx('serialized_dags', ['dag_id'], true)] },
+  { collection: 'dag_processor', columns: [], indexes: [] },
   { collection: 'pools', columns: [S('name')], indexes: [idx('pools', ['name'], true)] },
   { collection: 'backfills', columns: [S('dag_id'), S('state'), T('created_at')], indexes: [idx('backfills', ['dag_id', 'created_at']), idx('backfills', ['state'])] },
   { collection: 'scheduler_instances', columns: [T('heartbeat_at')], indexes: [idx('scheduler_instances', ['heartbeat_at'])] },
   { collection: 'scheduler_leases', columns: [], indexes: [] },
   { collection: 'claim_locks', columns: [], indexes: [] },
+  { collection: 'ui_sessions', columns: [S('key_hash'), T('expires_at')], indexes: [idx('ui_sessions', ['key_hash'], true), idx('ui_sessions', ['expires_at'])] },
   { collection: 'event_logs', columns: [S('dag_id'), S('dag_run_id'), S('event_type'), T('created_at')], indexes: [idx('event_logs', ['dag_id', 'created_at']), idx('event_logs', ['dag_run_id', 'created_at']), idx('event_logs', ['event_type', 'created_at'])] },
 ]
 

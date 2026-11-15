@@ -1,5 +1,7 @@
 import { ObjectId, type Db } from 'mongodb'
-import { loadDags } from '../dag/loader.js'
+import { syncDagsFromDb } from '../dag/sync.js'
+import { isProcessorEmbedded, maybeRunDagProcessor, stopDagProcessor } from '../dag/processor.js'
+import { stopSandbox } from '../sandbox/client.js'
 import { getDag, listDags } from '../dag/registry.js'
 import { claimReadyTasks, skipUnsatisfiableTasks, applyBranchDecisions, applyShortCircuitDecisions, expandDynamicMapped } from './claim.js'
 import { pollDeferredTasks, executeTask, claimCapacity } from './executor.js'
@@ -63,6 +65,8 @@ export function stopScheduler(): void {
   }
   stopLiveness()
   stopAllCronJobs()
+  stopDagProcessor()
+  stopSandbox()
   console.log('[scheduler] stopped')
 }
 
@@ -70,7 +74,13 @@ async function tick(db: Db): Promise<void> {
   const startedAt = performance.now()
   let ok = true
   try {
-    await loadDags(db)
+    // The leader re-parses changed Dag files in the background (a child process — user code never runs
+    // here); every replica picks up the serialized result. DAG_PROCESSOR=external leaves parsing to
+    // a separate `npm run dag-processor` process.
+    if (isLeader() && isProcessorEmbedded()) {
+      void maybeRunDagProcessor(db).catch(err => console.error('[dag-processor] run failed:', err))
+    }
+    await syncDagsFromDb(db)
     await runTickWork(db, listDags())
   } catch (err) {
     ok = false
@@ -82,7 +92,7 @@ async function tick(db: Db): Promise<void> {
 
 /**
  * One scheduler pass over the loaded Dags (everything a tick does after reloading Dag files).
- * Exported for tests — the tick itself reloads the registry from DAG_DIR.
+ * Exported for tests — the tick itself first syncs the registry from the serialized Dags.
  */
 export async function runTickWork(db: Db, dags: DagDefinition[]): Promise<void> {
   // Work that CREATES runs or changes task state on a timer runs on one replica only (the leader).

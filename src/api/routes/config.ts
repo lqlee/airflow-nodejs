@@ -11,6 +11,7 @@
  */
 
 import type { FastifyInstance } from 'fastify'
+import { getEncryptionKeys, isEncryptionConfigured, keyId } from '../../crypto/index.js'
 
 export interface ConfigSection {
   section: string
@@ -51,6 +52,21 @@ function entry(
   return { key, value, description, is_default: isDefault, is_sensitive: sensitive }
 }
 
+/** Key ids are short hashes — safe to show, and what an operator needs to follow a rotation. */
+function encryptionEntries(): ConfigEntry[] {
+  const configured = isEncryptionConfigured()
+  const ids = configured ? getEncryptionKeys().map(keyId) : []
+  const isDefault = process.env.ENCRYPTION_KEYS === undefined && process.env.ENCRYPTION_KEY === undefined
+  const fixed = (key: string, value: ConfigEntry['value'], description: string): ConfigEntry =>
+    ({ key, value, description, is_default: isDefault, is_sensitive: false })
+  return [
+    // Same shape as other secret-backed entries: '***' when set, null when not
+    { ...fixed('encryption_key_set', configured ? '***' : null, 'Whether ENCRYPTION_KEYS / ENCRYPTION_KEY is configured (required for secrets)'), is_sensitive: true },
+    fixed('encryption_key_count', ids.length, 'Configured keys; more than one while a rotation is in progress'),
+    fixed('encryption_primary_key_id', ids[0] ?? null, 'Id of the key new secrets are encrypted with'),
+  ]
+}
+
 function buildConfig(): ConfigSection[] {
   return [
     {
@@ -83,12 +99,36 @@ function buildConfig(): ConfigSection[] {
         entry('drain_timeout_ms', 'DRAIN_TIMEOUT_MS', 20000, 'Graceful shutdown worker drain timeout (ms)'),
         entry('redis_url_set', 'REDIS_URL', false, 'Whether REDIS_URL is set (BullMQ mode)', true),
         entry('worker_concurrency', 'WORKER_CONCURRENCY', 4, 'BullMQ worker concurrency (only applies in BullMQ mode)'),
+        entry('sandbox_call_timeout_ms', 'SANDBOX_CALL_TIMEOUT_MS', 30000, 'Limit for one callback/timetable/trigger call in the sandbox process (ms)'),
+      ],
+    },
+    {
+      section: 'dag_processor',
+      entries: [
+        entry('dag_processor', 'DAG_PROCESSOR', 'embedded', 'embedded: the leader scheduler parses Dag files; external: a separate `npm run dag-processor`'),
+        entry('dag_parse_timeout_ms', 'DAG_PARSE_TIMEOUT_MS', 30000, 'Per-file import timeout; a file that hangs becomes an import error (ms)'),
+        entry('dag_reparse_interval_ms', 'DAG_REPARSE_INTERVAL_MS', 300000, 'Re-parse this often even when no file changed (ms)'),
+        entry('dag_processor_poll_ms', 'DAG_PROCESSOR_POLL_MS', 5000, 'External processor: how often it checks the Dag folder for changes (ms)'),
+      ],
+    },
+    {
+      section: 'execution_api',
+      entries: [
+        entry('execution_api_url', 'EXECUTION_API_URL', '', 'This deployment as reached from Kubernetes task pods'),
+        entry('execution_api_secret_set', 'EXECUTION_API_SECRET', false, 'Task-token signing secret (else derived from ENCRYPTION_KEYS)', true),
+        entry('execution_token_ttl_ms', 'EXECUTION_TOKEN_TTL_MS', 1800000, 'Task-token lifetime; workers refresh it while the try runs (ms)'),
       ],
     },
     {
       section: 'encryption',
+      entries: encryptionEntries(),
+    },
+    {
+      section: 'secrets',
       entries: [
-        entry('encryption_key_set', 'ENCRYPTION_KEY', false, 'Whether ENCRYPTION_KEY is configured (required for secrets)', true),
+        entry('secrets_backend', 'SECRETS_BACKEND', 'none', 'Fallback store for connections/variables not in the DB: none, env, file, vault, akeyless'),
+        entry('mask_min_length', 'MASK_MIN_LENGTH', 5, 'Secrets shorter than this are not masked in task logs'),
+        entry('sensitive_field_names', 'SENSITIVE_FIELD_NAMES', '', 'Extra field/variable name fragments treated as secret (comma-separated)'),
       ],
     },
   ]

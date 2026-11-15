@@ -271,6 +271,16 @@ interface TimetableEntry {
 const timetableEntries = new Map<string, TimetableEntry>()
 
 /**
+ * A timetable's answer as a fire time. A serialized Dag's timetable runs in the sandbox and resolves
+ * asynchronously; anything but a valid Date (or null) is an error, not a silent "never".
+ */
+function asFireTime(v: unknown): Date | null {
+  if (v === null || v === undefined) return null
+  if (!(v instanceof Date) || Number.isNaN(v.getTime())) throw new Error(`timetable() must return a Date or null, got ${typeof v}`)
+  return v
+}
+
+/**
  * Called on every scheduler tick for DAGs with a `timetable` function.
  * Fires a new run if nextFireAt <= now, then computes the next fire time.
  * Idempotent — safe to call repeatedly even if the DAG hasn't changed.
@@ -308,7 +318,7 @@ export async function tickTimetables(db: Db, dags: DagDefinition[]): Promise<voi
       const lastRunAt = lastRun ? new Date(lastRun.created_at as Date) : null
       let nextFireAt: Date | null = null
       try {
-        nextFireAt = dag.timetable(lastRunAt, runCount)
+        nextFireAt = asFireTime(await dag.timetable(lastRunAt, runCount))
       } catch (err) {
         console.error(`[timetable] dag '${dag.id}' timetable() threw on init:`, err)
       }
@@ -337,7 +347,7 @@ export async function tickTimetables(db: Db, dags: DagDefinition[]): Promise<voi
       const liveFn = liveDag?.timetable ?? dag.timetable
       let nextFireAt: Date | null = null
       try {
-        nextFireAt = liveFn(firedAt, entry.runCount)
+        nextFireAt = asFireTime(await liveFn(firedAt, entry.runCount))
       } catch (err) {
         console.error(`[timetable] dag '${dag.id}' timetable() threw after fire:`, err)
       }

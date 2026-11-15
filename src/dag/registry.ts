@@ -17,3 +17,7 @@ export function listDags(): DagDefinition[] {
 export function clearRegistry(): void {
   registry.clear()
 }
+
+export function unregister(dagId: string): void {
+  registry.delete(dagId)
+}

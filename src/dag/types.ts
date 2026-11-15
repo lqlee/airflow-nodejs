@@ -816,7 +816,7 @@ export interface TaskGroupDefinition {
  *   timetable: (last, runCount) => runCount >= 5 ? null :
  *     new Date((last ?? new Date()).getTime() + 10_000)
  */
-export type TimetableFn = (lastRunAt: Date | null, runCount: number) => Date | null
+export type TimetableFn = (lastRunAt: Date | null, runCount: number) => Date | null | Promise<Date | null>
 
 export interface DagDefinition {
   id: string

@@ -8,6 +8,7 @@
 import type { Db } from 'mongodb'
 import { encrypt, decrypt, isEncryptionConfigured } from '../crypto/index.js'
 import { getSecretsBackend } from '../secrets/index.js'
+import { registerSecret, registerSensitiveFields } from '../secrets/masker.js'
 
 export interface ConnectionDoc {
   conn_id: string          // unique identifier, e.g. 'my_postgres'
@@ -90,8 +91,21 @@ export async function getConnection(db: Db, connId: string): Promise<ConnectionS
   return doc ? toSummary(doc) : null
 }
 
-/** Decrypt a connection for task runtime use. Never call from API routes. */
+/**
+ * Decrypt a connection for task runtime use. Never call from API routes.
+ * The password and sensitive extra fields are registered with the secret masker, so the task's logs
+ * show `***` instead.
+ */
 export async function getConnectionRuntime(db: Db, connId: string): Promise<ConnectionRuntime | null> {
+  const conn = await readConnectionRuntime(db, connId)
+  if (conn) {
+    registerSecret(conn.password)
+    registerSensitiveFields(conn.extra)
+  }
+  return conn
+}
+
+async function readConnectionRuntime(db: Db, connId: string): Promise<ConnectionRuntime | null> {
   const doc = await db.collection<ConnectionDoc>('connections').findOne({ conn_id: connId })
   // Fallback to secrets backend if not found in DB
   if (!doc) return getSecretsBackend().getConnection(connId)

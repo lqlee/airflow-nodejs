@@ -97,6 +97,12 @@ export async function ensureIndexes(db: Db): Promise<void> {
     { key: { dag_id: 1, first_seen: -1 } },
   ])
 
+  // serialized_dags: one row per Dag (_id = dag_id), written by the Dag processor; dag_processor
+  // holds a single state row (_id 'state') and needs no index
+  await db.collection('serialized_dags').createIndexes([
+    { key: { dag_id: 1 }, unique: true },
+  ])
+
   // pools: unique name + sorted list
   await db.collection('pools').createIndexes([
     { key: { name: 1 }, unique: true },
@@ -123,6 +129,13 @@ export async function ensureIndexes(db: Db): Promise<void> {
 
   // scheduler_instances: liveness lookup for zombie detection
   await db.collection('scheduler_instances').createIndexes([{ key: { heartbeat_at: 1 } }])
+
+  // ui_sessions: browser sessions + OIDC login attempts, looked up by the hash of their id; Mongo
+  // drops expired rows itself (TTL index), and createSession also prunes them (the Spanner path)
+  await db.collection('ui_sessions').createIndexes([
+    { key: { key_hash: 1 }, unique: true },
+    { key: { expires_at: 1 }, expireAfterSeconds: 0 },
+  ])
 
   // event_logs: audit trail — query by dag, run, or event type; sorted by time
   await db.collection('event_logs').createIndexes([

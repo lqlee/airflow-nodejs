@@ -6,11 +6,12 @@
  * The RBAC enforcement itself is tested in rbac.test.ts.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
 import { MongoClient, type Db } from 'mongodb'
 import { buildServer } from '../server.js'
 import { clearRegistry } from '../../dag/registry.js'
 import type { FastifyInstance } from 'fastify'
+import { keyId } from '../../crypto/index.js'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 let client: MongoClient
@@ -127,5 +128,17 @@ describe('GET /config/:section', () => {
     const { entries } = res.json() as { entries: Array<{ key: string; is_sensitive: boolean }> }
     const keyEntry = entries.find(e => e.key === 'encryption_key_set')!
     expect(keyEntry.is_sensitive).toBe(true)
+  })
+})
+
+describe('GET /config/encryption — key rotation', () => {
+  afterEach(() => { delete process.env.ENCRYPTION_KEYS })
+
+  it('shows how many keys are configured and the primary key id, never the keys', async () => {
+    process.env.ENCRYPTION_KEYS = `${'c'.repeat(64)},${'d'.repeat(64)}`
+    const res = await app.inject({ method: 'GET', url: '/config/encryption' })
+    const byKey = Object.fromEntries((res.json() as { entries: Array<{ key: string; value: unknown }> }).entries.map(e => [e.key, e.value]))
+    expect(byKey).toMatchObject({ encryption_key_set: '***', encryption_key_count: 2, encryption_primary_key_id: keyId(Buffer.from('c'.repeat(64), 'hex')) })
+    expect(res.body).not.toContain('cccc')
   })
 })

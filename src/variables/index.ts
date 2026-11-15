@@ -9,6 +9,7 @@
 import type { Db } from 'mongodb'
 import { encrypt, decrypt } from '../crypto/index.js'
 import { getSecretsBackend } from '../secrets/index.js'
+import { isSensitiveName, registerSecret } from '../secrets/masker.js'
 
 export interface VariableDoc {
   key: string           // unique identifier
@@ -59,16 +60,28 @@ export async function getVariable(db: Db, key: string): Promise<VariableSummary 
   return doc ? toSummary(doc) : null
 }
 
-/** Decrypt a variable for task runtime use. Never call from API routes. */
+/**
+ * Decrypt a variable for task runtime use. Never call from API routes.
+ * A secret variable, or one whose key has a sensitive name (e.g. `api_key`), is registered with the
+ * secret masker so the task's logs show `***` instead.
+ */
 export async function getVariableRuntime(db: Db, key: string): Promise<string | null> {
+  const { value, secret } = await readVariableForTask(db, key)
+  if (value !== null && secret) registerSecret(value)
+  return value
+}
+
+/**
+ * A variable's decrypted value for a task, and whether it must be masked (a secret variable, or a
+ * sensitive key name). For the execution API, which hands both to the worker. Never call from API routes.
+ */
+export async function readVariableForTask(db: Db, key: string): Promise<{ value: string | null; secret: boolean }> {
   const doc = await db.collection<VariableDoc>('variables').findOne({ key })
   // Fallback to secrets backend if not found in DB
-  if (!doc) return getSecretsBackend().getVariable(key)
-
-  if (doc.is_secret && doc.value_enc) {
-    return decrypt(doc.value_enc)
-  }
-  return doc.value
+  const value = doc
+    ? (doc.is_secret && doc.value_enc ? decrypt(doc.value_enc) : doc.value)
+    : await getSecretsBackend().getVariable(key)
+  return { value, secret: Boolean(doc?.is_secret) || isSensitiveName(key) }
 }
 
 export async function setVariable(db: Db, input: SetVariableInput): Promise<VariableSummary> {

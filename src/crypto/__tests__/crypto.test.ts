@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { encrypt, decrypt, isEncryptionConfigured, getEncryptionKey } from '../index.js'
+import { encrypt, decrypt, isEncryptionConfigured, getEncryptionKey, getEncryptionKeys, keyId, needsReencrypt } from '../index.js'
 
 const TEST_KEY = 'a'.repeat(64) // valid 64-char hex key for tests
 
@@ -86,6 +86,49 @@ describe('isEncryptionConfigured', () => {
 
   it('returns false when key is not set', () => {
     delete process.env.ENCRYPTION_KEY
+    expect(isEncryptionConfigured()).toBe(false)
+  })
+})
+
+describe('key rotation — ENCRYPTION_KEYS', () => {
+  const OLD = 'a'.repeat(64)
+  const NEW = 'b'.repeat(64)
+  afterEach(() => { delete process.env.ENCRYPTION_KEYS; delete process.env.ENCRYPTION_KEY })
+
+  it('encrypts with the first key and still decrypts values written with an older one', () => {
+    process.env.ENCRYPTION_KEYS = OLD
+    const old = encrypt('rotate-me')
+
+    process.env.ENCRYPTION_KEYS = `${NEW}, ${OLD}`
+    const fresh = encrypt('new-value')
+    expect(fresh.kid).toBe(keyId(Buffer.from(NEW, 'hex')))
+    expect(fresh.kid).not.toBe(old.kid)
+    expect(decrypt(old)).toBe('rotate-me')
+    expect(needsReencrypt(old)).toBe(true)
+    expect(needsReencrypt(fresh)).toBe(false)
+  })
+
+  it('a value whose key was retired fails with a message naming the missing key id', () => {
+    process.env.ENCRYPTION_KEYS = OLD
+    const old = encrypt('x')
+    process.env.ENCRYPTION_KEYS = NEW
+    expect(() => decrypt(old)).toThrow(new RegExp(`${old.kid}.*not in ENCRYPTION_KEYS`))
+  })
+
+  it('values written before key ids existed are decrypted by trying every key', () => {
+    process.env.ENCRYPTION_KEYS = OLD
+    const { kid: _kid, ...legacy } = encrypt('legacy')
+    process.env.ENCRYPTION_KEYS = `${NEW},${OLD}`
+    expect(decrypt(legacy)).toBe('legacy')
+    expect(needsReencrypt(legacy)).toBe(true)
+  })
+
+  it('ENCRYPTION_KEYS wins over ENCRYPTION_KEY; a malformed entry is named', () => {
+    process.env.ENCRYPTION_KEY = OLD
+    process.env.ENCRYPTION_KEYS = NEW
+    expect(getEncryptionKey().toString('hex')).toBe(NEW)
+    process.env.ENCRYPTION_KEYS = `${NEW},nope`
+    expect(() => getEncryptionKeys()).toThrow(/entry 2/)
     expect(isEncryptionConfigured()).toBe(false)
   })
 })

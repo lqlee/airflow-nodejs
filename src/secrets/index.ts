@@ -6,9 +6,11 @@
  * secrets backends (Vault, AWS Secrets Manager, GCP Secret Manager, etc.)
  *
  * Built-in backends:
- *   'none'  — no fallback (default; DB-only, existing behaviour)
- *   'env'   — read from environment variables (12-factor apps)
- *   'file'  — read from a JSON file at SECRETS_FILE_PATH
+ *   'none'     — no fallback (default; DB-only, existing behaviour)
+ *   'env'      — read from environment variables (12-factor apps)
+ *   'file'     — read from a JSON file at SECRETS_FILE_PATH
+ *   'vault'    — HashiCorp Vault KV (see remote.ts for VAULT_* settings)
+ *   'akeyless' — Akeyless static secrets (see remote.ts for AKEYLESS_* settings)
  *
  * Select backend via SECRETS_BACKEND env var:
  *   SECRETS_BACKEND=env    → EnvSecretsBackend
@@ -32,9 +34,10 @@
  *   }
  * }
  *
- * Env variable format for connections:
+ * Env variable format for connections — JSON or an Airflow connection URI:
  *   AIRFLOW_CONN_<CONN_ID_UPPER>=json:{...}
  *   e.g. AIRFLOW_CONN_MY_DB='{"conn_type":"postgres","host":"localhost","port":5432}'
+ *   e.g. AIRFLOW_CONN_MY_DB='postgres://user:pass@localhost:5432/app'
  *
  * Env variable format for variables:
  *   AIRFLOW_VAR_<KEY_UPPER>=value
@@ -43,6 +46,8 @@
 
 import { readFile } from 'node:fs/promises'
 import type { ConnectionRuntime } from '../connections/index.js'
+import { connectionFromSecretString } from './conn-format.js'
+import { AkeylessSecretsBackend, VaultSecretsBackend } from './remote.js'
 
 export interface SecretsBackend {
   /** Fetch a connection by conn_id. Returns null if not found. */
@@ -66,7 +71,7 @@ class NullSecretsBackend implements SecretsBackend {
 /**
  * Reads secrets from environment variables.
  *
- * Connections: AIRFLOW_CONN_<CONN_ID_UPPER>=json:{...}
+ * Connections: AIRFLOW_CONN_<CONN_ID_UPPER>=json:{...} or a connection URI (scheme://user:pass@host:port/schema?extra)
  * Variables:   AIRFLOW_VAR_<KEY_UPPER>=<value>
  *
  * Connection JSON shape: { conn_type, host?, port?, login?, password?, schema?, extra? }
@@ -80,20 +85,9 @@ class EnvSecretsBackend implements SecretsBackend {
     if (!raw) return null
 
     try {
-      const json = raw.startsWith('json:') ? raw.slice(5) : raw
-      const parsed = JSON.parse(json) as Record<string, unknown>
-      return {
-        conn_id:   connId,
-        conn_type: String(parsed.conn_type ?? 'generic'),
-        host:      parsed.host != null ? String(parsed.host) : null,
-        port:      parsed.port != null ? Number(parsed.port) : null,
-        schema:    parsed.schema != null ? String(parsed.schema) : null,
-        login:     parsed.login != null ? String(parsed.login) : null,
-        password:  parsed.password != null ? String(parsed.password) : null,
-        extra:     parsed.extra != null ? (parsed.extra as Record<string, unknown>) : null,
-      }
+      return connectionFromSecretString(connId, raw)
     } catch {
-      console.warn(`[secrets/env] failed to parse AIRFLOW_CONN_${connId.toUpperCase()} as JSON`)
+      console.warn(`[secrets/env] failed to parse ${envKey} as JSON or a connection URI`)
       return null
     }
   }
@@ -183,6 +177,14 @@ export function getSecretsBackend(): SecretsBackend {
     case 'file':
       _backend = new FileSecretsBackend()
       console.log(`[secrets] backend: file (${process.env.SECRETS_FILE_PATH ?? 'SECRETS_FILE_PATH not set'})`)
+      break
+    case 'vault':
+      _backend = new VaultSecretsBackend()   // throws on missing VAULT_* settings — a misconfiguration, not a fallback
+      console.log(`[secrets] backend: vault (${process.env.VAULT_ADDR})`)
+      break
+    case 'akeyless':
+      _backend = new AkeylessSecretsBackend()
+      console.log(`[secrets] backend: akeyless (${process.env.AKEYLESS_API_URL ?? 'https://api.akeyless.io'})`)
       break
     default:
       _backend = new NullSecretsBackend()

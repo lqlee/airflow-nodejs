@@ -21,6 +21,7 @@ import type { Db } from 'mongodb'
 import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { resolve, dirname } from 'node:path'
 import { existsSync } from 'node:fs'
+import { redact } from '../secrets/masker.js'
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -165,11 +166,13 @@ export async function appendLog(
 ): Promise<void> {
   const resolvedLevel: LogLevel = level ?? (stream === 'stderr' ? 'error' : 'info')
   const backend = getBackend()
+  // Second line of defence: secrets this process knows are masked even if the worker missed them
+  const masked = redact(line)
 
   if (backend === 'file') {
-    await appendLogFile(dagId, dagRunId, taskId, stream, line, resolvedLevel)
+    await appendLogFile(dagId, dagRunId, taskId, stream, masked, resolvedLevel)
   } else {
-    await appendLogMongo(db, dagId, dagRunId, taskId, stream, line, resolvedLevel)
+    await appendLogMongo(db, dagId, dagRunId, taskId, stream, masked, resolvedLevel)
   }
 }
 

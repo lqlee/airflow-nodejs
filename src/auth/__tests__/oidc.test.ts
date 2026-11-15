@@ -29,6 +29,7 @@ const goodClaims = (over: Record<string, unknown> = {}) => ({ iss: ISS, aud: AUD
 const config: OidcConfig = {
   issuer: ISS, audience: AUD, jwksUri: `${ISS}/jwks`, roleClaim: 'roles',
   roleValues: { admin: ['airflow-admin'], editor: ['airflow-editor'], viewer: ['airflow-viewer'] }, defaultRole: null,
+  clientId: null, clientSecret: null, redirectUri: null, scopes: 'openid profile email', postLogoutRedirectUri: null,
 }
 
 function jwksFetch(keys: unknown[]) {

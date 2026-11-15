@@ -40,6 +40,14 @@
     .badge-running   { background: #1a365d; color: #63b3ed; }
     .badge-queued    { background: #2d3748; color: #a0aec0; }
     .badge-cancelled { background: #2d2d2d; color: #718096; }
+    .badge-skipped   { background: #232a4d; color: #a3bffa; }
+    .badge-deferred  { background: #44337a; color: #d6bcfa; }
+    .badge-up_for_retry      { background: #5f370e; color: #f6e05e; }
+    .badge-up_for_reschedule { background: #1d4044; color: #81e6d9; }
+    .badge-upstream_failed   { background: #652b19; color: #fbd38d; }
+    .badge-removed   { background: #1a1a1a; color: #a0aec0; text-decoration: line-through; }
+    .task-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 10px; font-size: 11px; color: #a0aec0; }
+    .task-actions label { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; }
     .run-detail { margin-top: 24px; background: #1a1d27; border: 1px solid #2d3748; border-radius: 8px; padding: 20px; }
     .run-detail h3 { font-size: 14px; margin-bottom: 16px; }
     .task-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid #1e2130; }
@@ -608,6 +616,12 @@ const STATE_COLORS = {
   running:   { fill: '#1a365d', stroke: '#63b3ed', text: '#63b3ed' },
   queued:    { fill: '#1e2130', stroke: '#4a5568', text: '#a0aec0' },
   cancelled: { fill: '#1a1a1a', stroke: '#4a5568', text: '#718096' },
+  skipped:   { fill: '#1e2340', stroke: '#667eea', text: '#a3bffa' },
+  deferred:  { fill: '#2a2140', stroke: '#9f7aea', text: '#d6bcfa' },
+  up_for_retry:      { fill: '#3d2c0a', stroke: '#d69e2e', text: '#f6e05e' },
+  up_for_reschedule: { fill: '#13302f', stroke: '#38b2ac', text: '#81e6d9' },
+  upstream_failed:   { fill: '#3d1f0f', stroke: '#ed8936', text: '#fbd38d' },
+  removed:   { fill: '#141414', stroke: '#2d3748', text: '#4a5568' },
 };
 
 /**
@@ -684,6 +698,11 @@ const STATE_ICON = {
   queued:    '◷',
   cancelled: '⊘',
   skipped:   '↷',
+  deferred:  '⏸',
+  up_for_retry:      '↻',
+  up_for_reschedule: '⟳',
+  upstream_failed:   '⚠',
+  removed:   '−',
 };
 
 function DagGraph({ tasks, onClickTask }) {
@@ -1023,8 +1042,9 @@ function GanttChart({ tasks }) {
 
   const STATE_COLORS = {
     success: '#48bb78', failed: '#fc8181', running: '#63b3ed',
-    queued: '#a0aec0', skipped: '#667eea', deferred: '#f6ad55',
-    cancelled: '#718096',
+    queued: '#a0aec0', skipped: '#667eea', deferred: '#9f7aea',
+    cancelled: '#718096', up_for_retry: '#d69e2e', up_for_reschedule: '#38b2ac',
+    upstream_failed: '#ed8936', removed: '#2d3748',
   };
 
   const rowH = 28, padding = { left: 120, right: 16, top: 8, bottom: 24 };
@@ -1149,7 +1169,8 @@ function GridView({ dagId }) {
 
   const STATE_COLORS = {
     success:'#48bb78', failed:'#fc8181', running:'#63b3ed',
-    queued:'#a0aec0', skipped:'#667eea', deferred:'#f6ad55', cancelled:'#718096',
+    queued:'#a0aec0', skipped:'#667eea', deferred:'#9f7aea', cancelled:'#718096',
+    up_for_retry:'#d69e2e', up_for_reschedule:'#38b2ac', upstream_failed:'#ed8936', removed:'#2d3748',
   };
 
   if (!rows.length) return <div className="empty">No runs yet</div>;
@@ -1306,6 +1327,67 @@ function CalendarView({ dagId }) {
   );
 }
 
+// ── Task / run actions ───────────────────────────────────────────────
+// Every action asks the API for a dry run first, so the confirmation lists what will change.
+async function confirmAndApply(url, method, body, verb) {
+  const dry = await apiFetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, dry_run: true }) });
+  const preview = await dry.json();
+  if (!dry.ok) { alert(preview.error ?? `${verb} failed`); return false; }
+  const list = preview.task_instances ?? [];
+  if (list.length === 0) { alert(`${verb}: nothing to change — no task instance is in a state this action applies to.`); return false; }
+  const lines = list.slice(0, 15).map(t => `  ${t.task_id}${t.map_index !== null ? `[${t.map_index}]` : ''} (${t.state})`);
+  if (list.length > 15) lines.push(`  … and ${list.length - 15} more`);
+  if (!confirm(`${verb}: ${list.length} task instance(s) will change\n\n${lines.join('\n')}`)) return false;
+  const res = await apiFetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok) { alert((await res.json().catch(() => ({}))).error ?? `${verb} failed`); return false; }
+  return true;
+}
+
+function TaskActions({ runId, taskId, onDone }) {
+  const [downstream, setDownstream] = useState(true);
+  const [upstream, setUpstream] = useState(false);
+  const [onlyFailed, setOnlyFailed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const run = async (fn) => { setBusy(true); try { if (await fn()) onDone(); } finally { setBusy(false); } };
+  const rel = { include_downstream: downstream, include_upstream: upstream };
+  const taskUrl = `${BASE}/dag-runs/${runId}/tasks/${encodeURIComponent(taskId)}`;
+  const mark = (state) => run(() => confirmAndApply(taskUrl, 'PATCH', { state, ...rel }, `Mark ${state}`));
+  return (
+    <div className="task-actions">
+      <strong style={{color:'#e2e8f0',fontFamily:'monospace'}}>{taskId}</strong>
+      <label><input type="checkbox" checked={downstream} onChange={e => setDownstream(e.target.checked)} />downstream</label>
+      <label><input type="checkbox" checked={upstream} onChange={e => setUpstream(e.target.checked)} />upstream</label>
+      <label title="Clear only failed / upstream_failed instances"><input type="checkbox" checked={onlyFailed} onChange={e => setOnlyFailed(e.target.checked)} />failed only</label>
+      <button className="log-btn" disabled={busy}
+        onClick={() => run(() => confirmAndApply(`${taskUrl}/clear`, 'POST', { ...rel, only_failed: onlyFailed }, 'Clear'))}>↺ Clear</button>
+      <button className="log-btn" disabled={busy} style={{color:'#68d391'}} onClick={() => mark('success')}>✓ Mark success</button>
+      <button className="log-btn" disabled={busy} style={{color:'#fc8181'}} onClick={() => mark('failed')}>✗ Mark failed</button>
+      <button className="log-btn" disabled={busy} style={{color:'#a3bffa'}} onClick={() => mark('skipped')}>↷ Mark skipped</button>
+    </div>
+  );
+}
+
+function RunActions({ runId, isActive, onDone }) {
+  const [busy, setBusy] = useState(false);
+  const act = async (url, method, body, verb) => {
+    setBusy(true);
+    try { if (await confirmAndApply(url, method, body, verb)) onDone(); } finally { setBusy(false); }
+  };
+  const runUrl = `${BASE}/dag-runs/${runId}`;
+  return (
+    <>
+      {!isActive && <button className="btn btn-sm" disabled={busy} title="Clear every task and run again"
+        onClick={() => act(`${runUrl}/clear`, 'POST', {}, 'Re-run')}>↺ Re-run</button>}
+      {!isActive && <button className="btn btn-sm" disabled={busy} title="Clear only failed / upstream_failed tasks"
+        onClick={() => act(`${runUrl}/clear`, 'POST', { only_failed: true }, 'Clear failed')}>↺ Clear failed</button>}
+      <button className="btn btn-sm" disabled={busy} style={{background:'#1c4532',color:'#68d391'}}
+        onClick={() => act(runUrl, 'PATCH', { state: 'success' }, 'Mark run success')}>✓ Mark success</button>
+      <button className="btn btn-sm" disabled={busy} style={{background:'#4a1515',color:'#fc8181'}}
+        onClick={() => act(runUrl, 'PATCH', { state: 'failed' }, 'Mark run failed')}>✗ Mark failed</button>
+    </>
+  );
+}
+
 // ── Run Detail ────────────────────────────────────────────────────────
 function RunDetail({ runId, onClose }) {
   const [run, setRun] = useState(null);
@@ -1362,9 +1444,12 @@ function RunDetail({ runId, onClose }) {
             {cancelling ? '…' : '⏹ Cancel'}
           </button>
         )}
+        <RunActions runId={runId} isActive={isActive} onDone={fetch_} />
         <button className="refresh-btn" onClick={fetch_}>↻</button>
         <button className="refresh-btn" onClick={onClose}>✕</button>
       </div>
+
+      {logTask && <TaskActions runId={runId} taskId={logTask} onDone={fetch_} />}
 
       {view === 'graph' && (
         <>

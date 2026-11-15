@@ -3,6 +3,7 @@ import type { DagDefinition, TriggerRule } from '../dag/types.js'
 import { planExpansion, isLiteralMapped, isDynamicMapped, isMappedTask } from './mapping.js'
 import { computeEffectiveWeights } from './weights.js'
 import { recordEvent } from '../events/index.js'
+import type { TiState } from './states.js'
 
 export interface DagRun {
   dag_id: string
@@ -45,7 +46,7 @@ export interface TaskInstance {
   map_index: number | null
   /** Per-instance input value for mapped tasks; null for non-mapped tasks */
   map_value: unknown
-  state: 'queued' | 'running' | 'success' | 'failed' | 'cancelled' | 'skipped' | 'deferred'
+  state: TiState
   depends_on: string[]
   /** Trigger rule — controls when this task runs. Default: 'all_success'. */
   trigger_rule: TriggerRule
@@ -54,6 +55,8 @@ export interface TaskInstance {
   try_number: number
   max_retries: number       // max allowed retries (0 = no retries)
   retry_delay: number       // ms to wait before requeue
+  /** up_for_retry: earliest time the next try may be claimed. */
+  next_retry_at?: Date | null
   /** true = wait for this task to have succeeded/skipped in the previous run. */
   depends_on_past?: boolean
   /** Backoff multiplier (<= 1 or absent = fixed delay). */

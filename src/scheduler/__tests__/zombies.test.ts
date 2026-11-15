@@ -38,12 +38,13 @@ const reap = () => reapZombies(db, { now: NOW, thresholdMs: THRESHOLD })
 describe('reapZombies', () => {
   it('retries a task whose owner stopped heartbeating, recording the lost try as failed', async () => {
     await registerPeer('dead-1', ago(2 * THRESHOLD))
-    await db.collection('task_instances').insertOne(runningTi('t', { claimed_by: 'dead-1', max_retries: 2 }))
+    await db.collection('task_instances').insertOne(runningTi('t', { claimed_by: 'dead-1', max_retries: 2, retry_delay: 15_000 }))
 
     expect(await reap()).toEqual({ retried: 1, failed: 0, requeued: 0 })
 
     const after = await ti('t')
-    expect(after).toMatchObject({ state: 'queued', try_number: 1, claimed_by: null, started_at: null })
+    expect(after).toMatchObject({ state: 'up_for_retry', try_number: 1, claimed_by: null, ended_at: NOW })
+    expect(after!.next_retry_at).toEqual(new Date(NOW.getTime() + 15_000))   // the task's retry delay
     expect(after!.error).toMatch(/heartbeat lost.*dead-1/)
     const tries = await db.collection('task_instance_tries').find({ task_id: 't' }).toArray()
     expect(tries).toHaveLength(1)
@@ -126,7 +127,7 @@ describe('reapZombies', () => {
       runningTi('m', { map_index: 1, claimed_by: 'gone', max_retries: 0 }),
     ])
     expect(await reap()).toEqual({ retried: 1, failed: 1, requeued: 0 })
-    expect((await db.collection('task_instances').findOne({ task_id: 'm', map_index: 0 }))!.state).toBe('queued')
+    expect((await db.collection('task_instances').findOne({ task_id: 'm', map_index: 0 }))!.state).toBe('up_for_retry')
     expect((await db.collection('task_instances').findOne({ task_id: 'm', map_index: 1 }))!.state).toBe('failed')
     const tries = await db.collection('task_instance_tries').find({ task_id: 'm' }).sort({ map_index: 1 }).toArray()
     expect(tries.map(t => t.map_index)).toEqual([0, 1])

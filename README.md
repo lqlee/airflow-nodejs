@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB (or Cloud Spanner)**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-1,300+ tests · 18 API route modules · multi-user RBAC · multi-replica safe · Docker-ready
+1,400+ tests · 19 API route modules · multi-user RBAC · multi-replica safe · Docker-ready
 
 ---
 
@@ -14,7 +14,7 @@ A production-grade reimplementation of Apache Airflow's core concepts in **Node.
 | **Task execution** | Local child-process fork, BullMQ distributed mode, retries, timeouts, sensors, dynamic task mapping, task groups, resource pools |
 | **Observability** | SLA alerts, run statistics + duration histogram, event/audit log, task try history, dag warnings, import errors |
 | **Data flow** | XCom push/pull (full CRUD), connections store (encrypted), variables store (encrypted), per-run conf/tags/notes |
-| **Lifecycle** | Webhook callbacks on run completion, Human-in-the-Loop (HITL) approval gates, task clear-to-retry |
+| **Lifecycle** | Webhook callbacks on run completion, Human-in-the-Loop (HITL) approval gates, clear (with downstream / upstream / failed only), re-run, mark task or run success / failed |
 | **Operations** | Graceful shutdown with worker drain, config API, providers API, plugins API |
 | **Auth** | Multi-user RBAC (viewer / editor / admin roles), scrypt-hashed DB-backed API keys, env-key fallback |
 | **Versioning** | Dag version history (sha256 hash), source code snapshots, backfill_id linkage on runs |
@@ -185,7 +185,12 @@ GET  /dag-runs/:runId/tasks                    all task instances (?state=)
 GET  /dag-runs/:runId/tasks/:taskId            single task (?map_index=)
 GET  /dag-runs/:runId/tasks/:taskId/tries      retry history
 GET  /dag-runs/:runId/tasks/:taskId/logs       log lines (?level=debug|info|warn|error &stream=stdout|stderr)
-POST /dag-runs/:runId/tasks/:taskId/clear      reset to queued + re-run
+POST /dag-runs/:runId/tasks/:taskId/clear      reset finished instance(s) to queued + re-run
+                                               body: include_downstream, include_upstream, only_failed, dry_run
+POST /dag-runs/:runId/clear                    re-run the whole run (body: only_failed, dry_run)
+PATCH /dag-runs/:runId/tasks/:taskId           mark success | failed | skipped
+                                               body: state, map_index, include_downstream, include_upstream, dry_run
+PATCH /dag-runs/:runId                         mark the run success | failed (body: state, dry_run)
 GET  /dag-runs/:runId/xcoms                    all xcoms (?task_id= ?key=)
 GET  /dag-runs/:runId/xcoms/:taskId/:key       single xcom (?map_index=)
 POST /dag-runs/:runId/xcoms                    push xcom value via API
@@ -259,11 +264,12 @@ Scheduler loop (5s poll)
   │                      dataset triggers, zombie reaping, retention purge
   ├── Cron scheduler     node-cron fires runs on schedule (logical_date = fire time)
   ├── Claim              atomic findOneAndUpdate (safe for concurrent schedulers)
-  │     └── Gates: dependency, sensor poke_at, HITL approval, backfill pause
+  │     └── Gates: dependency, retry delay, sensor poke_at, HITL approval, backfill pause
+  │     └── Limits: pool slots + maxActiveTis counted in the DB under short claim locks;
+  │                 at most as many claims as this process has free workers (MAX_WORKERS)
   │     └── Stamps claimed_by = this process, so its heartbeat vouches for the task
   └── Executor
         ├── local mode   fork child_process per task
-        │     ├── Resource pool semaphore (per-pool slot limit)
         │     └── EXEC_PATH auto-detects dev (tsx) vs prod (node)
         └── BullMQ mode  enqueue to Redis → worker picks up
 
@@ -288,7 +294,24 @@ MongoDB collections:
   api_keys             scrypt-hashed tokens + roles
   scheduler_instances  process registry + heartbeats (zombie detection)
   scheduler_leases     leader lease
+  claim_locks          short locks serializing claims per pool / capped task
 ```
+
+### Task instance states
+
+Airflow's model: `queued` → `running` → `success` / `failed`, plus
+
+| State | Meaning |
+|-------|---------|
+| `up_for_retry` | A try failed and retries are left; claimable again once `next_retry_at` passes (the delay lives in the DB, so it survives restarts and any replica can pick it up) |
+| `up_for_reschedule` | A sensor poke returned false; claimable again at `next_poke_at` |
+| `deferred` | Waiting on a trigger; holds no worker or pool slot |
+| `upstream_failed` | Can never run because an upstream failed (`skipped` is used when skips are the reason) — follows Airflow's trigger-rule outcomes, e.g. `one_failed` fires on an `upstream_failed` upstream |
+| `removed` | The task was deleted from the Dag while the run was active (restored to `queued` if it comes back) |
+| `skipped` / `cancelled` | Branch / short-circuit skip; run cancelled |
+
+A late result from an executor (after a cancel, timeout, mark or zombie hand-over) is dropped rather than
+overwriting the newer state.
 
 ### Running several replicas
 
@@ -300,8 +323,10 @@ Any number of replicas can share one database:
   `HEARTBEAT_INTERVAL_MS`; if the leader dies, another replica takes over within `SCHEDULER_LEASE_TTL_MS`.
 - **One run per `(dag_id, logical_date)`** is enforced by a unique index, so a leadership hand-over or a
   backfill racing the scheduler cannot create the same scheduled run twice. Manual runs have no logical date.
+- **Pools and task concurrency** (`pool`, `maxActiveTis`, `maxActiveTisPerRun`) are counted from the running
+  task instances in the DB when a task is claimed, so they hold across replicas and in BullMQ / Kubernetes mode.
 - **Zombie tasks:** a task stays `running` only while the process that claimed it keeps heartbeating.
-  Once its owner is silent for `ZOMBIE_THRESHOLD_MS`, the task is retried (if it has retries left) or failed,
+  Once its owner is silent for `ZOMBIE_THRESHOLD_MS`, the task goes `up_for_retry` (if it has retries left) or fails,
   with the lost attempt recorded in its try history. A graceful shutdown hands its running tasks back
   to the queue instead.
 
@@ -321,7 +346,7 @@ the task is then retried elsewhere while the old pod finishes.
 | `ADMIN_KEY` | _(unset)_ | Bootstrap admin key for DB-backed key management |
 | `REDIS_URL` | _(unset)_ | Redis URL — enables BullMQ distributed mode |
 | `WORKER_CONCURRENCY` | `4` | Concurrent tasks per BullMQ worker |
-| `MAX_WORKERS` | `8` | Max concurrent tasks in local fork mode |
+| `MAX_WORKERS` | `8` | Max concurrent tasks per process in local fork mode — a scheduler claims no more than its free slots |
 | `DRAIN_TIMEOUT_MS` | `20000` | Graceful shutdown worker drain timeout |
 | `PORT` | `3000` | API + UI port |
 | `HOST` | `0.0.0.0` | API bind address |
@@ -1757,7 +1782,7 @@ tasks: {
 **Behaviors:**
 - Source pushes N items → N instances run in parallel; downstream waits for all
 - Source pushes `[]` → mapped task auto-skipped; run terminates cleanly
-- Source fails → mapped task skipped via cascade; run terminates cleanly
+- Source fails → mapped task `upstream_failed` via cascade; run terminates cleanly
 
 See `dags/dynamic_mapping_demo.js` for a working example.
 
@@ -1817,7 +1842,7 @@ Trigger rules control when a task runs based on the states of its upstream tasks
 | `one_failed` | At least one failed — useful for alerts |
 | `none_failed` | None failed (all success or skipped) |
 
-Tasks whose rule can **never** be satisfied are automatically marked `skipped` so the run always reaches a terminal state.
+Tasks whose rule can **never** be satisfied are finished automatically so the run always reaches a terminal state: `upstream_failed` when an upstream failure is the reason, `skipped` otherwise (Airflow's outcomes). `one_failed` / `all_failed` count `upstream_failed` upstreams as failures; `one_done` does not count them as done.
 
 ```js
 export default dag({

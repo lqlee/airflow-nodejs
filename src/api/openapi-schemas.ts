@@ -5,6 +5,9 @@
  * here, keyed by "METHOD /fastify/path". openapi.test.ts fails when a write route has no entry or an
  * entry no longer matches a route, so this file cannot silently drift from the API.
  */
+import { TI_STATES, TI_SETTABLE } from '../scheduler/states.js'
+import { EVENT_TYPES } from '../events/index.js'
+
 export type JsonSchema = Record<string, unknown>
 
 export interface OperationDoc {
@@ -23,6 +26,7 @@ const int = (description?: string): JsonSchema => ({ type: 'integer', ...(descri
 const obj = (properties: Record<string, JsonSchema>, required: string[] = []): JsonSchema =>
   ({ type: 'object', properties, ...(required.length ? { required } : {}), additionalProperties: false })
 
+const bool: JsonSchema = { type: 'boolean' }
 const mapIndex = { map_index: int('Mapped instance index; omit for all instances / non-mapped tasks') }
 const page = { limit: int('Page size'), cursor: str('Opaque cursor from the previous page') }
 
@@ -46,13 +50,29 @@ export const OPERATION_DOCS: Record<string, OperationDoc> = {
   // ── Runs, task instances, XCom ──
   'POST /dag-runs/:runId/cancel': { summary: 'Cancel a run and its unfinished tasks', noBody: true },
   'POST /dag-runs/:runId/note': { body: obj({ note: str() }, ['note']) },
-  'GET /dag-runs/:runId/tasks': { query: { state: { type: 'string', enum: ['queued', 'running', 'success', 'failed', 'cancelled'] } } },
+  'GET /dag-runs/:runId/tasks': { query: { state: { type: 'string', enum: [...TI_STATES] } } },
   'GET /dag-runs/:runId/tasks/:taskId': { query: mapIndex },
   'GET /dag-runs/:runId/tasks/:taskId/tries': { query: mapIndex },
   'GET /dag-runs/:runId/tasks/:taskId/logs': {
     query: { level: { type: 'string', enum: ['debug', 'info', 'warn', 'error'] }, stream: { type: 'string', enum: ['stdout', 'stderr'] } },
   },
-  'POST /dag-runs/:runId/tasks/:taskId/clear': { summary: 'Re-queue finished instance(s) of a task and re-open the run', query: mapIndex, noBody: true },
+  'POST /dag-runs/:runId/tasks/:taskId/clear': {
+    summary: 'Re-queue finished instance(s) of a task (optionally its downstream / upstream tasks) and re-open the run; 409 when nothing is finished',
+    query: mapIndex,
+    body: obj({ include_downstream: bool, include_upstream: bool, only_failed: bool, dry_run: bool }),
+  },
+  'POST /dag-runs/:runId/clear': {
+    summary: 'Clear every finished instance of the run (re-run it), or only the failed ones',
+    body: obj({ only_failed: bool, dry_run: bool }),
+  },
+  'PATCH /dag-runs/:runId/tasks/:taskId': {
+    summary: 'Mark task instances success / failed / skipped (a running instance keeps running; its result is dropped)',
+    body: obj({ state: { type: 'string', enum: [...TI_SETTABLE] }, map_index: int(), include_downstream: bool, include_upstream: bool, dry_run: bool }, ['state']),
+  },
+  'PATCH /dag-runs/:runId': {
+    summary: 'Mark a run success (all instances → success) or failed (running → failed, waiting → skipped)',
+    body: obj({ state: { type: 'string', enum: ['success', 'failed'] }, dry_run: bool }, ['state']),
+  },
   'GET /dag-runs/:runId/xcoms': { query: { task_id: str(), key: str() } },
   'GET /dag-runs/:runId/xcoms/:taskId/:key': { query: mapIndex },
   'POST /dag-runs/:runId/xcoms': {
@@ -99,5 +119,5 @@ export const OPERATION_DOCS: Record<string, OperationDoc> = {
   'GET /sla-alerts': { query: { unacked: { type: 'string', enum: ['true', 'false'], description: 'Only unacknowledged alerts' } } },
   'GET /datasets': { query: { uri: str(), limit: int() } },
   'GET /dag-warnings': { query: { warning_type: str() } },
-  'GET /event-logs': { query: { dag_id: str(), dag_run_id: str(), task_id: str(), event_type: str(), ...page } },
+  'GET /event-logs': { query: { dag_id: str(), dag_run_id: str(), task_id: str(), event_type: { type: 'string', enum: [...EVENT_TYPES] }, ...page } },
 }

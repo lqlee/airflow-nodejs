@@ -7,7 +7,7 @@
  * Advisor-specified verify cases:
  *  1. source pushes N items → N instances run, downstream runs once after all
  *  2. source pushes [] → mapped task skipped, run terminates (not hung)
- *  3. source fails → placeholder skipped via cascade, run terminates (not hung)
+ *  3. source fails → placeholder upstream_failed via cascade, run terminates (not hung)
  *  4. instance count is derived at runtime, not authoring time
  *
  * Additional cases:
@@ -209,9 +209,9 @@ describe('XCom-driven dynamic mapping — integration', () => {
     expect(['success', 'failed']).toContain(state)
   })
 
-  // ── Case 3: source fails → placeholder skipped via cascade ───────────────
+  // ── Case 3: source fails → placeholder upstream_failed via cascade ───────
 
-  it('source fails → placeholder skipped via all_success cascade, run terminates', async () => {
+  it('source fails → placeholder upstream_failed via all_success cascade, run terminates', async () => {
     const dag: DagDefinition = {
       id: 'dm_source_fail',
       schedule: null,
@@ -230,7 +230,7 @@ describe('XCom-driven dynamic mapping — integration', () => {
 
     expect(await taskState(runId, 'source')).toBe('failed')
     const instances = await taskInstances(runId, 'process')
-    expect(instances.every(i => i.state === 'skipped')).toBe(true)
+    expect(instances.every(i => i.state === 'upstream_failed')).toBe(true)
     expect(await runState(runId)).toBe('failed')
   })
 

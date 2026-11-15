@@ -170,9 +170,11 @@ describe('run_success / run_failed events on advanceRun terminal state', () => {
     register(dag)
     const runId = await createRun(db, dag)
     await advanceRun(db, runId)
-    await new Promise(r => setTimeout(r, 50))
 
-    const events = await db.collection('event_logs').find({ event_type: 'run_failed', dag_run_id: runId }).toArray()
+    // The event write is fire-and-forget — wait for it instead of a fixed sleep
+    const events = await waitFor(
+      () => db.collection('event_logs').find({ event_type: 'run_failed', dag_run_id: runId }).toArray(),
+      e => e.length > 0)
     expect(events).toHaveLength(1)
   })
 

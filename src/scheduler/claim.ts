@@ -1,24 +1,13 @@
 import { ObjectId, type Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
 import { INSTANCE_ID } from './instance.js'
+import { aggregateByTask, TI_CLAIMABLE, type AggState } from './states.js'
+import { ClaimLimits } from './claim-limits.js'
 
-// Terminal states — a task is done once it reaches one of these
-// 'deferred' is non-terminal but not claimable — polled separately by pollDeferredTasks
-const TERMINAL = new Set(['success', 'failed', 'cancelled', 'skipped'])
+type UpstreamState = Exclude<AggState, 'removed'>
 
-/**
- * Per-task-id aggregate state, computed from all mapped instances.
- * Non-mapped tasks have exactly 1 instance.
- * Mapped tasks: success iff all instances succeeded; failed iff any terminal-failed.
- */
-function taskAggState(states: string[]): 'success' | 'failed' | 'skipped' | 'pending' {
-  if (states.length === 0) return 'pending'
-  if (states.every(s => s === 'success')) return 'success'
-  if (states.every(s => s === 'skipped')) return 'skipped'
-  if (states.some(s => s === 'failed')) return 'failed'
-  if (states.every(s => TERMINAL.has(s))) return 'skipped'  // all done but not success/failed
-  return 'pending'  // at least one not yet terminal
-}
+/** failed or upstream_failed — what the failure-based rules count (Airflow: failed + upstream_failed). */
+const isFail = (s: UpstreamState) => s === 'failed' || s === 'upstream_failed'
 
 /**
  * Returns true if this task's trigger_rule is satisfied by the upstream aggregate states.
@@ -26,7 +15,7 @@ function taskAggState(states: string[]): 'success' | 'failed' | 'skipped' | 'pen
  */
 export function isSatisfied(
   triggerRule: string,
-  upstreamStates: Array<'success' | 'failed' | 'skipped' | 'pending'>,
+  upstreamStates: UpstreamState[],
   /** Parallel to upstreamStates: true where that upstream is a setup task. Only `all_done_setup_success` reads it. */
   setupFlags: boolean[] = [],
 ): boolean {
@@ -40,23 +29,24 @@ export function isSatisfied(
     case 'all_success':
       return upstreamStates.every(s => s === 'success')
     case 'all_failed':
-      return upstreamStates.every(s => s === 'failed' || s === 'skipped')
+      return upstreamStates.every(s => isFail(s) || s === 'skipped')
     case 'all_done':
       return true  // all upstreams are terminal (pending check above)
     case 'one_success':
       return upstreamStates.some(s => s === 'success')
     case 'one_failed':
-      return upstreamStates.some(s => s === 'failed')
+      return upstreamStates.some(isFail)
     case 'none_failed':
       return upstreamStates.every(s => s === 'success' || s === 'skipped')
     case 'one_done':
+      // upstream_failed is not "done" here: that task never ran (Airflow counts success + failed only)
       return upstreamStates.some(s => s === 'success' || s === 'failed')
     case 'none_skipped':
       return upstreamStates.every(s => s !== 'skipped')
     case 'all_skipped':
       return upstreamStates.every(s => s === 'skipped')
     case 'none_failed_min_one_success':
-      return upstreamStates.every(s => s !== 'failed') && upstreamStates.some(s => s === 'success')
+      return !upstreamStates.some(isFail) && upstreamStates.some(s => s === 'success')
     case 'all_done_min_one_success':
       // Skipped upstreams are not "done" for this rule
       return upstreamStates.every(s => s !== 'skipped') && upstreamStates.some(s => s === 'success')
@@ -70,24 +60,13 @@ export function isSatisfied(
   }
 }
 
-/** Setup flags for a task's upstreams, parallel to the `depends_on` order. */
-function setupFlagsFor(inst: TaskInstance, setupIds: Set<string>): boolean[] {
-  return inst.depends_on.map(dep => setupIds.has(dep))
-}
-
-function collectSetupIds(instances: TaskInstance[]): Set<string> {
-  return new Set(instances.filter(i => i.is_setup).map(i => i.task_id))
-}
-
 /**
  * Returns true if this task's trigger_rule can NEVER be satisfied given current upstream states.
- * When unsatisfiable, the task should be marked 'skipped' so the run can terminate.
- *
  * A rule is unsatisfiable when all upstreams are terminal AND satisfied() returned false.
  */
 export function isUnsatisfiable(
   triggerRule: string,
-  upstreamStates: Array<'success' | 'failed' | 'skipped' | 'pending'>,
+  upstreamStates: UpstreamState[],
   setupFlags: boolean[] = [],
 ): boolean {
   // Still waiting on upstreams — not yet unsatisfiable
@@ -96,10 +75,62 @@ export function isUnsatisfiable(
   return !isSatisfied(triggerRule, upstreamStates, setupFlags)
 }
 
+/**
+ * The state a task gets when its rule can never be satisfied (null while it still can be), following
+ * Airflow's TriggerRuleDep: upstream_failed when the rule failed because of an upstream failure,
+ * skipped when it failed because of skips (or because a failure-triggered rule saw no failure).
+ */
+export function unsatisfiedState(
+  triggerRule: string,
+  upstreamStates: UpstreamState[],
+  setupFlags: boolean[] = [],
+): 'skipped' | 'upstream_failed' | null {
+  if (!isUnsatisfiable(triggerRule, upstreamStates, setupFlags)) return null
+  const failed = upstreamStates.some(isFail)
+  const allSkipped = upstreamStates.length > 0 && upstreamStates.every(s => s === 'skipped')
+  const anySkipped = upstreamStates.some(s => s === 'skipped')
+  switch (triggerRule) {
+    case 'all_failed': case 'one_failed': case 'one_done': case 'none_skipped': case 'all_skipped':
+      return 'skipped'
+    case 'one_success': case 'none_failed_min_one_success':
+      return failed || !allSkipped ? 'upstream_failed' : 'skipped'
+    case 'all_done_min_one_success':
+      return anySkipped ? 'skipped' : 'upstream_failed'
+    case 'all_done_setup_success': {
+      const setups = upstreamStates.filter((_, i) => setupFlags[i])
+      return setups.every(s => s === 'skipped') ? 'skipped' : 'upstream_failed'
+    }
+    default:   // all_success, none_failed, unknown rules
+      return failed ? 'upstream_failed' : 'skipped'
+  }
+}
+
+/**
+ * Upstream aggregate states for a task, parallel to its setup flags. Removed upstreams are dropped:
+ * like Airflow, a task deleted from the Dag neither blocks nor fails its downstream tasks.
+ */
+function upstreamOf(
+  inst: TaskInstance, agg: Map<string, AggState>, setupIds: Set<string>,
+): { states: UpstreamState[]; setupFlags: boolean[] } {
+  const states: UpstreamState[] = []
+  const setupFlags: boolean[] = []
+  for (const dep of inst.depends_on) {
+    const s = agg.get(dep) ?? 'pending'
+    if (s === 'removed') continue
+    states.push(s)
+    setupFlags.push(setupIds.has(dep))
+  }
+  return { states, setupFlags }
+}
+
+function collectSetupIds(instances: TaskInstance[]): Set<string> {
+  return new Set(instances.filter(i => i.is_setup).map(i => i.task_id))
+}
+
 /** depends_on_past passes when the task is absent from the previous run or every instance succeeded/was skipped. */
 export function isPastSatisfied(previousStates: string[] | undefined): boolean {
   if (!previousStates || previousStates.length === 0) return true
-  return previousStates.every(s => s === 'success' || s === 'skipped')
+  return previousStates.every(s => s === 'success' || s === 'skipped' || s === 'removed')
 }
 
 /**
@@ -138,36 +169,43 @@ async function getPreviousRunTaskStates(db: Db, dagRunId: string): Promise<Map<s
   return result
 }
 
+const CLAIMABLE: ReadonlySet<string> = new Set(TI_CLAIMABLE)
+
+/** Time gates: a retry waits for next_retry_at, a sensor (reschedule mode) for next_poke_at. */
+function isDue(inst: TaskInstance, now: Date): boolean {
+  if (inst.state === 'up_for_retry' && inst.next_retry_at && new Date(inst.next_retry_at) > now) return false
+  if (inst.next_poke_at !== null && inst.next_poke_at !== undefined && new Date(inst.next_poke_at) > now) return false
+  return true
+}
+
+export interface ClaimOptions {
+  /** Claim at most this many instances (free local worker slots). Default: no limit. */
+  limit?: number
+  now?: Date
+}
+
 /**
- * Atomically claim ALL currently-ready queued tasks for a run.
- * Readiness is evaluated in JS against trigger rules, then claimed atomically.
- *
- * Returns claimed tasks. Also returns a list of task_ids that are now unsatisfiable
- * (should be skipped by the caller).
+ * Atomically claim the currently-ready instances of a run: queued ones whose trigger rule is met,
+ * plus up_for_retry / up_for_reschedule ones whose wait is over.
+ * Readiness is evaluated in JS; each claim is a compare-and-set on the instance's state.
+ * Pools and per-task concurrency are admitted by ClaimLimits (DB counts under claim locks).
  */
 export async function claimReadyTasks(
   db: Db,
   dagRunId: string,
+  opts: ClaimOptions = {},
 ): Promise<TaskInstance[]> {
+  const limit = opts.limit ?? Infinity
+  if (limit <= 0) return []
+  const now = opts.now ?? new Date()
+
   // Fetch ALL instances for this run to compute upstream states
   const allInstances = await db
     .collection<TaskInstance>('task_instances')
     .find({ dag_run_id: dagRunId })
     .toArray()
 
-  // Group by task_id — collect all instance states
-  const byTaskId = new Map<string, string[]>()
-  for (const inst of allInstances) {
-    const arr = byTaskId.get(inst.task_id) ?? []
-    arr.push(inst.state)
-    byTaskId.set(inst.task_id, arr)
-  }
-
-  // Compute aggregate state per task_id
-  const aggState = new Map<string, 'success' | 'failed' | 'skipped' | 'pending'>()
-  for (const [taskId, states] of byTaskId) {
-    aggState.set(taskId, taskAggState(states))
-  }
+  const aggState = aggregateByTask(allInstances)
 
   // Sort: higher priority first, then FIFO (created_at ascending) as tiebreaker.
   // This ensures high-priority tasks are claimed before low-priority ones when
@@ -182,99 +220,69 @@ export async function claimReadyTasks(
     return ta - tb
   })
 
-  const now = new Date()
   const claimed: TaskInstance[] = []
   const setupIds = collectSetupIds(allInstances)
 
   // depends_on_past gate — resolve the previous run's task states once per claim
-  const pastStates = allInstances.some(i => i.depends_on_past && i.state === 'queued')
+  const pastStates = allInstances.some(i => i.depends_on_past && CLAIMABLE.has(i.state))
     ? await getPreviousRunTaskStates(db, dagRunId)
     : null
 
-  // Per-task concurrency (maxActiveTis / maxActiveTisPerRun) — running counts per task_id,
-  // bumped after every claim so one pass cannot claim past the cap.
-  const runningInRun = new Map<string, number>()
-  for (const i of allInstances) {
-    if (i.state === 'running') runningInRun.set(i.task_id, (runningInRun.get(i.task_id) ?? 0) + 1)
-  }
-  const runningInDag = await countRunningAcrossRuns(db, allInstances)
+  const limits = new ClaimLimits(db)
+  try {
+    for (const inst of allInstances) {
+      if (claimed.length >= limit) break
+      if (!CLAIMABLE.has(inst.state)) continue
 
-  for (const inst of allInstances) {
-    if (inst.state !== 'queued') continue
+      // Dynamic placeholder gate — never execute; only expandDynamicMapped handles these
+      if (inst.is_dynamic_placeholder) continue
 
-    // Dynamic placeholder gate — never execute; only expandDynamicMapped handles these
-    if (inst.is_dynamic_placeholder) continue
+      // Retry delay / sensor poke gate
+      if (!isDue(inst, now)) continue
 
-    // Sensor poke gate
-    if (inst.next_poke_at !== null && inst.next_poke_at > now) continue
+      // HITL gate
+      if (inst.is_hitl && inst.hitl_state !== 'approved') continue
 
-    // HITL gate
-    if (inst.is_hitl && inst.hitl_state !== 'approved') continue
+      // depends_on_past gate
+      if (inst.depends_on_past && !isPastSatisfied(pastStates?.get(inst.task_id))) continue
 
-    // depends_on_past gate
-    if (inst.depends_on_past && !isPastSatisfied(pastStates?.get(inst.task_id))) continue
+      // Evaluate trigger rule against upstream aggregate states
+      const up = upstreamOf(inst, aggState, setupIds)
+      if (!isSatisfied(inst.trigger_rule ?? 'all_success', up.states, up.setupFlags)) continue
 
-    // Evaluate trigger rule against upstream aggregate states
-    const upstreamStates = inst.depends_on.map(dep => aggState.get(dep) ?? 'pending')
-    const rule = inst.trigger_rule ?? 'all_success'
+      // Pool slots + maxActiveTis / maxActiveTisPerRun
+      if (!(await limits.admit(inst))) continue
 
-    if (!isSatisfied(rule, upstreamStates, setupFlagsFor(inst, setupIds))) continue
-
-    // Per-task concurrency gates
-    const perRun = inst.max_active_tis_per_run ?? 0
-    if (perRun > 0 && (runningInRun.get(inst.task_id) ?? 0) >= perRun) continue
-    const perDag = inst.max_active_tis ?? 0
-    if (perDag > 0 && (runningInDag.get(inst.task_id) ?? 0) >= perDag) continue
-
-    // Atomically claim this specific instance
-    const claimed_inst = await db.collection<TaskInstance>('task_instances').findOneAndUpdate(
-      { dag_run_id: dagRunId, task_id: inst.task_id, map_index: inst.map_index ?? null, state: 'queued' },
-      // claimed_by: the owner whose heartbeat keeps this task from being reaped as a zombie
-      { $set: { state: 'running', started_at: new Date(), claimed_by: INSTANCE_ID } },
-      { returnDocument: 'after' },
-    )
-    if (claimed_inst) {
-      claimed.push(claimed_inst)
-      runningInRun.set(inst.task_id, (runningInRun.get(inst.task_id) ?? 0) + 1)
-      runningInDag.set(inst.task_id, (runningInDag.get(inst.task_id) ?? 0) + 1)
+      // Atomically claim this specific instance (CAS on the state it was read in)
+      const claimedInst = await db.collection<TaskInstance>('task_instances').findOneAndUpdate(
+        { dag_run_id: dagRunId, task_id: inst.task_id, map_index: inst.map_index ?? null, state: inst.state },
+        // claimed_by: the owner whose heartbeat keeps this task from being reaped as a zombie
+        { $set: { state: 'running', started_at: new Date(), ended_at: null, claimed_by: INSTANCE_ID } },
+        { returnDocument: 'after' },
+      )
+      if (claimedInst) {
+        claimed.push(claimedInst)
+        limits.commit(inst)
+      }
     }
+  } finally {
+    await limits.release()
   }
 
   return claimed
 }
 
 /**
- * Running instance counts per task_id across ALL runs of the Dag — only for task_ids that
- * have a queued instance with `max_active_tis` set (empty map, no query, otherwise).
- * Count-then-claim, so not atomic across several scheduler processes.
- */
-async function countRunningAcrossRuns(db: Db, runInstances: TaskInstance[]): Promise<Map<string, number>> {
-  const capped = new Map<string, string>()  // task_id → dag_id
-  for (const i of runInstances) {
-    if (i.state === 'queued' && (i.max_active_tis ?? 0) > 0) capped.set(i.task_id, i.dag_id)
-  }
-  const counts = new Map<string, number>()
-  if (capped.size === 0) return counts
-  const dagId = [...capped.values()][0]
-  const rows = await db.collection('task_instances').aggregate<{ _id: string; n: number }>([
-    { $match: { dag_id: dagId, state: 'running', task_id: { $in: [...capped.keys()] } } },
-    { $group: { _id: '$task_id', n: { $sum: 1 } } },
-  ]).toArray()
-  for (const r of rows) counts.set(r._id, r.n)
-  return counts
-}
-
-/**
- * Mark all queued tasks whose trigger rule is permanently unsatisfiable as 'skipped'.
+ * Finish every queued task whose trigger rule can never be satisfied: upstream_failed when an upstream
+ * failure is the reason, skipped otherwise (see unsatisfiedState).
  * Called after each execution wave so runs can terminate cleanly.
  *
- * Returns the number of tasks skipped.
- * Cascades: if a skipped task was an upstream for another task, caller should re-evaluate.
+ * Returns the number of tasks finished this way.
  */
 export async function skipUnsatisfiableTasks(db: Db, dagRunId: string): Promise<number> {
-  let totalSkipped = 0
+  let total = 0
 
-  // Cascade: skipping a task changes aggregate states → may make more tasks unsatisfiable
+  // Cascade: finishing a task changes aggregate states → may make more tasks unsatisfiable
   // Iterate until stable (usually 1-2 passes for simple DAGs)
   for (let pass = 0; pass < 20; pass++) {
     const allInstances = await db
@@ -282,43 +290,28 @@ export async function skipUnsatisfiableTasks(db: Db, dagRunId: string): Promise<
       .find({ dag_run_id: dagRunId })
       .toArray()
 
-    const byTaskId = new Map<string, string[]>()
-    for (const inst of allInstances) {
-      const arr = byTaskId.get(inst.task_id) ?? []
-      arr.push(inst.state)
-      byTaskId.set(inst.task_id, arr)
-    }
-
-    const aggState = new Map<string, 'success' | 'failed' | 'skipped' | 'pending'>()
-    for (const [taskId, states] of byTaskId) {
-      aggState.set(taskId, taskAggState(states))
-    }
-
-    // Find all queued instances that are now unsatisfiable
+    const aggState = aggregateByTask(allInstances)
     const setupIds = collectSetupIds(allInstances)
-    const toSkip: TaskInstance[] = []
+    const toFinish: Array<{ inst: TaskInstance; state: 'skipped' | 'upstream_failed' }> = []
     for (const inst of allInstances) {
       if (inst.state !== 'queued') continue
-      const upstreamStates = inst.depends_on.map(dep => aggState.get(dep) ?? 'pending')
-      const rule = inst.trigger_rule ?? 'all_success'
-      if (isUnsatisfiable(rule, upstreamStates, setupFlagsFor(inst, setupIds))) {
-        toSkip.push(inst)
-      }
+      const up = upstreamOf(inst, aggState, setupIds)
+      const state = unsatisfiedState(inst.trigger_rule ?? 'all_success', up.states, up.setupFlags)
+      if (state) toFinish.push({ inst, state })
     }
 
-    if (toSkip.length === 0) break
+    if (toFinish.length === 0) break
 
-    // Mark them skipped
-    for (const inst of toSkip) {
+    for (const { inst, state } of toFinish) {
       await db.collection<TaskInstance>('task_instances').updateOne(
         { dag_run_id: dagRunId, task_id: inst.task_id, map_index: inst.map_index ?? null, state: 'queued' },
-        { $set: { state: 'skipped', ended_at: new Date() } },
+        { $set: { state, ended_at: new Date() } },
       )
     }
-    totalSkipped += toSkip.length
+    total += toFinish.length
   }
 
-  return totalSkipped
+  return total
 }
 
 /**
@@ -458,26 +451,11 @@ export async function expandDynamicMapped(db: Db, dagRunId: string): Promise<num
 
   if (placeholders.length === 0) return 0
 
-  // Build aggregate state map for dependency checking
+  // Aggregate state of the source tasks
   const allInstances = await db.collection<TaskInstance>('task_instances')
     .find({ dag_run_id: dagRunId })
     .toArray()
-
-  const byTaskId = new Map<string, string[]>()
-  for (const inst of allInstances) {
-    const arr = byTaskId.get(inst.task_id) ?? []
-    arr.push(inst.state)
-    byTaskId.set(inst.task_id, arr)
-  }
-
-  const aggState = new Map<string, 'success' | 'failed' | 'skipped' | 'pending'>()
-  for (const [taskId, states] of byTaskId) {
-    // Simplified: success = all success; otherwise check terminals
-    if (states.every(s => s === 'success')) aggState.set(taskId, 'success')
-    else if (states.some(s => s === 'failed')) aggState.set(taskId, 'failed')
-    else if (states.every(s => TERMINAL.has(s))) aggState.set(taskId, 'skipped')
-    else aggState.set(taskId, 'pending')
-  }
+  const aggState = aggregateByTask(allInstances)
 
   let totalCreated = 0
 

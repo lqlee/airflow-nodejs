@@ -31,6 +31,11 @@ export function activeWorkers(): number {
   return active
 }
 
+/** Slots free right now (claims are capped by this so tasks are not claimed only to wait here). */
+export function freeWorkerSlots(): number {
+  return Math.max(0, MAX_WORKERS - active - queue.length)
+}
+
 /** Current queue depth (for monitoring). */
 export function queueDepth(): number {
   return queue.length

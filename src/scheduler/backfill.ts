@@ -1,4 +1,5 @@
 import cronParser from 'cron-parser'
+import { TI_UNFINISHED } from './states.js'
 import { ObjectId, type Db } from 'mongodb'
 import type { DagDefinition } from '../dag/types.js'
 import { createRun, DuplicateRunError } from './runs.js'
@@ -217,7 +218,7 @@ export async function cancelBackfill(db: Db, backfillId: string): Promise<{ canc
     )
     if (runResult) {
       await db.collection('task_instances').updateMany(
-        { dag_run_id: runId, state: { $in: ['queued', 'running'] } },
+        { dag_run_id: runId, state: { $in: [...TI_UNFINISHED] } },
         { $set: { state: 'cancelled', ended_at: new Date(), error: 'Backfill cancelled' } },
       )
       runsCancelled++

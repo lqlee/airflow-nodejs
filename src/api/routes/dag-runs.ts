@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify'
 import { ObjectId } from 'mongodb'
 import { getTaskLogs } from '../../logs/index.js'
-import { cancelRun, clearTaskInstance, advanceRun } from '../../scheduler/index.js'
+import { cancelRun } from '../../scheduler/index.js'
+import { TI_STATES } from '../../scheduler/states.js'
 import { xcomPush } from '../../xcom/index.js'
 
 export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
@@ -19,7 +20,7 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
       .find({ dag_run_id: runId })
       .project({ task_id: 1, group_id: 1, map_index: 1, map_value: 1, state: 1,
                  started_at: 1, ended_at: 1, error: 1, depends_on: 1,
-                 is_sensor: 1, poke_count: 1, next_poke_at: 1, first_poked_at: 1 })
+                 is_sensor: 1, poke_count: 1, next_poke_at: 1, first_poked_at: 1, next_retry_at: 1 })
       .toArray()
 
     return reply.send({
@@ -47,6 +48,7 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
         poke_count: t.poke_count ?? 0,
         next_poke_at: t.next_poke_at ?? null,
         first_poked_at: t.first_poked_at ?? null,
+        next_retry_at: t.next_retry_at ?? null,
       })),
     })
   })
@@ -393,6 +395,7 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
         sensor_timeout_ms: t.sensor_timeout_ms ?? null,
         next_poke_at: t.next_poke_at ?? null,
         first_poked_at: t.first_poked_at ?? null,
+        next_retry_at: t.next_retry_at ?? null,
         created_at: t.created_at,
       })
 
@@ -408,7 +411,7 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
       const { runId } = req.params
       if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
 
-      const VALID_STATES = new Set(['queued', 'running', 'success', 'failed', 'cancelled'])
+      const VALID_STATES = new Set<string>(TI_STATES)
       const filter: Record<string, unknown> = { dag_run_id: runId }
       if (req.query.state) {
         if (!VALID_STATES.has(req.query.state)) {
@@ -436,55 +439,6 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
         error: t.error ?? null,
         is_sensor: t.is_sensor ?? false,
       })))
-    },
-  )
-
-  // POST /dag-runs/:runId/tasks/:taskId/clear — reset a terminal task instance back to queued
-  // Query param: ?map_index=N to target a specific mapped instance; omit to clear all instances.
-  // Only clears instances in {success, failed, cancelled} — returns 409 for running instances.
-  // Also resets the parent run to 'queued' so the scheduler re-advances it.
-  app.post<{
-    Params: { runId: string; taskId: string }
-    Querystring: { map_index?: string }
-  }>(
-    '/dag-runs/:runId/tasks/:taskId/clear',
-    async (req, reply) => {
-      const { runId, taskId } = req.params
-      if (!ObjectId.isValid(runId)) return reply.status(400).send({ error: 'Invalid run id' })
-
-      let mapIndex: number | undefined
-      if (req.query.map_index !== undefined) {
-        const mi = parseInt(req.query.map_index, 10)
-        if (!Number.isFinite(mi) || mi < 0) {
-          return reply.status(400).send({ error: '"map_index" must be a non-negative integer' })
-        }
-        mapIndex = mi
-      }
-
-      const result = await clearTaskInstance(app.mongo, runId, taskId, mapIndex)
-
-      if (!result.cleared) {
-        if (result.reason === 'run_not_found') {
-          return reply.status(404).send({ error: `Run '${runId}' not found` })
-        }
-        if (result.reason === 'task_not_found') {
-          return reply.status(404).send({ error: `Task '${taskId}' not found in run '${runId}'` })
-        }
-        // task_not_terminal → task is still running or already queued
-        return reply.status(409).send({
-          error: `Task '${taskId}' is not in a terminal state — cannot clear a running or queued task`,
-        })
-      }
-
-      // Re-advance immediately so the cleared task runs without waiting for the next tick
-      await advanceRun(app.mongo, runId)
-
-      return reply.send({
-        run_id: runId,
-        task_id: taskId,
-        cleared_count: result.clearedCount,
-        map_index: mapIndex ?? null,
-      })
     },
   )
 

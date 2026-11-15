@@ -7,7 +7,7 @@ import { MongoClient, ObjectId, type Db } from 'mongodb'
 import { createRun } from '../runs.js'
 import { advanceRun } from '../index.js'
 import { scheduleDag, tickCatchup, stopAllCronJobs, activeCronJobCount, resetCatchupState } from '../cron.js'
-import { createPool, resetAllPools, poolActiveCount } from '../../pools/index.js'
+import { createPool, getPool } from '../../pools/index.js'
 import { register, clearRegistry } from '../../dag/registry.js'
 import type { DagDefinition } from '../../dag/types.js'
 
@@ -25,7 +25,7 @@ beforeAll(async () => {
 })
 afterAll(async () => { stopAllCronJobs(); await db.dropDatabase(); await client.close(); delete process.env.DB_NAME })
 afterEach(async () => {
-  stopAllCronJobs(); resetCatchupState(); resetAllPools(); clearRegistry()
+  stopAllCronJobs(); resetCatchupState(); clearRegistry()
   for (const c of ['dag_runs', 'task_instances', 'task_instance_tries', 'xcoms', 'event_logs', 'pools', 'dag_paused']) await db.collection(c).deleteMany({})
 })
 
@@ -78,7 +78,7 @@ describe('poolSlots — real executor', () => {
     const overlap = Math.min(w.e, n.e) - Math.max(w.s, n.s)
     expect(overlap).toBeLessThanOrEqual(0)             // serialized by the pool
     expect((await runDoc(runId)).state).toBe('success')
-    expect(poolActiveCount('duo')).toBe(0)
+    expect((await getPool(db, 'duo'))!.occupied_slots).toBe(0)
   }, 30000)
 })
 

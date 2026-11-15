@@ -57,7 +57,7 @@ describe('drainPool', () => {
       getActive: () => active,
       getQueued: () => queued,
       pollMs: 20,
-      timeoutMs: 500,
+      timeoutMs: 5_000,   // resolves as soon as both reach 0; headroom for a loaded machine
     })
 
     clearTimeout(t1)

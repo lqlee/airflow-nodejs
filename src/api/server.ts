@@ -8,6 +8,7 @@ import { resolve, dirname } from 'node:path'
 import type { Db } from 'mongodb'
 import { dagsRoutes } from './routes/dags.js'
 import { dagRunsRoutes } from './routes/dag-runs.js'
+import { taskActionsRoutes } from './routes/task-actions.js'
 import { slaRoutes } from './routes/sla.js'
 import { apiKeysRoutes } from './routes/api-keys.js'
 import { datasetsRoutes } from './routes/datasets.js'
@@ -127,6 +128,7 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
 
     app.register(dagsRoutes)
     app.register(dagRunsRoutes)
+    app.register(taskActionsRoutes)
     app.register(slaRoutes)
     app.register(apiKeysRoutes)
     app.register(datasetsRoutes)

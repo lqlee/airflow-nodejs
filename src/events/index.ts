@@ -12,7 +12,10 @@
  *   dag_paused      — dag was paused
  *   dag_resumed     — dag was unpaused
  *   run_cancelled   — dag_run was cancelled via API
- *   task_cleared    — a task instance was cleared back to queued
+ *   task_cleared    — task instances were cleared back to queued
+ *   run_cleared     — a whole dag_run was cleared (re-run)
+ *   task_state_set  — a user marked task instances success / failed / skipped
+ *   run_state_set   — a user marked a dag_run success / failed
  */
 
 import type { Db } from 'mongodb'
@@ -25,6 +28,9 @@ export type EventType =
   | 'dag_resumed'
   | 'run_cancelled'
   | 'task_cleared'
+  | 'run_cleared'
+  | 'task_state_set'
+  | 'run_state_set'
 
 export interface EventLogRecord {
   event_type: EventType
@@ -84,10 +90,12 @@ export async function recordEvent(
   }
 }
 
-const VALID_EVENT_TYPES = new Set<string>([
+export const EVENT_TYPES: readonly EventType[] = [
   'run_triggered', 'run_success', 'run_failed',
   'dag_paused', 'dag_resumed', 'run_cancelled', 'task_cleared',
-])
+  'run_cleared', 'task_state_set', 'run_state_set',
+]
+const VALID_EVENT_TYPES = new Set<string>(EVENT_TYPES)
 
 export function isEventType(v: unknown): v is EventType {
   return typeof v === 'string' && VALID_EVENT_TYPES.has(v)

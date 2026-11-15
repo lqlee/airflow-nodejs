@@ -248,9 +248,9 @@ describe('branch tasks', () => {
     }
     const runId = await runDag(dag)
     expect(await taskState(runId, 'decide')).toBe('failed')
-    // Both paths skipped (all_success → upstream failed)
-    expect(await taskState(runId, 'path_a')).toBe('skipped')
-    expect(await taskState(runId, 'path_b')).toBe('skipped')
+    // Both paths upstream_failed (all_success, upstream failed)
+    expect(await taskState(runId, 'path_a')).toBe('upstream_failed')
+    expect(await taskState(runId, 'path_b')).toBe('upstream_failed')
     const state = await runState(runId)
     expect(state).toBe('failed')
     expect(state).not.toBe('running')

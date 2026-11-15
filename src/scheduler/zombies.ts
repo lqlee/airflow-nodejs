@@ -3,7 +3,7 @@
  *
  * Each claim stamps `claimed_by` with the owner's INSTANCE_ID; owners heartbeat (instance.ts).
  * A running instance whose owner has not heartbeated within ZOMBIE_THRESHOLD_MS is handled like a
- * task failure (Airflow's zombie handling): retried when it has retries left, failed otherwise,
+ * task failure (Airflow's zombie handling): up_for_retry when it has retries left, failed otherwise,
  * with a failed try recorded.
  *
  * Rows from before owner tracking (no `claimed_by`) keep the old startup-recovery behaviour:
@@ -13,6 +13,7 @@
 import type { Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
 import { recordTry } from './tries.js'
+import { retryUpdate } from './ti-writes.js'
 import { INSTANCE_ID, ZOMBIE_THRESHOLD_MS, listLiveInstanceIds, pruneDeadInstances } from './instance.js'
 
 type RunningTi = TaskInstance & { _id: unknown }
@@ -58,7 +59,7 @@ export async function reapZombies(
     const error = `Task heartbeat lost: owner '${owner}' stopped responding (zombie)`
     const retry = ti.try_number < (ti.max_retries ?? 0)
     const res = await db.collection('task_instances').updateOne(filter, retry
-      ? { $set: { state: 'queued', started_at: null, ended_at: null, error, claimed_by: null }, $inc: { try_number: 1 } }
+      ? retryUpdate(ti, error, now)   // up_for_retry after the task's retry delay, like any failed try
       : { $set: { state: 'failed', ended_at: now, error } })
     if (res.modifiedCount === 0) continue
     await recordTry(db, ti, 'failed', now, error)

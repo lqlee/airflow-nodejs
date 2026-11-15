@@ -18,7 +18,6 @@ import { MongoClient, type Db } from 'mongodb'
 import { createRun } from '../runs.js'
 import { advanceRun } from '../index.js'
 import { register, clearRegistry } from '../../dag/registry.js'
-import { resetAllPools } from '../../pools/index.js'
 import type { DagDefinition } from '../../dag/types.js'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
@@ -67,7 +66,6 @@ afterEach(async () => {
   await db.collection('task_instances').deleteMany({})
   await db.collection('task_logs').deleteMany({})
   clearRegistry()
-  resetAllPools()  // clear in-memory semaphore state between tests
 })
 
 // ══════════════════════════════════════════════════════════════════════════════

@@ -17,6 +17,7 @@ import { xcomPush, xcomPull } from '../xcom/index.js'
 import type { Db } from 'mongodb'
 import type { TaskJobData } from './producer.js'
 import { INSTANCE_ID, startLiveness, shutdownLiveness } from '../scheduler/instance.js'
+import { retryUpdate } from '../scheduler/ti-writes.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WORKER_SCRIPT = pathResolve(__dirname, '../scheduler/worker.ts')
@@ -75,7 +76,7 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
         void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line)
       })
 
-      child.send({ type: 'run', fn, ctx: { dagId: ti.dag_id, runId: ti.dag_run_id, taskId: ti.task_id } })
+      child.send({ type: 'run', fn, ctx: { dagId: ti.dag_id, runId: ti.dag_run_id, taskId: ti.task_id, mapIndex: ti.map_index ?? null, mapValue: ti.map_value ?? null } })
 
       child.on('message', async (msg: { type: string; success: boolean; error?: string }) => {
         if (msg.type !== 'done') return
@@ -90,10 +91,8 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
           const error = msg.error ?? 'unknown error'
           if (ti.try_number < ti.max_retries) {
             // Requeue for retry
-            await db.collection('task_instances').updateOne(
-              owned,
-              { $set: { state: 'queued', started_at: null, ended_at: null, error }, $inc: { try_number: 1 } }
-            )
+            // up_for_retry with next_retry_at — the scheduler re-claims and re-enqueues once the delay passes
+            await db.collection('task_instances').updateOne(owned, retryUpdate(ti, error))
             console.warn(`[worker] ↩ ${ti.dag_id}.${ti.task_id} retrying (${ti.try_number + 1}/${ti.max_retries + 1})`)
           } else {
             await db.collection('task_instances').updateOne(

@@ -1,9 +1,10 @@
 /**
  * Resource Pools tests.
  *
- * Enforcement tests use acquirePool/releasePool directly with injected
- * counters — no real workers needed. Discriminating check: a full pool
- * genuinely blocks the second acquire promise until release is called.
+ * Enforcement happens when a task instance is claimed (scheduler/claim-limits.ts): occupancy is the
+ * sum of pool_slots of the pool's RUNNING instances in the DB, so a slot held by another replica (or
+ * a BullMQ worker) counts exactly like one held by this process. Claims for a pool are serialized by
+ * a short claim lock, so two concurrent claimers can never both take the last slot.
  *
  * Integration tests verify pool field flows end-to-end: task.pool → task_instance.pool.
  * Tasks without pool are unaffected (regression guard).
@@ -11,16 +12,13 @@
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
 import { MongoClient, type Db } from 'mongodb'
-import {
-  acquirePool, releasePool, poolActiveCount, poolQueueDepth,
-  resetAllPools, createPool, getPool, listPools, updatePool, deletePool,
-} from '../index.js'
+import { createPool, getPool, listPools, updatePool, deletePool } from '../index.js'
 import { buildServer } from '../../api/server.js'
 import { register, clearRegistry } from '../../dag/registry.js'
-import { scaled } from '../../scheduler/__tests__/wait-for.js'
 import { createRun } from '../../scheduler/runs.js'
 import { advanceRun } from '../../scheduler/index.js'
-import type { DagDefinition } from '../../dag/types.js'
+import { claimReadyTasks } from '../../scheduler/claim.js'
+import type { DagDefinition, TaskDefinition } from '../../dag/types.js'
 import type { FastifyInstance } from 'fastify'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
@@ -46,95 +44,127 @@ afterAll(async () => {
 })
 
 afterEach(async () => {
-  await db.collection('pools').deleteMany({})
-  await db.collection('dag_runs').deleteMany({})
-  await db.collection('task_instances').deleteMany({})
-  await db.collection('event_logs').deleteMany({})
-  resetAllPools()
+  for (const c of ['pools', 'dag_runs', 'task_instances', 'event_logs', 'claim_locks']) await db.collection(c).deleteMany({})
   clearRegistry()
 })
 
-// ── acquirePool / releasePool — pure enforcement ──────────────────────────
+const noop = async () => {}
 
-describe('acquirePool / releasePool — slot enforcement', () => {
-  it('resolves immediately when pool has capacity', async () => {
-    await createPool(db, 'fast_pool', 3)
-    await acquirePool(db, 'fast_pool')
-    expect(poolActiveCount('fast_pool')).toBe(1)
-    releasePool('fast_pool')
-    expect(poolActiveCount('fast_pool')).toBe(0)
+/** A Dag whose tasks all sit in `pool` (no dependencies, so every instance is ready at once). */
+function poolDag(id: string, tasks: Record<string, Partial<TaskDefinition>>): DagDefinition {
+  const dag: DagDefinition = {
+    id, schedule: null,
+    tasks: Object.fromEntries(Object.entries(tasks).map(([k, t]) => [k, { run: noop, ...t } as TaskDefinition])),
+  }
+  register(dag)
+  return dag
+}
+
+const claimedIds = async (runId: string) => (await claimReadyTasks(db, runId)).map(t => `${t.task_id}${t.map_index ?? ''}`).sort()
+
+// ── Claim-time enforcement ────────────────────────────────────────────────
+
+describe('pool slots — enforced when claiming', () => {
+  it('a full pool refuses further claims until the running instance finishes', async () => {
+    await createPool(db, 'tight', 1)
+    const dag = poolDag('tight_dag', { fan: { pool: 'tight', expand: [1, 2, 3] } })
+    const runId = await createRun(db, dag)
+
+    expect(await claimedIds(runId)).toEqual(['fan0'])
+    expect(await claimedIds(runId)).toEqual([])            // still running → no free slot
+
+    await db.collection('task_instances').updateOne({ dag_run_id: runId, map_index: 0 }, { $set: { state: 'success' } })
+    expect(await claimedIds(runId)).toEqual(['fan1'])
   })
 
-  it('BLOCKS second acquire when pool has 1 slot and first is held', async () => {
-    await createPool(db, 'tight_pool', 1)
+  it('counts slots held by another replica: a running instance it claimed blocks this one', async () => {
+    await createPool(db, 'shared', 1)
+    const dag = poolDag('shared_dag', { t: { pool: 'shared' } })
+    const elsewhere = await createRun(db, dag)
+    await db.collection('task_instances').updateOne({ dag_run_id: elsewhere }, { $set: { state: 'running', claimed_by: 'other-replica' } })
+    const runId = await createRun(db, dag)
 
-    // First acquire — gets the slot
-    await acquirePool(db, 'tight_pool')
-    expect(poolActiveCount('tight_pool')).toBe(1)
-
-    // Second acquire — pool full, should stay pending
-    let secondResolved = false
-    const secondDone = acquirePool(db, 'tight_pool').then(() => { secondResolved = true })
-
-    // Give microtasks a cycle — second should NOT have resolved
-    await new Promise(r => setTimeout(r, scaled(10)))
-    expect(secondResolved).toBe(false)
-    expect(poolQueueDepth('tight_pool')).toBe(1)
-
-    // Release first slot — second should now resolve
-    releasePool('tight_pool')
-    await secondDone
-    expect(secondResolved).toBe(true)
-    expect(poolActiveCount('tight_pool')).toBe(1)
-    expect(poolQueueDepth('tight_pool')).toBe(0)
-
-    releasePool('tight_pool')
-    expect(poolActiveCount('tight_pool')).toBe(0)
+    expect(await claimedIds(runId)).toEqual([])
+    expect(await getPool(db, 'shared')).toMatchObject({ occupied_slots: 1, open_slots: 0, queued_slots: 1 })
   })
 
-  it('unblocks waiters in FIFO order', async () => {
-    await createPool(db, 'fifo_pool', 1)
-    await acquirePool(db, 'fifo_pool')  // fill the slot
+  it('two concurrent claimers never both take the last slot', async () => {
+    await createPool(db, 'race', 1)
+    const dag = poolDag('race_dag', { t: { pool: 'race' } })
+    const runs = await Promise.all(Array.from({ length: 6 }, () => createRun(db, dag)))
 
-    const order: number[] = []
-    const p1 = acquirePool(db, 'fifo_pool').then(() => order.push(1))
-    await new Promise(r => setTimeout(r, scaled(50)))   // let waiter 1 enqueue before waiter 2 (each does a DB lookup first)
-    const p2 = acquirePool(db, 'fifo_pool').then(() => order.push(2))
-
-    releasePool('fifo_pool')
-    await p1
-    releasePool('fifo_pool')
-    await p2
-    releasePool('fifo_pool')
-
-    expect(order).toEqual([1, 2])
+    const claimed = (await Promise.all(runs.map(r => claimReadyTasks(db, r)))).flat()
+    expect(claimed).toHaveLength(1)
+    expect(await db.collection('task_instances').countDocuments({ state: 'running' })).toBe(1)
+    expect(await db.collection('claim_locks').countDocuments()).toBe(0)   // every claimer released its lock
   })
 
-  it('falls through (no block) for unknown pool — logs warning', async () => {
-    // Pool does not exist in DB
-    const warnSpy: string[] = []
-    const orig = console.warn
-    console.warn = (...args: unknown[]) => { warnSpy.push(String(args[0])) }
-    await acquirePool(db, 'nonexistent_pool')
-    console.warn = orig
-    expect(warnSpy.some(m => m.includes('nonexistent_pool'))).toBe(true)
-    expect(poolActiveCount('nonexistent_pool')).toBe(0)
+  it('a pool lock held by a live claimer elsewhere defers the claim; an expired one is taken over', async () => {
+    await createPool(db, 'locked', 5)
+    const dag = poolDag('locked_dag', { t: { pool: 'locked' } })
+    const runId = await createRun(db, dag)
+    await db.collection('claim_locks').updateOne({ _id: 'pool:locked' as never },
+      { $set: { holder: 'other#1', expires_at: new Date(Date.now() + 60_000) } }, { upsert: true })
+
+    expect(await claimedIds(runId)).toEqual([])
+    expect((await db.collection('task_instances').findOne({ dag_run_id: runId }))!.state).toBe('queued')
+
+    await db.collection('claim_locks').updateOne({ _id: 'pool:locked' as never }, { $set: { expires_at: new Date(Date.now() - 1) } })
+    expect(await claimedIds(runId)).toEqual(['t'])
   })
 
-  it('multiple pools are independent — one full does not block another', async () => {
-    await createPool(db, 'pool_a', 1)
-    await createPool(db, 'pool_b', 1)
+  it('weights by poolSlots: a 2-slot task leaves room for a 1-slot task but not another 2-slot one', async () => {
+    await createPool(db, 'wide', 3)
+    const dag = poolDag('wide_dag', {
+      a_wide: { pool: 'wide', poolSlots: 2, priority: 3 },
+      b_wide: { pool: 'wide', poolSlots: 2, priority: 2 },
+      c_narrow: { pool: 'wide', poolSlots: 1, priority: 1 },
+    })
+    const runId = await createRun(db, dag)
+    expect(await claimedIds(runId)).toEqual(['a_wide', 'c_narrow'])
+    expect(await getPool(db, 'wide')).toMatchObject({ occupied_slots: 3, open_slots: 0, queued_slots: 2 })
+  })
 
-    await acquirePool(db, 'pool_a')  // fill pool_a
+  it('a request larger than the pool is clamped to the pool size instead of never running', async () => {
+    await createPool(db, 'small', 2)
+    const dag = poolDag('small_dag', { huge: { pool: 'small', poolSlots: 5 } })
+    const runId = await createRun(db, dag)
+    expect(await claimedIds(runId)).toEqual(['huge'])
+    expect(await getPool(db, 'small')).toMatchObject({ occupied_slots: 2, open_slots: 0 })
+  })
 
-    let bResolved = false
-    acquirePool(db, 'pool_b').then(() => { bResolved = true })
+  it('deferred and up_for_retry instances hold no slots', async () => {
+    await createPool(db, 'waiting', 1)
+    const dag = poolDag('waiting_dag', { t: { pool: 'waiting' } })
+    const parked = await createRun(db, dag)
+    await db.collection('task_instances').updateOne({ dag_run_id: parked }, { $set: { state: 'deferred' } })
+    const retrying = await createRun(db, dag)
+    await db.collection('task_instances').updateOne({ dag_run_id: retrying }, { $set: { state: 'up_for_retry', next_retry_at: new Date(Date.now() + 60_000) } })
+    const runId = await createRun(db, dag)
+    expect(await claimedIds(runId)).toEqual(['t'])
+  })
 
-    await new Promise(r => setTimeout(r, scaled(10)))
-    expect(bResolved).toBe(true)  // pool_b unaffected
+  it('a resized pool applies to the next claim', async () => {
+    await createPool(db, 'resize', 1)
+    const dag = poolDag('resize_dag', { fan: { pool: 'resize', expand: [1, 2, 3] } })
+    const runId = await createRun(db, dag)
+    expect(await claimedIds(runId)).toEqual(['fan0'])
+    await updatePool(db, 'resize', { slots: 3 })
+    expect(await claimedIds(runId)).toEqual(['fan1', 'fan2'])
+  })
 
-    releasePool('pool_a')
-    releasePool('pool_b')
+  it('an unknown pool does not limit the task', async () => {
+    const dag = poolDag('unknown_dag', { fan: { pool: 'no_such_pool', expand: [1, 2, 3] } })
+    const runId = await createRun(db, dag)
+    expect(await claimedIds(runId)).toEqual(['fan0', 'fan1', 'fan2'])
+  })
+
+  it('pools are independent — one full pool does not block another', async () => {
+    await createPool(db, 'full', 1)
+    await createPool(db, 'free', 1)
+    const dag = poolDag('two_pools', { a: { pool: 'full', priority: 2 }, b: { pool: 'full', priority: 1 }, c: { pool: 'free' } })
+    const runId = await createRun(db, dag)
+    expect(await claimedIds(runId)).toEqual(['a', 'c'])
   })
 })
 
@@ -295,8 +325,8 @@ describe('pool field on task_instance', () => {
     void runId
   })
 
-  it('task with unknown pool still runs (global-semaphore only)', async () => {
-    // Pool is not in DB — acquirePool falls through, task still executes
+  it('task with unknown pool still runs (no pool limit)', async () => {
+    // Pool is not in DB — the claim falls through, task still executes
     const dag: DagDefinition = {
       id: 'pool_unknown_dag', schedule: null,
       tasks: { step: { pool: 'nonexistent_pool', run: async () => {} } },
@@ -324,64 +354,6 @@ describe('pool field on task_instance', () => {
   })
 })
 
-// ── weighted slots (poolSlots) ────────────────────────────────────────────
-
-describe('acquirePool / releasePool — multi-slot tasks', () => {
-  it('a 2-slot task consumes 2 of 3 slots; a 2-slot task cannot run beside it', async () => {
-    await createPool(db, 'wide_pool', 3)
-    expect(await acquirePool(db, 'wide_pool', 2)).toBe(2)
-    expect(poolActiveCount('wide_pool')).toBe(2)
-
-    let resolved = false
-    void acquirePool(db, 'wide_pool', 2).then(() => { resolved = true })
-    await new Promise(r => setTimeout(r, scaled(30)))
-    expect(resolved).toBe(false)
-    expect(poolQueueDepth('wide_pool')).toBe(1)
-
-    releasePool('wide_pool', 2)
-    await new Promise(r => setTimeout(r, scaled(30)))
-    expect(resolved).toBe(true)
-    expect(poolActiveCount('wide_pool')).toBe(2)
-  })
-
-  it('release frees exactly the slots that were acquired', async () => {
-    await createPool(db, 'exact_pool', 4)
-    await acquirePool(db, 'exact_pool', 3)
-    await acquirePool(db, 'exact_pool', 1)
-    releasePool('exact_pool', 3)
-    expect(poolActiveCount('exact_pool')).toBe(1)
-  })
-
-  it('grants waiters strictly FIFO — a big head-of-line waiter is not starved by small ones', async () => {
-    await createPool(db, 'fifo_w', 2)
-    await acquirePool(db, 'fifo_w', 1)             // 1/2 held
-    const order: string[] = []
-    void acquirePool(db, 'fifo_w', 2).then(() => order.push('big'))     // needs both slots → waits
-    await new Promise(r => setTimeout(r, scaled(20)))
-    void acquirePool(db, 'fifo_w', 1).then(() => order.push('small'))   // would fit, but must queue behind big
-    await new Promise(r => setTimeout(r, scaled(20)))
-    expect(order).toEqual([])
-
-    releasePool('fifo_w', 1)
-    await new Promise(r => setTimeout(r, scaled(30)))
-    expect(order).toEqual(['big'])
-    releasePool('fifo_w', 2)
-    await new Promise(r => setTimeout(r, scaled(30)))
-    expect(order).toEqual(['big', 'small'])
-  })
-
-  it('clamps a request larger than the pool to the pool size instead of deadlocking', async () => {
-    await createPool(db, 'small_pool', 2)
-    expect(await acquirePool(db, 'small_pool', 5)).toBe(2)
-    expect(poolActiveCount('small_pool')).toBe(2)
-  })
-
-  it('returns 0 (nothing held) for an unknown pool', async () => {
-    expect(await acquirePool(db, 'no_such_pool', 3)).toBe(0)
-    expect(poolActiveCount('no_such_pool')).toBe(0)
-  })
-})
-
 describe('poolSlots on task instances', () => {
   it('createRun stamps pool_slots (default 1, floor ≥ 1) and a run with a 2-slot task completes', async () => {
     await createPool(db, 'stamp_pool', 2)
@@ -403,6 +375,6 @@ describe('poolSlots on task instances', () => {
     for (let i = 0; i < 6; i++) await advanceRun(db, runId)
     const run = await db.collection('dag_runs').findOne({ dag_id: 'pool_slots_dag' })
     expect(run!.state).toBe('success')
-    expect(poolActiveCount('stamp_pool')).toBe(0)   // every slot released
+    expect((await getPool(db, 'stamp_pool'))!.occupied_slots).toBe(0)   // nothing left running
   }, 20000)
 })

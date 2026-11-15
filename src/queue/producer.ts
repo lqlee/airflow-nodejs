@@ -23,10 +23,13 @@ export function getQueue(): Queue<TaskJobData> {
   return queue
 }
 
+/** One job per try of an instance (BullMQ drops a duplicate id) — map_index keeps mapped instances apart. */
+export function jobIdFor(ti: Pick<TaskInstance, 'dag_run_id' | 'task_id' | 'map_index' | 'try_number'>): string {
+  return `${ti.dag_run_id}:${ti.task_id}:${ti.map_index ?? -1}:${ti.try_number}`
+}
+
 export async function enqueueTask(ti: TaskInstance, fn: string): Promise<void> {
-  await getQueue().add(`${ti.dag_id}.${ti.task_id}`, { ti, fn }, {
-    jobId: `${ti.dag_run_id}:${ti.task_id}:${ti.try_number}`,  // deduplicate
-  })
+  await getQueue().add(`${ti.dag_id}.${ti.task_id}`, { ti, fn }, { jobId: jobIdFor(ti) })
 }
 
 export async function closeQueue(): Promise<void> {

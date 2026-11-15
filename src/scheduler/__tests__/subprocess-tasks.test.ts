@@ -200,7 +200,7 @@ describe('shell tasks', () => {
     expect((await taskState('shell_chain_fail', 'a'))?.state).toBe('failed')
     // b stays queued/never runs because a failed
     const bState = (await taskState('shell_chain_fail', 'b'))?.state
-    expect(['queued', 'cancelled', 'skipped', undefined]).toContain(bState)
+    expect(['queued', 'cancelled', 'skipped', 'upstream_failed', undefined]).toContain(bState)
   })
 })
 

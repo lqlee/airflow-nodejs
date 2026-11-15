@@ -19,6 +19,8 @@ export async function ensureIndexes(db: Db): Promise<void> {
     { key: { dag_run_id: 1, task_id: 1, map_index: 1 }, unique: true },
     { key: { dag_id: 1, state: 1 } },
     { key: { dag_run_id: 1, state: 1, next_poke_at: 1 } },  // sensor claim filter
+    { key: { pool: 1, state: 1 } },                         // pool occupancy at claim time
+    { key: { dag_id: 1, task_id: 1, state: 1 } },            // maxActiveTis count at claim time
   ])
 
   // xcoms: unique per (run, task, map_index, key) — map_index scopes mapped instances

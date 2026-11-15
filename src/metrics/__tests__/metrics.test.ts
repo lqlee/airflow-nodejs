@@ -4,7 +4,7 @@ import type { FastifyInstance } from 'fastify'
 import { buildServer } from '../../api/server.js'
 import { register, clearRegistry } from '../../dag/registry.js'
 import { createRun } from '../../scheduler/runs.js'
-import { createPool, resetAllPools } from '../../pools/index.js'
+import { createPool } from '../../pools/index.js'
 import { pauseDag } from '../../dag/pause.js'
 import { setImportErrors } from '../../dag/import-errors.js'
 import { clearMetricsCache } from '../index.js'
@@ -77,7 +77,7 @@ describe('GET /metrics', () => {
   afterAll(async () => { await app.close(); await db.dropDatabase(); await client.close(); delete process.env.METRICS_CACHE_SECONDS })
   afterEach(async () => {
     for (const c of ['dag_runs', 'task_instances', 'dag_paused', 'pools', 'sla_alerts']) await db.collection(c).deleteMany({})
-    clearRegistry(); resetAllPools(); resetMetrics(); clearMetricsCache(); setImportErrors([])
+    clearRegistry(); resetMetrics(); clearMetricsCache(); setImportErrors([])
   })
 
   const scrape = async () => {

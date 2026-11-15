@@ -231,7 +231,7 @@ describe('trigger rules — integration', () => {
     expect(await runState(runId)).toBe('success')
   })
 
-  it('all_success: downstream is skipped when upstream fails', async () => {
+  it('all_success: downstream is upstream_failed when upstream fails', async () => {
     const dag: DagDefinition = {
       id: 'tr_all_success_skip',
       schedule: null,
@@ -242,7 +242,7 @@ describe('trigger rules — integration', () => {
     }
     const runId = await runDag(dag)
     expect(await taskState(runId, 'up')).toBe('failed')
-    expect(await taskState(runId, 'down')).toBe('skipped')
+    expect(await taskState(runId, 'down')).toBe('upstream_failed')
     // Run must be terminal — never stuck 'running'
     expect(await runState(runId)).toBe('failed')
   })
@@ -325,7 +325,7 @@ describe('trigger rules — integration', () => {
     expect(await runState(runId)).not.toBe('running')
   })
 
-  it('one_success: downstream is skipped if all upstreams failed', async () => {
+  it('one_success: downstream is upstream_failed if all upstreams failed', async () => {
     const dag: DagDefinition = {
       id: 'tr_one_success_skip',
       schedule: null,
@@ -336,7 +336,7 @@ describe('trigger rules — integration', () => {
       }
     }
     const runId = await runDag(dag)
-    expect(await taskState(runId, 'down')).toBe('skipped')
+    expect(await taskState(runId, 'down')).toBe('upstream_failed')
     const state = await runState(runId)
     expect(['success', 'failed']).toContain(state)
   })
@@ -391,7 +391,7 @@ describe('trigger rules — integration', () => {
     expect(await runState(runId)).toBe('success')
   })
 
-  it('none_failed: downstream is skipped when any upstream failed', async () => {
+  it('none_failed: downstream is upstream_failed when any upstream failed', async () => {
     const dag: DagDefinition = {
       id: 'tr_none_failed_skip',
       schedule: null,
@@ -402,41 +402,41 @@ describe('trigger rules — integration', () => {
       }
     }
     const runId = await runDag(dag)
-    expect(await taskState(runId, 'down')).toBe('skipped')
+    expect(await taskState(runId, 'down')).toBe('upstream_failed')
     const state = await runState(runId)
     expect(['success', 'failed']).toContain(state)
   })
 
   // ── cascade ───────────────────────────────────────────────────────────────
 
-  it('skip cascades: skipping A (unsatisfied) makes B (all_success dep on A) also skip', async () => {
+  it('failure cascades: upstream_failed propagates down an all_success chain', async () => {
     const dag: DagDefinition = {
       id: 'tr_cascade',
       schedule: null,
       tasks: {
         root: { run: async () => { throw new Error('root fails') } },
-        // A: all_success → skipped because root failed
+        // A: all_success → upstream_failed because root failed
         mid:  { dependsOn: ['root'], run: async () => 'mid' },
-        // B: all_success dep on mid → skipped because mid is skipped
+        // B: all_success dep on mid → upstream_failed too (upstream_failed counts as a failure)
         leaf: { dependsOn: ['mid'], run: async () => 'leaf' },
       }
     }
     const runId = await runDag(dag)
     expect(await taskState(runId, 'root')).toBe('failed')
-    expect(await taskState(runId, 'mid')).toBe('skipped')
-    expect(await taskState(runId, 'leaf')).toBe('skipped')
+    expect(await taskState(runId, 'mid')).toBe('upstream_failed')
+    expect(await taskState(runId, 'leaf')).toBe('upstream_failed')
     // Run must be terminal — not stuck 'running'
     expect(await runState(runId)).toBe('failed')
   })
 
-  it('one_failed on skipped upstream: skipped counts as not-failed → one_failed unsatisfiable', async () => {
+  it('one_failed counts upstream_failed as a failure (Airflow), so the alert runs', async () => {
     const dag: DagDefinition = {
       id: 'tr_skipped_upstream',
       schedule: null,
       tasks: {
         root: { run: async () => { throw new Error('fail') } },
-        mid:  { dependsOn: ['root'], run: async () => 'mid' },  // → skipped
-        // one_failed on skipped: skipped ≠ failed → no failure to trigger on
+        mid:  { dependsOn: ['root'], run: async () => 'mid' },  // → upstream_failed
+        // one_failed: failed OR upstream_failed upstream triggers it
         alert: {
           dependsOn: ['mid'],
           triggerRule: 'one_failed',
@@ -445,8 +445,8 @@ describe('trigger rules — integration', () => {
       }
     }
     const runId = await runDag(dag)
-    expect(await taskState(runId, 'mid')).toBe('skipped')
-    expect(await taskState(runId, 'alert')).toBe('skipped')
+    expect(await taskState(runId, 'mid')).toBe('upstream_failed')
+    expect(await taskState(runId, 'alert')).toBe('success')
     const state = await runState(runId)
     expect(['success', 'failed']).toContain(state)
     expect(state).not.toBe('running')
@@ -471,7 +471,7 @@ describe('trigger rules — integration', () => {
     expect(await taskState(runId, 'cleanup')).toBe('success')
     expect(await taskState(runId, 'report')).toBe('success')
     expect(await taskState(runId, 'notify')).toBe('success')
-    expect(await taskState(runId, 'skip_me')).toBe('skipped')
+    expect(await taskState(runId, 'skip_me')).toBe('upstream_failed')
     // Run must be terminal
     const state = await runState(runId)
     expect(state).not.toBe('running')
@@ -553,7 +553,7 @@ describe('trigger rules — integration', () => {
       schedule: null,
       tasks: {
         bad:     { run: async () => { throw new Error('x') } },
-        skipper: { dependsOn: ['bad'], run: async () => 's' },  // skipped (upstream failed)
+        skipper: { dependsOn: ['bad'], run: async () => 's' },  // upstream_failed — never ran, so not "done" for one_done
         ran:     { dependsOn: ['bad'], triggerRule: 'one_done', run: async () => 'r' },
         none:    { dependsOn: ['skipper'], triggerRule: 'one_done', run: async () => 'n' },
       }

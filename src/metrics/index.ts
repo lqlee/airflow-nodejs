@@ -9,11 +9,12 @@ import { getPausedDagIds } from '../dag/pause.js'
 import { getImportErrors, getDagWarnings } from '../dag/import-errors.js'
 import { listPools } from '../pools/index.js'
 import { activeWorkers, queueDepth } from '../scheduler/pool.js'
+import { TI_STATES } from '../scheduler/states.js'
 import { AUTH_ENABLED } from '../auth/index.js'
 import { family, sample, renderHttpMetrics, getSchedulerStats } from './registry.js'
 
 export const RUN_STATES = ['queued', 'running', 'success', 'failed', 'cancelled'] as const
-export const TASK_STATES = ['queued', 'running', 'deferred', 'success', 'failed', 'skipped', 'cancelled'] as const
+export const TASK_STATES = TI_STATES
 
 const startedAtSeconds = Date.now() / 1000
 
@@ -72,9 +73,9 @@ async function collectDbMetrics(db: Db): Promise<string[]> {
   out.push(...family('airflow_task_instances', 'gauge', 'Task instances by Dag and state.', taskLines))
   out.push(...family('airflow_pool_slots', 'gauge', 'Total slots per pool.',
     pools.map(p => sample('airflow_pool_slots', p.slots, { pool: p.name }))))
-  out.push(...family('airflow_pool_occupied_slots', 'gauge', 'Slots currently held per pool (this process).',
+  out.push(...family('airflow_pool_occupied_slots', 'gauge', 'Slots held by running task instances per pool.',
     pools.map(p => sample('airflow_pool_occupied_slots', p.occupied_slots, { pool: p.name }))))
-  out.push(...family('airflow_pool_open_slots', 'gauge', 'Free slots per pool (this process).',
+  out.push(...family('airflow_pool_open_slots', 'gauge', 'Free slots per pool.',
     pools.map(p => sample('airflow_pool_open_slots', p.open_slots, { pool: p.name }))))
   out.push(...family('airflow_hitl_pending_tasks', 'gauge', 'Tasks waiting for human approval.', [sample('airflow_hitl_pending_tasks', hitlPending)]))
   out.push(...family('airflow_sla_alerts_unacknowledged', 'gauge', 'SLA alerts not yet acknowledged.', [sample('airflow_sla_alerts_unacknowledged', slaUnacked)]))

@@ -2,8 +2,10 @@ import { ObjectId, type Db } from 'mongodb'
 import { loadDags } from '../dag/loader.js'
 import { getDag, listDags } from '../dag/registry.js'
 import { claimReadyTasks, skipUnsatisfiableTasks, applyBranchDecisions, applyShortCircuitDecisions, expandDynamicMapped } from './claim.js'
-import { pollDeferredTasks } from './executor.js'
-import { executeTask } from './executor.js'
+import { pollDeferredTasks, executeTask, claimCapacity } from './executor.js'
+import { verifyRunIntegrity } from './integrity.js'
+import { clearTaskInstances } from './actions.js'
+import { TI_FINISHED, TI_UNFINISHED } from './states.js'
 import { syncCronJobs, stopAllCronJobs, tickTimetables, tickCatchup, resetAllTimetables } from './cron.js'
 import { isLeader } from './lease.js'
 import type { DagDefinition } from '../dag/types.js'
@@ -167,7 +169,10 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
   // Re-check cancellation and shutdown flag before each wave.
   // On shutdown: bail without forking new children — the claimed rows are handed
   // back to the queue by releaseOwnedTasks() before the process exits.
-  let claimed = timedOut ? [] : await claimReadyTasks(db, dagRunId)
+  // Instances of tasks deleted from the Dag → removed (and back to queued if the task returns)
+  if (dagDef) await verifyRunIntegrity(db, dagRunId, dagDef)
+
+  let claimed = timedOut ? [] : await claimReadyTasks(db, dagRunId, { limit: claimCapacity() })
   while (claimed.length > 0) {
     if (_shuttingDown) return
     const current = await db.collection('dag_runs').findOne({ _id: new ObjectId(dagRunId) })
@@ -192,7 +197,7 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
     // Cascades until stable (e.g. skipping A may make B unsatisfiable too).
     await skipUnsatisfiableTasks(db, dagRunId)
 
-    claimed = await claimReadyTasks(db, dagRunId)
+    claimed = await claimReadyTasks(db, dagRunId, { limit: claimCapacity() })
   }
 
   // Final passes: handle tasks that were unsatisfiable from the start or
@@ -201,11 +206,10 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
   await expandDynamicMapped(db, dagRunId)
   await skipUnsatisfiableTasks(db, dagRunId)
 
-  // Check overall run completion — skipped counts as terminal (not failed)
+  // Check overall run completion — skipped / upstream_failed / removed are finished too.
+  // deferred / up_for_retry / up_for_reschedule are not: the run waits for them.
   const tasks = await db.collection('task_instances').find({ dag_run_id: dagRunId }).toArray()
-  // 'deferred' is non-terminal — task is waiting for trigger, must not finalize the run
-  const TERMINAL_STATES = new Set(['success', 'failed', 'cancelled', 'skipped'])
-  const allDone = tasks.every(t => TERMINAL_STATES.has(t.state))
+  const allDone = tasks.every(t => TI_FINISHED.has(t.state))
   // A failed teardown does not fail the run unless it opted in (Airflow on_failure_fail_dagrun)
   const anyFailed = tasks.some(t => t.state === 'failed' && (!t.is_teardown || t.on_failure_fail_dagrun))
 
@@ -292,17 +296,8 @@ export type ClearResult =
   | { cleared: false; reason: 'run_not_found' | 'task_not_found' | 'task_not_terminal' }
 
 /**
- * Clear one or all instances of a task back to queued, then un-terminal the run.
- *
- * Semantics:
- *   - Only clears instances whose state ∈ {success, failed, cancelled}.
- *     Clearing a running instance would cause two concurrent workers on the same row.
- *   - try_number is reset to 0 (fresh retry budget).
- *   - If mapIndex is given: clears only that specific instance (full tiFilter identity).
- *     If mapIndex is null/undefined: clears ALL instances of taskId.
- *   - After clearing, the parent run is reset to 'queued' so the scheduler tick
- *     re-picks it. Without this, tick() skips terminal runs forever.
- *   - Downstream tasks are NOT cleared (YAGNI — re-run of just this task may be enough).
+ * Clear one or all instances of a single task back to queued (finished instances only) and put the run
+ * back to queued. See clearTaskInstances (actions.ts) for downstream / upstream / failed-only clears.
  */
 export async function clearTaskInstance(
   db: Db,
@@ -310,59 +305,10 @@ export async function clearTaskInstance(
   taskId: string,
   mapIndex?: number | null,
 ): Promise<ClearResult> {
-  const run = await db.collection('dag_runs').findOne({ _id: new ObjectId(dagRunId) })
-  if (!run) return { cleared: false, reason: 'run_not_found' }
-
-  // Build the filter: full identity when mapIndex given; all instances otherwise
-  const taskFilter: Record<string, unknown> = {
-    dag_run_id: dagRunId,
-    task_id: taskId,
-    // Only clear terminal instances — never touch a running one
-    state: { $in: ['success', 'failed', 'cancelled'] },
-  }
-  if (mapIndex !== undefined && mapIndex !== null) {
-    taskFilter['map_index'] = mapIndex
-  }
-
-  const result = await db.collection('task_instances').updateMany(
-    taskFilter,
-    {
-      $set: {
-        state: 'queued',
-        started_at: null,
-        ended_at: null,
-        error: null,
-        next_poke_at: null,
-        first_poked_at: null,
-        poke_count: 0,
-        try_number: 0,   // reset retry budget
-      },
-    },
-  )
-
-  if (result.matchedCount === 0) {
-    // Task not found at all OR it's in a non-terminal state (running/queued)
-    const exists = await db.collection('task_instances').findOne({
-      dag_run_id: dagRunId, task_id: taskId,
-    })
-    return { cleared: false, reason: exists ? 'task_not_terminal' : 'task_not_found' }
-  }
-
-  // Un-terminal the run so tick() re-picks it. Use updateOne (not CAS) because
-  // we must reset even if the run is already terminal — that's the whole point.
-  await db.collection('dag_runs').updateOne(
-    { _id: new ObjectId(dagRunId) },
-    { $set: { state: 'queued', ended_at: null } },
-  )
-
-  console.log(`[scheduler] cleared ${result.modifiedCount} instance(s) of task '${taskId}' in run ${dagRunId}`)
-  void recordEvent(db, 'task_cleared', {
-    dag_run_id: dagRunId,
-    task_id: taskId,
-    map_index: mapIndex ?? null,
-    metadata: { cleared_count: result.modifiedCount },
-  })
-  return { cleared: true, clearedCount: result.modifiedCount }
+  const res = await clearTaskInstances(db, dagRunId, { taskIds: [taskId], mapIndex })
+  if (!res.ok) return { cleared: false, reason: res.reason }
+  if (res.changed.length === 0) return { cleared: false, reason: 'task_not_terminal' }
+  return { cleared: true, clearedCount: res.changed.length }
 }
 
 /**
@@ -380,7 +326,7 @@ async function failIfRunTimedOut(
   if (Date.now() - new Date(startedAt).getTime() < runTimeout) return false
 
   const res = await db.collection('task_instances').updateMany(
-    { dag_run_id: dagRunId, state: { $in: ['queued', 'running', 'deferred'] } },
+    { dag_run_id: dagRunId, state: { $in: [...TI_UNFINISHED] } },
     { $set: { state: 'failed', ended_at: new Date(), error: `Dag run exceeded runTimeout (${runTimeout}ms)` } },
   )
   if (res.modifiedCount > 0) {
@@ -392,7 +338,7 @@ async function failIfRunTimedOut(
 /**
  * Cancel a dag_run atomically:
  * - Marks run state → cancelled
- * - Marks all queued/running/deferred tasks → cancelled
+ * - Marks all unfinished tasks (queued/running/deferred/up_for_*) → cancelled
  * Returns false if the run was already in a terminal state.
  */
 export async function cancelRun(db: Db, dagRunId: string): Promise<boolean> {
@@ -406,7 +352,7 @@ export async function cancelRun(db: Db, dagRunId: string): Promise<boolean> {
 
   // Cancel all non-terminal tasks in one shot
   await db.collection('task_instances').updateMany(
-    { dag_run_id: dagRunId, state: { $in: ['queued', 'running', 'deferred'] } },
+    { dag_run_id: dagRunId, state: { $in: [...TI_UNFINISHED] } },
     { $set: { state: 'cancelled', ended_at: new Date(), error: 'Cancelled by user' } }
   )
 

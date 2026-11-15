@@ -71,11 +71,13 @@ describe('scheduleRetry', () => {
     return (await db.collection<TaskInstance>('task_instances').findOne({ dag_run_id: runId }))!
   }
 
-  it('requeues a running task and bumps try_number', async () => {
+  it('moves a running task to up_for_retry, bumps try_number and stamps when the retry is due', async () => {
     const ti = await seed('running')
-    await scheduleRetry(db, ti, 'boom')
+    const now = new Date('2026-06-01T00:00:00Z')
+    await scheduleRetry(db, { ...ti, retry_delay: 30_000 }, 'boom', now)
     const after = await db.collection('task_instances').findOne({ dag_run_id: ti.dag_run_id })
-    expect(after).toMatchObject({ state: 'queued', try_number: 1, error: 'boom' })
+    expect(after).toMatchObject({ state: 'up_for_retry', try_number: 1, error: 'boom', claimed_by: null, ended_at: now })
+    expect(after!.next_retry_at).toEqual(new Date(now.getTime() + 30_000))
   })
 
   it('does not resurrect a task that was failed meanwhile (e.g. run timed out)', async () => {

@@ -87,13 +87,13 @@ describe('setup / teardown runs', () => {
     expect(runState).toBe('failed')
   })
 
-  it('setup fails: work and teardown are skipped (nothing to clean up); the run fails', async () => {
+  it('setup fails: work and teardown are upstream_failed (nothing to clean up); the run fails', async () => {
     const { states, runState } = await run('st_setup_fails', {
       setup: { setup: true, run: boom },
       work: { dependsOn: ['setup'], run: ok },
       teardown: { teardown: true, dependsOn: ['setup', 'work'], run: ok },
     })
-    expect(states).toEqual({ setup: 'failed', work: 'skipped', teardown: 'skipped' })
+    expect(states).toEqual({ setup: 'failed', work: 'upstream_failed', teardown: 'upstream_failed' })
     expect(runState).toBe('failed')
   })
 
@@ -138,7 +138,7 @@ describe('setup / teardown runs', () => {
       work: { run: boom },
       teardown: { teardown: true, triggerRule: 'all_success', dependsOn: ['work'], run: ok },
     })
-    expect(states.teardown).toBe('skipped')
+    expect(states.teardown).toBe('upstream_failed')
     expect(tis.find(t => t.task_id === 'teardown')?.trigger_rule).toBe('all_success')
   })
 
@@ -183,7 +183,7 @@ describe('setup / teardown — more shapes', () => {
       work: { dependsOn: ['s1', 's2'], run: ok },
       teardown: { teardown: true, dependsOn: ['s1', 's2', 'work'], run: ok },
     })
-    expect(states).toEqual({ s1: 'success', s2: 'failed', work: 'skipped', teardown: 'success' })
+    expect(states).toEqual({ s1: 'success', s2: 'failed', work: 'upstream_failed', teardown: 'success' })
     expect(runState).toBe('failed')
   })
 

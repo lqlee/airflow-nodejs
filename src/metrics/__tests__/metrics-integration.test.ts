@@ -5,7 +5,7 @@ import type { FastifyInstance } from 'fastify'
 import { buildServer } from '../../api/server.js'
 import { startScheduler, stopScheduler } from '../../scheduler/index.js'
 import { acquire, release } from '../../scheduler/pool.js'
-import { acquirePool, releasePool, createPool, resetAllPools } from '../../pools/index.js'
+import { createPool } from '../../pools/index.js'
 import { clearRegistry } from '../../dag/registry.js'
 import { clearMetricsCache } from '../index.js'
 import { getSchedulerStats, resetMetrics } from '../registry.js'
@@ -29,7 +29,7 @@ afterAll(async () => {
   delete process.env.METRICS_CACHE_SECONDS
 })
 afterEach(async () => {
-  stopScheduler(); resetAllPools(); resetMetrics(); clearMetricsCache(); clearRegistry()
+  stopScheduler(); resetMetrics(); clearMetricsCache(); clearRegistry()
   await db.collection('pools').deleteMany({})
 })
 
@@ -78,14 +78,16 @@ describe('live gauges follow the real semaphores', () => {
     expect(await metric('airflow_workers_active')).toBe(base)
   })
 
-  it('pool occupied/open slots track acquirePool / releasePool, weighted by slots', async () => {
+  it('pool occupied/open slots follow the running task instances in the DB, weighted by slots', async () => {
     await createPool(db, 'live_pool', 5)
-    await acquirePool(db, 'live_pool', 3)
+    await db.collection('task_instances').insertOne({ dag_run_id: 'r', task_id: 'big', map_index: null, pool: 'live_pool', pool_slots: 3, state: 'running' })
     expect(await metric('airflow_pool_occupied_slots{pool="live_pool"}')).toBe(3)
     expect(await metric('airflow_pool_open_slots{pool="live_pool"}')).toBe(2)
-    releasePool('live_pool', 3)
+    await db.collection('task_instances').updateOne({ task_id: 'big' }, { $set: { state: 'success' } })
+    clearMetricsCache()
     expect(await metric('airflow_pool_occupied_slots{pool="live_pool"}')).toBe(0)
     expect(await metric('airflow_pool_open_slots{pool="live_pool"}')).toBe(5)
+    await db.collection('task_instances').deleteMany({ task_id: 'big' })
   })
 })
 

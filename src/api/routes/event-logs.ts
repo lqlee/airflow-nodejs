@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { ObjectId } from 'mongodb'
-import { buildEventFilter, isEventType, type EventType } from '../../events/index.js'
+import { buildEventFilter, isEventType, EVENT_TYPES, type EventType } from '../../events/index.js'
 
 export async function eventLogsRoutes(app: FastifyInstance): Promise<void> {
   /**
@@ -33,7 +33,7 @@ export async function eventLogsRoutes(app: FastifyInstance): Promise<void> {
     // Validate event_type if provided
     if (event_type && !isEventType(event_type)) {
       return reply.status(400).send({
-        error: `"event_type" must be one of: run_triggered, run_success, run_failed, dag_paused, dag_resumed, run_cancelled, task_cleared`,
+        error: `"event_type" must be one of: ${EVENT_TYPES.join(', ')}`,
       })
     }
 

@@ -53,6 +53,7 @@ export const SCHEMAS: TableSchema[] = [
   { collection: 'backfills', columns: [S('dag_id'), S('state'), T('created_at')], indexes: [idx('backfills', ['dag_id', 'created_at']), idx('backfills', ['state'])] },
   { collection: 'scheduler_instances', columns: [T('heartbeat_at')], indexes: [idx('scheduler_instances', ['heartbeat_at'])] },
   { collection: 'scheduler_leases', columns: [], indexes: [] },
+  { collection: 'claim_locks', columns: [], indexes: [] },
   { collection: 'event_logs', columns: [S('dag_id'), S('dag_run_id'), S('event_type'), T('created_at')], indexes: [idx('event_logs', ['dag_id', 'created_at']), idx('event_logs', ['dag_run_id', 'created_at']), idx('event_logs', ['event_type', 'created_at'])] },
 ]
 

@@ -210,7 +210,7 @@ describe('onRetry', () => {
         { dag_run_id: runId }, { $set: { state: 'running' } }, { returnDocument: 'after' }))!
       await scheduleRetry(db, ti, 'failed once')
       const after = await db.collection('task_instances').findOne({ dag_run_id: runId })
-      expect(after).toMatchObject({ state: 'queued', try_number: 1, error: 'failed once' })
+      expect(after).toMatchObject({ state: 'up_for_retry', try_number: 1, error: 'failed once' })
       clearRegistry()
     }
   })
@@ -222,7 +222,7 @@ describe('onRetry', () => {
     const ti = (await db.collection<TaskInstance>('task_instances').findOneAndUpdate(
       { dag_run_id: runId }, { $set: { state: 'running' } }, { returnDocument: 'after' }))!
     await scheduleRetry(db, ti, 'e')
-    expect((await db.collection('task_instances').findOne({ dag_run_id: runId }))?.state).toBe('queued')
+    expect((await db.collection('task_instances').findOne({ dag_run_id: runId }))?.state).toBe('up_for_retry')
   })
 })
 

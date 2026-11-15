@@ -3,12 +3,25 @@ import type { DagDefinition, TriggerRule } from '../dag/types.js'
 import { planExpansion, isLiteralMapped, isDynamicMapped, isMappedTask } from './mapping.js'
 import { computeEffectiveWeights } from './weights.js'
 import { recordEvent } from '../events/index.js'
+import { createDeadlines, deadlineAlertsOf } from '../deadlines/index.js'
+import { runInfoForLogicalDate, type DataInterval } from './data-interval.js'
+
+function defaultDataInterval(dag: DagDefinition, logicalDate: Date): DataInterval {
+  try {
+    return runInfoForLogicalDate(dag, logicalDate).dataInterval
+  } catch {
+    return { start: logicalDate, end: logicalDate }   // unparsable schedule — a point interval
+  }
+}
 import type { TiState } from './states.js'
 
 export interface DagRun {
   dag_id: string
   dag_version: string | null   // sha256[:12] of the dag source file at run creation time
   logical_date: Date | null    // scheduled execution date; null for ad-hoc/manual runs
+  /** The period of data the run covers (Airflow data_interval) — null when logical_date is null. See data-interval.ts. */
+  data_interval_start?: Date | null
+  data_interval_end?: Date | null
   /**
    * Trigger-time configuration (arbitrary JSON object from the caller).
    * Empty object for cron/dataset/backfill runs.
@@ -29,6 +42,10 @@ export interface DagRun {
   triggered_by?: { dag_id: string; dag_run_id: string; task_id: string } | null
   /** When the run first moved queued → running (basis for runTimeout). Absent on legacy runs. */
   started_at?: Date | null
+  /** When the run was (last) queued: creation, or the latest clear. Basis for queued_at deadlines. */
+  queued_at?: Date
+  /** Its deadlines were computed at creation (src/deadlines) — older runs get them on the next tick. */
+  deadlines_set?: boolean
   /** How the run was triggered. */
   trigger_type: 'manual' | 'cron' | 'backfill' | 'dataset' | 'timetable' | 'catchup' | 'triggered'
   /** ID of the parent backfill entity, or null for non-backfill runs. */
@@ -119,11 +136,17 @@ export interface TaskInstance {
   hitl_responded_at: Date | null                // when the response was recorded
   /** INSTANCE_ID of the process that claimed the running try (zombie detection). Absent on legacy rows. */
   claimed_by?: string | null
+  /** A result whose task callbacks the scheduler has yet to fire (callbacks.ts). */
+  callback_pending?: 'success' | 'failed' | 'retry' | null
+  /** For a pending retry callback: the attempt that failed (1-based). */
+  callback_try?: number
 }
 
 export interface CreateRunOptions {
   /** Logical execution date (backfill). Defaults to now (ad-hoc / manual trigger). */
   logicalDate?: Date
+  /** Data interval; default derived from logicalDate and the Dag's scheduleMode (data-interval.ts). */
+  dataInterval?: DataInterval
   /** Trigger-time configuration (arbitrary JSON object). Defaults to {}. */
   conf?: Record<string, unknown>
   /** Tags for filtering. Defaults to []. */
@@ -160,18 +183,23 @@ export class DuplicateRunError extends Error {
  */
 export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptions = {}): Promise<string> {
   const now = new Date()
+  const dataInterval = opts.dataInterval ?? (opts.logicalDate ? defaultDataInterval(dag, opts.logicalDate) : null)
 
   // Insert dag_run — stamp the dag version so every run records which code ran it
   const runResult = await db.collection<DagRun>('dag_runs').insertOne({
     dag_id: dag.id,
     dag_version: dag.version ?? null,
     logical_date: opts.logicalDate ?? null,
+    data_interval_start: dataInterval?.start ?? null,
+    data_interval_end: dataInterval?.end ?? null,
     conf: opts.conf ?? {},
     tags: opts.tags ?? [],
     note: null,
     state: 'queued',
     trigger_type: opts.triggerType ?? 'manual',
     created_at: now,
+    queued_at: now,
+    deadlines_set: true,
     ordering_date: opts.logicalDate ?? now,
     triggered_by: opts.triggeredBy ?? null,
     backfill_id: opts.backfillId ?? null,
@@ -265,6 +293,10 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
   }
 
   await db.collection<TaskInstance>('task_instances').insertMany(taskDocs)
+
+  if (deadlineAlertsOf(dag).length > 0) {
+    await createDeadlines(db, dag, { _id: runResult.insertedId, dag_id: dag.id, logical_date: opts.logicalDate ?? null, queued_at: now, created_at: now }, { now })
+  }
 
   console.log(`[scheduler] created run ${runId} for dag '${dag.id}' with ${taskDocs.length} tasks`)
 

@@ -167,6 +167,40 @@ describe('renderTemplate', () => {
   })
 })
 
+describe('renderTemplate — data interval, macros and filters', () => {
+  const ctx = makeCtx({
+    logical_date: new Date('2024-03-15T00:00:00Z'),
+    data_interval_start: new Date('2024-03-15T00:00:00Z'),
+    data_interval_end: new Date('2024-03-16T00:00:00Z'),
+  })
+
+  it('exposes the data interval, ds_nodash and params', () => {
+    expect(renderTemplate('{{ data_interval_start }}..{{ data_interval_end }}', ctx)).toBe('2024-03-15T00:00:00.000Z..2024-03-16T00:00:00.000Z')
+    expect(renderTemplate('{{ ds_nodash }} {{ params.env }}', ctx)).toBe('20240315 prod')
+  })
+
+  it('a run without a data interval renders it as empty', () => {
+    expect(renderTemplate('[{{ data_interval_start }}]', makeCtx())).toBe('[]')
+  })
+
+  it('macros.ds_add and macros.ds_format', () => {
+    expect(renderTemplate("{{ macros.ds_add(ds, 7) }} {{ macros.ds_add('2024-03-01', -1) }}", ctx)).toBe('2024-03-22 2024-02-29')
+    expect(renderTemplate("{{ macros.ds_format(ds, '%Y-%m-%d', '%d/%m/%Y') }}", ctx)).toBe('15/03/2024')
+    expect(renderTemplate('{{ macros.datetime_diff_days(data_interval_start, data_interval_end) }}', ctx)).toBe('1')
+  })
+
+  it('filters chain left to right', () => {
+    expect(renderTemplate('{{ data_interval_end | ds }} {{ data_interval_end | ds_nodash }}', ctx)).toBe('2024-03-16 20240316')
+    expect(renderTemplate("{{ conf.missing | default('none') | upper }} {{ conf.env | upper }}", ctx)).toBe('NONE PROD')
+  })
+
+  it('leaves text that is not an expression alone, renders a failing macro as empty', () => {
+    expect(renderTemplate('awk {{ print $1 }} and {{ }}', ctx)).toBe('awk {{ print $1 }} and {{ }}')
+    expect(renderTemplate("[{{ macros.ds_add('not a date', 1) }}]", ctx)).toBe('[]')
+    expect(renderTemplate('[{{ ds | no_such_filter }}]', ctx)).toBe('[]')
+  })
+})
+
 describe('renderArgs', () => {
   it('renders all items in an array', () => {
     const ctx = makeCtx()

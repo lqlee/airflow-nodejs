@@ -80,13 +80,19 @@ export const PLUGIN_REGISTRY: PluginInfo[] = [
   {
     name: 'datasets',
     description: 'Dataset events and data-aware scheduling',
-    routes: ['/datasets', '/datasets/:uri/events'],
+    routes: ['/datasets', '/dataset-aliases'],
     category: 'scheduling',
   },
   {
     name: 'sla',
     description: 'SLA breach alerts and acknowledgement',
     routes: ['/sla-alerts', '/sla-alerts/:alertId/ack'],
+    category: 'observability',
+  },
+  {
+    name: 'deadlines',
+    description: 'Deadline alerts — pending and missed deadlines per run',
+    routes: ['/deadlines'],
     category: 'observability',
   },
   {

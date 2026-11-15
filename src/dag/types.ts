@@ -1,3 +1,4 @@
+import type { DeadlineAlert } from '../deadlines/index.js'
 export interface XComHelper {
   /** Push a value under key — available to downstream tasks via pull() */
   push: (key: string, value: unknown) => Promise<void>
@@ -42,6 +43,21 @@ export interface TaskContext {
    * Read-only — tasks should not mutate this object.
    */
   conf: Record<string, unknown>
+  /** Same object as conf (Airflow `params`; param defaults are merged into conf at trigger time). */
+  params: Record<string, unknown>
+  /** The run's logical date — null for manual, dataset and timetable-function runs. */
+  logicalDate: Date | null
+  /** The period of data the run covers (scheduleMode); null when the run has no logical date. */
+  dataIntervalStart: Date | null
+  dataIntervalEnd: Date | null
+  /** Logical date as YYYY-MM-DD (the run's creation date when it has none). */
+  ds: string
+  /**
+   * Record a dataset event (Airflow outlet events) — optionally through an alias, which attaches the
+   * dataset to that alias so Dags scheduled on `{ alias }` run. Recorded only if the task function
+   * succeeds; events emitted before ctx.defer() are discarded.
+   */
+  emitDataset: (uri: string, opts?: { alias?: string; extra?: Record<string, unknown> }) => void
   xcom: XComHelper
   connections: ConnectionHelper
   variables: VariableHelper
@@ -106,16 +122,49 @@ export interface TaskContext {
   ) => Promise<never>  // throws DeferSignal — caller's run: fn must not catch it
 }
 
-/** Passed to a task's `onRetry` callback. */
-export interface RetryCallbackInfo {
+/** A dataset condition — see DagDefinition.datasets and src/datasets/conditions.ts. */
+export type DatasetCondition =
+  | string
+  | { all: DatasetCondition[] }
+  | { any: DatasetCondition[] }
+  | { alias: string }
+
+/**
+ * A callback target (Airflow callbacks and notifiers): a function, an object with `notify(info)`,
+ * or a webhook URL that receives a JSON POST. Fire-and-forget with a 10s timeout; errors are logged.
+ */
+export type Notifier<I> = string | ((info: I) => unknown) | { notify: (info: I) => unknown }
+/** One notifier or several (all fire, in parallel). */
+export type Callbacks<I> = Notifier<I> | Notifier<I>[]
+
+/** Passed to a task's onExecute / onSuccess / onFailure / onRetry callbacks. */
+export interface TaskCallbackInfo {
   dagId: string
   runId: string
   taskId: string
   mapIndex: number | null
-  /** The attempt that just failed (1-based). */
+  /** The attempt (1-based) that started, succeeded, failed, or — for onRetry — just failed. */
   tryNumber: number
   maxRetries: number
+  state: 'running' | 'success' | 'failed' | 'up_for_retry'
+  /** The failure message (onFailure / onRetry); null otherwise. */
+  error: string | null
+}
+
+/** Passed to a task's `onRetry` callback. */
+export interface RetryCallbackInfo extends TaskCallbackInfo {
   error: string
+}
+
+/** Passed to a Dag's onSuccess / onFailure callbacks (functions and `notify` objects). */
+export interface RunCallbackInfo {
+  dagId: string
+  runId: string
+  state: 'success' | 'failed'
+  logicalDate: Date | null
+  conf: Record<string, unknown>
+  tags: string[]
+  endedAt: Date
 }
 
 /**
@@ -256,12 +305,19 @@ export interface TaskDefinition {
    */
   maxActiveTisPerRun?: number
   /**
-   * Called each time this task fails and is about to be retried (Airflow
-   * `on_retry_callback`). Not called on the final failure. Runs in the scheduler
-   * (or worker) process, fire-and-forget with a 10s timeout; errors are logged,
-   * never fail the task.
+   * Callbacks (Airflow `on_execute_callback`, `on_success_callback`, `on_failure_callback`,
+   * `on_retry_callback`). onRetry fires for each failed try that will be retried, onFailure only for
+   * the final failure (including timeouts and lost heartbeats). Each takes a function, a `{ notify }`
+   * object, a webhook URL, or a list of them.
+   *
+   * They run in the scheduler, whichever executor ran the task: the result write flags the instance
+   * and the scheduler fires the callback once, fire-and-forget with a 10s timeout. A callback error is
+   * logged and never changes the task. Marking a task by hand fires no callback (as in Airflow).
    */
-  onRetry?: (info: RetryCallbackInfo) => void | Promise<void>
+  onExecute?: Callbacks<TaskCallbackInfo>
+  onSuccess?: Callbacks<TaskCallbackInfo>
+  onFailure?: Callbacks<TaskCallbackInfo>
+  onRetry?: Callbacks<RetryCallbackInfo>
   /**
    * Run only if this task succeeded (or was skipped) in the previous run of the Dag
    * (Airflow `depends_on_past`). Previous run = latest earlier non-cancelled run by
@@ -547,6 +603,11 @@ export interface TaskDefinition {
      *   generic.ci.artifacts.walmart.com/hub-docker-release-remote/<image>
      */
     image: string
+    /**
+     * docker run --pull policy: 'missing' (Docker's default — pull if not local), 'always', or 'never'
+     * (fail at once when the image is not local — for air-gapped hosts using requiredImages tarballs).
+     */
+    pull?: 'missing' | 'always' | 'never'
     /** Command + args passed to the container. Overrides the image's default CMD. */
     command?: string[]
     /** Additional environment variables merged with DAG_ID/RUN_ID/TASK_ID. */
@@ -774,6 +835,17 @@ export interface DagDefinition {
    * Needs a cron `schedule`. Combine with `maxActiveRuns` to throttle the replay.
    */
   catchup?: boolean
+  /**
+   * How a cron `schedule` maps to each run's logical_date and data interval (Airflow timetables):
+   *   'trigger' (default, Airflow 3 CronTriggerTimetable): a run per cron time T, logical_date = T,
+   *       data_interval = [T - triggerInterval, T].
+   *   'interval' (Airflow CronDataIntervalTimetable): a run per period between cron times, started when
+   *       the period ends — data_interval = [prev(T), T], logical_date = prev(T).
+   * Templates and task code see the interval as data_interval_start / data_interval_end.
+   */
+  scheduleMode?: 'trigger' | 'interval'
+  /** 'trigger' mode only: ms the data interval reaches back before the trigger time. Default 0. */
+  triggerInterval?: number
   /** First scheduled time to catch up from (ISO string or Date). Only used with `catchup`. */
   startDate?: string | Date
   /**
@@ -792,7 +864,17 @@ export interface DagDefinition {
   owner?: string
   /** Markdown documentation shown with the Dag (Airflow `doc_md`). */
   docMd?: string
-  sla?: number             // ms — if a run hasn't completed within this window, an SLA alert is fired
+  /**
+   * ms — alias for `deadline: { name: 'sla', reference: 'queued_at', interval: sla }`. A run that has not
+   * succeeded this long after it was queued gets an SLA alert (GET /sla-alerts, the UI banner).
+   */
+  sla?: number
+  /**
+   * Deadline alerts (Airflow `DeadlineAlert`): fire the callback when a run has not succeeded by
+   * reference + interval. References: 'logical_date', 'queued_at', { fixed }, { averageRuntime }.
+   * See src/deadlines/index.ts.
+   */
+  deadline?: DeadlineAlert | DeadlineAlert[]
   version?: string         // sha256[:12] of the dag source file — stamped by the loader
   /**
    * Typed parameter definitions — validated at trigger time.
@@ -818,11 +900,15 @@ export interface DagDefinition {
    */
   outlets?: string[]
   /**
-   * Dataset URIs this dag CONSUMES. The dag runs when ALL listed datasets have
-   * received a new event since the last trigger (AND-semantics).
-   * A dag with `datasets` keeps `schedule: null` — cron scheduling is ignored.
+   * Datasets this Dag CONSUMES (Airflow asset schedule). A list of URIs runs the Dag when ALL of them
+   * have a new event since its last dataset run. A condition object combines them:
+   *   { all: [...] }  every one (a & b)       { any: [...] }  at least one (a | b)
+   *   { alias: 'n' }  any dataset a task attached to alias n at runtime (ctx.emitDataset(uri, { alias }))
+   * e.g. { any: ['s3://raw/a', { all: ['pg://x', 'pg://y'] }] }. Many events still make one run.
+   * With a cron `schedule` too, the Dag runs on either (Airflow AssetOrTimeSchedule); dataset runs have
+   * no logical date.
    */
-  datasets?: string[]
+  datasets?: string[] | DatasetCondition
 
   /**
    * Docker images required by container tasks in this dag.
@@ -844,18 +930,14 @@ export interface DagDefinition {
   requiredImages?: string[]
 
   /**
-   * URL to POST to when a run completes successfully.
-   * Payload: { dag_id, run_id, state: 'success', logical_date, conf, tags, ended_at }
-   * Delivery is fire-and-forget with a 5s timeout — failures are logged, not retried.
-   * Only trusted authors can set this; never accept caller-supplied URLs at trigger time.
+   * Called once when a run succeeds / fails (Airflow Dag `on_success_callback` / `on_failure_callback`).
+   * A function or `{ notify }` object receives a RunCallbackInfo. A webhook URL receives
+   * { dag_id, run_id, state, logical_date, conf, tags, ended_at } — delivery is fire-and-forget with a
+   * 5s timeout, failures are logged, not retried. Only trusted authors can set these; never accept
+   * caller-supplied URLs at trigger time. A list fires every entry.
    */
-  onSuccess?: string
-
-  /**
-   * URL to POST to when a run fails (any task failed).
-   * Same payload shape as onSuccess, with state: 'failed'.
-   */
-  onFailure?: string
+  onSuccess?: Callbacks<RunCallbackInfo>
+  onFailure?: Callbacks<RunCallbackInfo>
 }
 
 /** Helper to define a Dag with full TypeScript inference */

@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB (or Cloud Spanner)**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-1,400+ tests · 19 API route modules · multi-user RBAC · multi-replica safe · Docker-ready
+1,450+ tests · 20 API route modules · multi-user RBAC · multi-replica safe · Docker-ready
 
 ---
 
@@ -10,11 +10,11 @@ A production-grade reimplementation of Apache Airflow's core concepts in **Node.
 
 | Category | What's included |
 |----------|----------------|
-| **Scheduling** | Cron schedules, manual triggers, backfill with lifecycle (pause/resume/cancel), data-aware scheduling (datasets) |
+| **Scheduling** | Cron schedules (trigger or data-interval mode), manual triggers, catch-up, backfill with lifecycle (pause/resume/cancel), data-aware scheduling (dataset AND / OR conditions, aliases, dataset-or-time) |
 | **Task execution** | Local child-process fork, BullMQ distributed mode, retries, timeouts, sensors, dynamic task mapping, task groups, resource pools |
-| **Observability** | SLA alerts, run statistics + duration histogram, event/audit log, task try history, dag warnings, import errors |
+| **Observability** | Deadline alerts (SLA as an alias), run statistics + duration histogram, event/audit log, task try history, dag warnings, import errors |
 | **Data flow** | XCom push/pull (full CRUD), connections store (encrypted), variables store (encrypted), per-run conf/tags/notes |
-| **Lifecycle** | Webhook callbacks on run completion, Human-in-the-Loop (HITL) approval gates, clear (with downstream / upstream / failed only), re-run, mark task or run success / failed |
+| **Lifecycle** | Task and Dag callbacks / notifiers (functions, `{ notify }` objects, webhooks), templated fields with macros, Human-in-the-Loop (HITL) approval gates, clear (with downstream / upstream / failed only), re-run, mark task or run success / failed |
 | **Operations** | Graceful shutdown with worker drain, config API, providers API, plugins API |
 | **Auth** | Multi-user RBAC (viewer / editor / admin roles), scrypt-hashed DB-backed API keys, env-key fallback |
 | **Versioning** | Dag version history (sha256 hash), source code snapshots, backfill_id linkage on runs |
@@ -118,14 +118,16 @@ import { dag } from '../src/dag/types.js'
 export default dag({
   id: 'my_pipeline',
   schedule: '0 9 * * *',   // cron, or null for manual-only
-  onSuccess: 'https://hooks.example.com/success',  // webhook callback
+  onSuccess: 'https://hooks.example.com/success',  // Dag callback: function, { notify }, URL or a list
+  deadline: { reference: 'queued_at', interval: 30 * 60_000, callback: info => console.warn('late', info.runId) },
   tasks: {
     extract: {
       pool: 'db_pool',      // limit concurrency via resource pool
       retries: 2,
       retryDelay: 5000,
+      onFailure: info => console.error(`${info.taskId} failed: ${info.error}`),   // also onExecute / onSuccess / onRetry
       run: async (ctx) => {
-        const conn = await ctx.connections.get('my_db')
+        const conn = await ctx.connections.get('my_db')   // ctx.ds, ctx.logicalDate, ctx.dataIntervalStart/End, ctx.params
         const limit = await ctx.variables.get('batch_size')
         await ctx.xcom.push('rows', 42)
       }
@@ -154,6 +156,40 @@ export default dag({
 ```
 
 Dags hot-reload every 5 seconds — no restart needed.
+
+### Schedules and data intervals
+
+`schedule: '0 0 * * *'` runs at each cron time T with `logical_date = T` (Airflow 3's CronTriggerTimetable;
+`triggerInterval: ms` makes the data interval `[T - ms, T]`). `scheduleMode: 'interval'` instead runs once per
+completed period (Airflow's CronDataIntervalTimetable): fired at T, the run covers `[prev(T), T]` and its
+logical date is `prev(T)`. Catch-up and backfill follow the same mode. Manual and dataset runs have no
+logical date or data interval.
+
+Shell, Python, Java, container and Kubernetes task fields are templated: `{{ ds }}`, `{{ ds_nodash }}`,
+`{{ ts }}`, `{{ data_interval_start }}`, `{{ data_interval_end }}`, `{{ conf.x }}` / `{{ params.x }}`,
+macros `{{ macros.ds_add(ds, -1) }}` and `{{ macros.ds_format(ds, '%Y-%m-%d', '%Y%m%d') }}`, and filters
+`{{ data_interval_end | ds_nodash }}`, `| default('x')`, `| upper`.
+
+### Callbacks and deadlines
+
+Tasks take `onExecute`, `onSuccess`, `onFailure` (final failure only) and `onRetry`; Dags take `onSuccess` and
+`onFailure`. Each accepts a function, a `{ notify(info) }` object, a webhook URL, or a list. They fire once, in
+the scheduler, whichever executor ran the task (local, BullMQ, Kubernetes, or the zombie reaper); a callback
+error is logged and never changes the task. Marking a task by hand fires no callback.
+
+`deadline` (one or a list) alerts when a run has not succeeded by `reference + interval` — references
+`'logical_date'`, `'queued_at'` (re-counted from a clear), `{ fixed: date }` and
+`{ averageRuntime: { maxRuns } }`. A miss is recorded once (event `deadline_missed`, `GET /deadlines`, the
+`airflow_deadlines_missed` metric) and fires `callback`. A successful run drops its pending deadlines; a
+failed one still alerts. `sla: ms` is an alias for a `queued_at` deadline and also lands in `GET /sla-alerts`.
+
+### Datasets
+
+`outlets: [uri]` emits an event when the Dag's run succeeds; a task can emit at runtime with
+`ctx.emitDataset(uri, { alias?, extra? })` (recorded only if the task succeeds). A consumer's `datasets` is a
+list (all must have new events) or a condition: `{ all: [...] }`, `{ any: [...] }`, `{ alias: 'name' }`
+(any dataset a task attached to that alias), nested freely. Events since the last dataset run make one run.
+With a cron `schedule` as well, the Dag runs on either.
 
 ---
 
@@ -230,6 +266,9 @@ GET  /pools/:name | PATCH | DELETE             get / update / delete pool
 ### Observability
 
 ```
+GET  /deadlines                                deadline alerts (?dag_id= ?dag_run_id= ?missed=)
+GET  /datasets                                 dataset events (?uri= ?limit=)
+GET  /dataset-aliases                          datasets attached to each alias (?alias=)
 GET  /sla-alerts                               SLA breach alerts (?unacked=true)
 POST /sla-alerts/:alertId/ack                  acknowledge alert
 GET  /event-logs                               audit trail (?dag_id= ?event_type= ?cursor=)
@@ -260,7 +299,7 @@ Liveness loop (HEARTBEAT_INTERVAL_MS)
 Scheduler loop (5s poll)
   ├── Dag loader         scans dags/ every tick, registers in memory
   │     └── analyzeWarnings()   soft validation (missing run logic, cycles, etc.)
-  ├── Leader only        cron, catch-up, timetables, deferred polling, SLA,
+  ├── Leader only        cron, catch-up, timetables, deferred polling, deadlines / SLA,
   │                      dataset triggers, zombie reaping, retention purge
   ├── Cron scheduler     node-cron fires runs on schedule (logical_date = fire time)
   ├── Claim              atomic findOneAndUpdate (safe for concurrent schedulers)
@@ -268,13 +307,15 @@ Scheduler loop (5s poll)
   │     └── Limits: pool slots + maxActiveTis counted in the DB under short claim locks;
   │                 at most as many claims as this process has free workers (MAX_WORKERS)
   │     └── Stamps claimed_by = this process, so its heartbeat vouches for the task
+  ├── Callbacks          results flag callback_pending; the scheduler fires each flag once (CAS)
   └── Executor
         ├── local mode   fork child_process per task
         │     └── EXEC_PATH auto-detects dev (tsx) vs prod (node)
         └── BullMQ mode  enqueue to Redis → worker picks up
 
 Worker process (isolated)
-  ├── Injects: ctx.conf, ctx.connections, ctx.variables, ctx.xcom
+  ├── Injects: ctx.conf / params, run dates (ds, logicalDate, data interval), ctx.connections,
+  │            ctx.variables, ctx.xcom, ctx.emitDataset
   ├── Reads all state from MongoDB directly (never over IPC)
   └── Reports outcome via IPC message → executor records try history
 
@@ -291,6 +332,10 @@ MongoDB collections:
   dag_versions         source hash history
   event_logs           audit trail
   sla_alerts           breach records
+  deadlines            per-run deadline alerts (pending / missed)
+  dataset_events       dataset events (Dag outlets, task emits)
+  dataset_watermarks   per-consumer consumed position per dataset / alias
+  dataset_alias_links  datasets attached to each alias at runtime
   api_keys             scrypt-hashed tokens + roles
   scheduler_instances  process registry + heartbeats (zombie detection)
   scheduler_leases     leader lease
@@ -319,7 +364,7 @@ Any number of replicas can share one database:
 
 - **Every replica** claims and executes tasks — a claim is an atomic per-task update.
 - **One replica (the leader)** creates scheduled work: cron, catch-up, timetables, dataset triggers,
-  deferred-task polling, SLA checks, zombie reaping and retention. Leadership is a lease renewed every
+  deferred-task polling, deadline / SLA checks, zombie reaping and retention. Leadership is a lease renewed every
   `HEARTBEAT_INTERVAL_MS`; if the leader dies, another replica takes over within `SCHEDULER_LEASE_TTL_MS`.
 - **One run per `(dag_id, logical_date)`** is enforced by a unique index, so a leadership hand-over or a
   backfill racing the scheduler cannot create the same scheduled run twice. Manual runs have no logical date.
@@ -967,8 +1012,8 @@ Comparison against the Apache Airflow 3.x web UI. Items are grouped by priority.
 |---|---|---|
 | **DAG search / filter bar** | Search + tag + owner filters on DAG list | ❌ not implemented |
 | **Grid view** | Per-task color grid across historical runs (run × task heatmap) | ✅ implemented — ⊞ Grid tab in run detail |
-| **Task instance actions** | Re-run, clear, mark success/failed per task | ❌ click shows logs only |
-| **Run clear / re-run** | Clear whole run or subset of tasks | ❌ cancel only |
+| **Task instance actions** | Re-run, clear, mark success/failed per task | ✅ task panel: clear (downstream / upstream / failed only), mark success / failed / skipped |
+| **Run clear / re-run** | Clear whole run or subset of tasks | ✅ re-run, clear failed, mark run success / failed |
 | **Last run badge on DAG card** | Colored last-run state badge directly on each DAG card | ❌ shown only inside runs list |
 | **DAG tags display** | Tags shown on DAG card, filterable | ❌ stored in DB, not shown in UI |
 

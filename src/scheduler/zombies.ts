@@ -13,7 +13,7 @@
 import type { Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
 import { recordTry } from './tries.js'
-import { retryUpdate } from './ti-writes.js'
+import { retryUpdate, failedUpdate } from './ti-writes.js'
 import { INSTANCE_ID, ZOMBIE_THRESHOLD_MS, listLiveInstanceIds, pruneDeadInstances } from './instance.js'
 
 type RunningTi = TaskInstance & { _id: unknown }
@@ -60,7 +60,7 @@ export async function reapZombies(
     const retry = ti.try_number < (ti.max_retries ?? 0)
     const res = await db.collection('task_instances').updateOne(filter, retry
       ? retryUpdate(ti, error, now)   // up_for_retry after the task's retry delay, like any failed try
-      : { $set: { state: 'failed', ended_at: now, error } })
+      : failedUpdate(error, now))
     if (res.modifiedCount === 0) continue
     await recordTry(db, ti, 'failed', now, error)
     if (retry) result.retried++

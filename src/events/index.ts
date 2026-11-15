@@ -31,6 +31,7 @@ export type EventType =
   | 'run_cleared'
   | 'task_state_set'
   | 'run_state_set'
+  | 'deadline_missed'
 
 export interface EventLogRecord {
   event_type: EventType
@@ -93,7 +94,7 @@ export async function recordEvent(
 export const EVENT_TYPES: readonly EventType[] = [
   'run_triggered', 'run_success', 'run_failed',
   'dag_paused', 'dag_resumed', 'run_cancelled', 'task_cleared',
-  'run_cleared', 'task_state_set', 'run_state_set',
+  'run_cleared', 'task_state_set', 'run_state_set', 'deadline_missed',
 ]
 const VALID_EVENT_TYPES = new Set<string>(EVENT_TYPES)
 

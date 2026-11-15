@@ -452,6 +452,12 @@ function SlaBanner({ alerts, onViewAlerts }) {
 
 function SlaPanel({ alerts, onAck, onClose }) {
   const fmt = ms => ms < 60000 ? `${(ms/1000).toFixed(1)}s` : `${(ms/60000).toFixed(1)}m`;
+  // Other deadline alerts (the sla alias is listed above as SLA alerts)
+  const [missed, setMissed] = useState([]);
+  useEffect(() => {
+    apiFetch(`${BASE}/deadlines?missed=true&limit=50`).then(r => r.json())
+      .then(d => { if (Array.isArray(d)) setMissed(d.filter(x => x.name !== 'sla')); }).catch(() => {});
+  }, [alerts.length]);
   return (
     <div className="sla-panel">
       <h4>
@@ -473,6 +479,16 @@ function SlaPanel({ alerts, onAck, onClose }) {
             : <button className="log-btn" style={{color:'#f6ad55',borderColor:'#c05621'}}
                 onClick={() => onAck(a.id)}>Ack</button>
           }
+        </div>
+      ))}
+      {missed.length > 0 && <h4 style={{marginTop:12}}>⏰ Missed deadlines</h4>}
+      {missed.map(d => (
+        <div key={d.id} className="sla-row">
+          <span className="sla-dag">{d.dag_id}</span>
+          <span className="sla-time">
+            run <code style={{fontSize:11}}>{d.dag_run_id.slice(-8)}</code>
+            {' · '}{d.name} ({d.reference}) due {new Date(d.deadline_time).toLocaleString()}
+          </span>
         </div>
       ))}
     </div>
@@ -528,7 +544,9 @@ function DagCard({ dag, onTrigger, onSelect, onTogglePause, selected }) {
       </h3>
       <div className="dag-meta">
         {dag.datasets?.length > 0
-          ? <span title={`Consumes: ${dag.datasets.join(', ')}`}>📥 dataset-triggered</span>
+          ? <span title={`Consumes: ${dag.dataset_condition_text || dag.datasets.join(' & ')}`}>
+              📥 dataset-triggered{dag.schedule ? ` or ⏰ ${dag.schedule}` : ''}
+            </span>
           : dag.schedule ? `⏰ ${dag.schedule}` : '● manual only'}
         {dag.outlets?.length > 0 && (
           <span title={`Produces: ${dag.outlets.join(', ')}`} style={{marginLeft:6,color:'#68d391'}}>

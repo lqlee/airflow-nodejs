@@ -7,6 +7,7 @@ import { advanceRun } from './index.js'
 import { isDagPaused } from '../dag/pause.js'
 import { enumerateDates } from './backfill.js'
 import { isLeader } from './lease.js'
+import { runInfoForFire } from './data-interval.js'
 
 /**
  * Logical date of a cron firing: the scheduled instant, truncated to the expression's resolution
@@ -78,7 +79,9 @@ export async function fireCronRun(
       return null
     }
     console.log(`[cron] ⏰ dag '${dag.id}' triggered by schedule '${expression}'`)
-    const runId = await createRun(db, dag, { triggerType: 'cron', logicalDate: cronLogicalDate(expression, firedAt) })
+    // node-cron fires on the local clock — the interval's other end is computed on the same clock
+    const info = runInfoForFire({ ...dag, schedule: expression }, cronLogicalDate(expression, firedAt))
+    const runId = await createRun(db, dag, { triggerType: 'cron', logicalDate: info.logicalDate, dataInterval: info.dataInterval })
     if (opts.advance !== false) await advanceRun(db, runId)
     return runId
   } catch (err) {
@@ -164,13 +167,17 @@ export const CATCHUP_MAX_RUNS_PER_TICK = 100
 /** Process-local baseline for Dags with neither startDate nor any prior catch-up run. */
 const catchupFirstSeen = new Map<string, Date>()
 
-/** Where to start enumerating: latest catch-up run > startDate > first time we saw the Dag. */
+/**
+ * Where to start enumerating fire times: end of the latest catch-up run's data interval (its logical
+ * date on older runs) > startDate > first time we saw the Dag. Runs whose logical date falls before the
+ * baseline are never created, so in interval mode the first run covers [startDate, next tick].
+ */
 async function resolveCatchupBaseline(db: Db, dag: DagDefinition, now: Date): Promise<Date | null> {
   const last = await db.collection('dag_runs').findOne(
     { dag_id: dag.id, trigger_type: 'catchup', logical_date: { $ne: null } },
     { sort: { logical_date: -1 } },
   )
-  if (last) return new Date(last.logical_date as Date)
+  if (last) return new Date((last.data_interval_end ?? last.logical_date) as Date)
 
   if (dag.startDate !== undefined) {
     const start = new Date(dag.startDate)
@@ -215,19 +222,21 @@ async function runCatchup(db: Db, dags: DagDefinition[], now: Date, maxPerTick: 
     const from = await resolveCatchupBaseline(db, dag, now)
     if (!from || from > now) continue
 
-    const dates = enumerateDates(dag.schedule, from, now)
-    if (dates.length === 0) continue
+    const infos = enumerateDates(dag.schedule, from, now)
+      .map(fire => runInfoForFire(dag, fire, 'UTC'))
+      .filter(i => i.logicalDate >= from)
+    if (infos.length === 0) continue
 
     const existing = await db.collection('dag_runs')
       .find({ dag_id: dag.id, logical_date: { $gte: from, $lte: now } }, { projection: { logical_date: 1 } })
       .toArray()
     const have = new Set(existing.map(r => new Date(r.logical_date as Date).getTime()))
 
-    const missing = dates.filter(d => !have.has(d.getTime())).slice(0, maxPerTick)
+    const missing = infos.filter(i => !have.has(i.logicalDate.getTime())).slice(0, maxPerTick)
     let createdForDag = 0
-    for (const date of missing) {
+    for (const info of missing) {
       try {
-        await createRun(db, dag, { logicalDate: date, triggerType: 'catchup' })
+        await createRun(db, dag, { logicalDate: info.logicalDate, dataInterval: info.dataInterval, triggerType: 'catchup' })
         createdForDag++
       } catch (err) {
         if (!(err instanceof DuplicateRunError)) throw err   // raced another scheduler or a backfill
@@ -235,7 +244,7 @@ async function runCatchup(db: Db, dags: DagDefinition[], now: Date, maxPerTick: 
     }
     created += createdForDag
     if (createdForDag > 0) {
-      console.log(`[catchup] dag '${dag.id}' → created ${createdForDag} run(s) up to ${missing[missing.length - 1].toISOString()}`)
+      console.log(`[catchup] dag '${dag.id}' → created ${createdForDag} run(s) up to ${missing[missing.length - 1].logicalDate.toISOString()}`)
     }
   }
   return created

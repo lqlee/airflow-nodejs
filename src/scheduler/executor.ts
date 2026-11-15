@@ -11,7 +11,7 @@ import { appendLog, parseLevelFromLine } from '../logs/index.js'
 import { enqueueTask } from '../queue/producer.js'
 import { sensorOutcome } from './sensor.js'
 import { recordTry } from './tries.js'
-import { getRunMeta, getRunConf } from './run-conf.js'
+import { getRunMeta, getRunContextFields } from './run-conf.js'
 import { USE_KUBERNETES_EXECUTOR, executeTaskOnKubernetes } from './kubernetes-executor.js'
 import { xcomPush, xcomPull } from '../xcom/index.js'
 import { renderTemplate, renderArgs, renderEnv, type TemplateContext } from './template.js'
@@ -435,7 +435,7 @@ async function executeContainerTask(
 
   // Working directory
   if (container.workdir) {
-    args.push('-w', container.workdir)
+    args.push('-w', renderTemplate(container.workdir, tctx))
   }
 
   // Network
@@ -449,8 +449,11 @@ async function executeContainerTask(
   if (container.cpus)        args.push('--cpus',        container.cpus)
   if (container.storageSize) args.push('--storage-opt', `size=${container.storageSize}`)
 
-  // Image
-  args.push(container.image)
+  if (container.pull) args.push('--pull', container.pull)
+
+  // Image (templated, e.g. a tag from conf)
+  const image = renderTemplate(container.image, tctx)
+  args.push(image)
 
   // Command override (rendered)
   if (container.command?.length) {
@@ -465,7 +468,7 @@ async function executeContainerTask(
   }
 
   return spawnTask(db, ti, {
-    label:     `container(${container.image})`,
+    label:     `container(${image})`,
     binary:    'docker',
     args,
     timeoutMs,
@@ -506,10 +509,14 @@ async function executeKubernetesTask(
 ): Promise<void> {
   const namespace = k8s.namespace ?? process.env.KUBECTL_NAMESPACE ?? 'default'
   const podName = buildPodName(k8s.podName, ti.dag_id, ti.dag_run_id, ti.task_id)
+  // image, env values and command are templated (Airflow KubernetesPodOperator template fields)
+  const meta = await getRunMeta(db, ti.dag_run_id)
+  const tctx: TemplateContext = { dag_id: ti.dag_id, run_id: ti.dag_run_id, task_id: ti.task_id, ...meta }
+  const image = renderTemplate(k8s.image, tctx)
 
   const args: string[] = [
     'run', podName,
-    '--image', k8s.image,
+    '--image', image,
     '--namespace', namespace,
     '--restart', 'Never',
     '--rm',
@@ -538,7 +545,7 @@ async function executeKubernetesTask(
     DAG_ID:  ti.dag_id,
     RUN_ID:  ti.dag_run_id,
     TASK_ID: ti.task_id,
-    ...(k8s.env ?? {}),
+    ...(k8s.env ? renderEnv(k8s.env, tctx) : {}),
   }
   for (const [k, v] of Object.entries(envVars)) {
     args.push('--env', `${k}=${v}`)
@@ -546,7 +553,7 @@ async function executeKubernetesTask(
 
   // Command override — must come after `--` separator
   if (k8s.command?.length) {
-    args.push('--', ...k8s.command)
+    args.push('--', ...renderArgs(k8s.command, tctx))
   }
 
   const timeoutMs = k8s.timeout ?? (ti.timeout_ms > 0 ? ti.timeout_ms : 0)
@@ -557,7 +564,7 @@ async function executeKubernetesTask(
   }
 
   return spawnTask(db, ti, {
-    label:     `kubernetes(${k8s.image})`,
+    label:     `kubernetes(${image})`,
     binary:    'kubectl',
     args,
     timeoutMs,
@@ -974,14 +981,14 @@ export async function pollDeferredTasks(db: Db): Promise<void> {
         (ctx: unknown) => Promise<boolean>
 
       // Build minimal trigger context (in-process, no DB_NAME env needed — uses same DB)
-      const conf = await getRunConf(db, ti.dag_run_id)
+      const runFields = await getRunContextFields(db, ti.dag_run_id)
       const tctx = {
         dagId:    ti.dag_id,
         runId:    ti.dag_run_id,
         taskId:   ti.task_id,
         mapIndex: ti.map_index,
         mapValue: ti.map_value,
-        conf,
+        ...runFields,
         xcom: {
           push: (key: string, value: unknown) =>
             xcomPush(db, ti.dag_run_id, ti.dag_id, ti.task_id, ti.map_index, key, value),

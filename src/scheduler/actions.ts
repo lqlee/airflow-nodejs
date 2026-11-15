@@ -14,6 +14,7 @@ import { ObjectId, type Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
 import { getDag } from '../dag/registry.js'
 import { recordEvent } from '../events/index.js'
+import { pruneDeadlines, requeueDeadlines } from '../deadlines/index.js'
 import { TI_CLEARABLE, TI_FINISHED, type TiSettableState } from './states.js'
 
 export interface TiRef { task_id: string; map_index: number | null; state: string }
@@ -83,7 +84,14 @@ async function select(db: Db, runId: string, opts: SelectOptions): Promise<{ ok:
 
 /** Put a finished run back in the scheduler's hands. */
 async function reopenRun(db: Db, runId: string, state: 'queued' | 'running'): Promise<void> {
-  await db.collection('dag_runs').updateOne({ _id: new ObjectId(runId) }, { $set: { state, ended_at: null } })
+  const now = new Date()
+  await db.collection('dag_runs').updateOne({ _id: new ObjectId(runId) },
+    { $set: { state, ended_at: null, ...(state === 'queued' ? { queued_at: now } : {}) } })
+  // Re-queued: queued_at deadlines count from now (Airflow recalculates them the same way)
+  if (state === 'queued') {
+    const run = await db.collection('dag_runs').findOne({ _id: new ObjectId(runId) }, { projection: { dag_id: 1 } })
+    if (run) await requeueDeadlines(db, getDag(run.dag_id as string), runId, now)
+  }
 }
 
 /**
@@ -212,6 +220,7 @@ export async function setRunState(
     { _id: new ObjectId(runId) },
     { $set: { state, ended_at: now, ...(sel.run.started_at ? {} : { started_at: now }) } },
   )
+  if (state === 'success') await pruneDeadlines(db, runId)
   void recordEvent(db, 'run_state_set', {
     dag_id: sel.run.dag_id as string,
     dag_run_id: runId,

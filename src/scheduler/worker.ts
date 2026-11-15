@@ -15,7 +15,8 @@ import { createDbClient } from '../db/factory.js'
 import { xcomPush, xcomPull } from '../xcom/index.js'
 import { getConnectionRuntime } from '../connections/index.js'
 import { getVariableRuntime } from '../variables/index.js'
-import { getRunConf } from './run-conf.js'
+import { getRunContextFields } from './run-conf.js'
+import { recordTaskDatasetEvents, type EmittedDataset } from '../datasets/index.js'
 import type { LogLevel } from '../logs/index.js'
 
 const DB_NAME = process.env.DB_NAME ?? 'airflow'
@@ -54,8 +55,8 @@ process.on('message', async (msg: WorkerMsg) => {
     await client.connect({ light: true })
     const db = client.db(DB_NAME)
 
-    // Trigger-time conf — read from DB, not IPC (conf could be large)
-    const conf = await getRunConf(db, ctx.runId)
+    // Trigger-time conf and the run's dates — read from DB, not IPC (conf could be large)
+    const runFields = await getRunContextFields(db, ctx.runId)
 
     // XCom helpers — run-scoped; mapIndex threads through push for mapped instances
     const xcom = {
@@ -116,13 +117,20 @@ process.on('message', async (msg: WorkerMsg) => {
       error: makeLogFn('error', 'stderr'),
     }
 
-    const fullCtx = { ...ctx, conf, xcom, connections, variables, defer, log }
+    // Dataset events the task emits — recorded only once the run function succeeds
+    const emitted: EmittedDataset[] = []
+    const emitDataset = (uri: string, opts: { alias?: string; extra?: Record<string, unknown> } = {}) => {
+      emitted.push({ uri, ...opts })
+    }
+
+    const fullCtx = { ...ctx, ...runFields, xcom, connections, variables, defer, log, emitDataset }
 
     if (msg.type === 'poke') {
       const ready = await fn_(fullCtx) as boolean
       process.send!({ type: 'done', outcome: ready ? 'success' : 'reschedule' })
     } else {
       await fn_(fullCtx)
+      await recordTaskDatasetEvents(db, { dagId: ctx.dagId, runId: ctx.runId, taskId: ctx.taskId }, emitted)
       process.send!({ type: 'done', outcome: 'success' })
     }
   } catch (err: unknown) {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildDdl, SCHEMA_BY_COLLECTION } from '../schema.js'
+import { buildDdl, buildAddColumnDdl, SCHEMA_BY_COLLECTION } from '../schema.js'
 
 const ddl = buildDdl()
 
@@ -23,5 +23,14 @@ describe('Spanner DDL', () => {
     const indexes = ddl.map(s => /INDEX (\w+) ON (\w+)\(/.exec(s)).filter(Boolean) as RegExpExecArray[]
     expect(new Set(indexes.map(m => m[1])).size).toBe(indexes.length)
     for (const m of indexes) expect(tables.has(m[2]), m[0]).toBe(true)
+  })
+})
+
+describe('promoted columns added after a table exists', () => {
+  it('adds only the missing columns of existing tables (new tables come from CREATE TABLE)', () => {
+    const cols = SCHEMA_BY_COLLECTION.get('task_instances')!.columns.map(c => `task_instances.${c.name}`)
+    const have = new Set(cols.filter(c => c !== 'task_instances.callback_pending'))
+    expect(buildAddColumnDdl(new Set(['task_instances']), have)).toEqual(['ALTER TABLE task_instances ADD COLUMN callback_pending STRING(2048)'])
+    expect(buildAddColumnDdl(new Set(['task_instances']), new Set(cols))).toEqual([])
   })
 })

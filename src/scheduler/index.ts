@@ -12,12 +12,13 @@ import type { DagDefinition } from '../dag/types.js'
 import { startLiveness, stopLiveness } from './instance.js'
 import { reapZombies } from './zombies.js'
 import { maybePurge } from '../db/cleanup.js'
-import { checkSlaBreaches } from '../sla/index.js'
+import { checkDeadlines, pruneDeadlines } from '../deadlines/index.js'
 import { emitOutlets, triggerDatasetConsumers } from '../datasets/index.js'
 import { createRun } from './runs.js'
 import { isDagPaused } from '../dag/pause.js'
 import { fireWebhook, type DeliverOptions } from '../webhooks/index.js'
 import { recordEvent } from '../events/index.js'
+import { flushTaskCallbacks, fireExecuteCallbacks, notify } from './callbacks.js'
 import { recordSchedulerTick } from '../metrics/registry.js'
 import { getPausedBackfillIds, buildActiveRunFilter } from './backfill-filter.js'
 
@@ -106,8 +107,8 @@ export async function runTickWork(db: Db, dags: DagDefinition[]): Promise<void> 
     // Poll deferred tasks — check trigger conditions, resume or reschedule
     await pollDeferredTasks(db)
 
-    // Check SLA breaches for all active runs
-    await checkSlaBreaches(db, dags)
+    // Deadline alerts (and the sla alias) whose time has passed → missed + callbacks
+    await checkDeadlines(db, dags)
 
     // Running tasks whose owner process stopped heartbeating → retry / fail
     await reapZombies(db)
@@ -129,6 +130,9 @@ export async function runTickWork(db: Db, dags: DagDefinition[]): Promise<void> 
   for (const run of activeRuns) {
     await advanceRun(db, run._id.toString())
   }
+
+  // Callbacks flagged on runs that were not advanced above (e.g. finished in another replica's pass)
+  await flushTaskCallbacks(db)
 
   // Trigger dataset-aware consumers whose datasets have new events
   if (leader) await triggerDatasetConsumers(db, dags, createRun, isDagPaused)
@@ -172,13 +176,18 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
   // Instances of tasks deleted from the Dag → removed (and back to queued if the task returns)
   if (dagDef) await verifyRunIntegrity(db, dagRunId, dagDef)
 
+  // Fire callbacks of results written since the last pass — before a re-claim can overwrite the flag
+  await flushTaskCallbacks(db, { runId: dagRunId })
+
   let claimed = timedOut ? [] : await claimReadyTasks(db, dagRunId, { limit: claimCapacity() })
   while (claimed.length > 0) {
     if (_shuttingDown) return
     const current = await db.collection('dag_runs').findOne({ _id: new ObjectId(dagRunId) })
     if (current?.state === 'cancelled') return
 
+    fireExecuteCallbacks(claimed)
     await Promise.all(claimed.map(ti => executeTask(db, ti)))
+    await flushTaskCallbacks(db, { runId: dagRunId })
 
     timedOut = await failIfRunTimedOut(db, dagRunId, dagDef?.runTimeout, run.started_at ?? run.created_at)
     if (timedOut) break
@@ -236,6 +245,8 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
     if (finalState === 'success' && dag) {
       await emitOutlets(db, dag, dagRunId)
     }
+    // It succeeded in time: its pending deadlines are moot (a failed run keeps them, as in Airflow)
+    if (finalState === 'success') await pruneDeadlines(db, dagRunId)
 
     const webhookPayload = {
       dag_id: transitioned.dag_id,
@@ -247,10 +258,14 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
       ended_at: transitioned.ended_at as Date,
     }
 
-    // Fire per-DAG webhook callback if configured — fire-and-forget
-    const callbackUrl = finalState === 'success' ? dag?.onSuccess : dag?.onFailure
-    if (callbackUrl) {
-      fireWebhook(callbackUrl, webhookPayload, webhookOptions)
+    // Dag callbacks — exactly once (after the CAS win), fire-and-forget. URLs get the webhook payload.
+    const callbacks = finalState === 'success' ? dag?.onSuccess : dag?.onFailure
+    for (const target of callbacks === undefined ? [] : Array.isArray(callbacks) ? callbacks : [callbacks]) {
+      if (typeof target === 'string') { fireWebhook(target, webhookPayload, webhookOptions); continue }
+      void notify(target, {
+        dagId: webhookPayload.dag_id, runId: dagRunId, state: webhookPayload.state, logicalDate: webhookPayload.logical_date,
+        conf: webhookPayload.conf, tags: webhookPayload.tags, endedAt: webhookPayload.ended_at,
+      }, `${finalState === 'success' ? 'onSuccess' : 'onFailure'} ${webhookPayload.dag_id}`)
     }
 
     // Fire global webhooks (GLOBAL_SUCCESS_WEBHOOK / GLOBAL_FAILURE_WEBHOOK)
@@ -349,6 +364,7 @@ export async function cancelRun(db: Db, dagRunId: string): Promise<boolean> {
   )
 
   if (!result) return false  // already terminal or not found
+  await pruneDeadlines(db, dagRunId)
 
   // Cancel all non-terminal tasks in one shot
   await db.collection('task_instances').updateMany(

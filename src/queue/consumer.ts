@@ -17,7 +17,7 @@ import { xcomPush, xcomPull } from '../xcom/index.js'
 import type { Db } from 'mongodb'
 import type { TaskJobData } from './producer.js'
 import { INSTANCE_ID, startLiveness, shutdownLiveness } from '../scheduler/instance.js'
-import { retryUpdate } from '../scheduler/ti-writes.js'
+import { retryUpdate, successUpdate, failedUpdate } from '../scheduler/ti-writes.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WORKER_SCRIPT = pathResolve(__dirname, '../scheduler/worker.ts')
@@ -81,10 +81,7 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
       child.on('message', async (msg: { type: string; success: boolean; error?: string }) => {
         if (msg.type !== 'done') return
         if (msg.success) {
-          await db.collection('task_instances').updateOne(
-            owned,
-            { $set: { state: 'success', ended_at: new Date() } }
-          )
+          await db.collection('task_instances').updateOne(owned, successUpdate())
           console.log(`[worker] ✓ ${ti.dag_id}.${ti.task_id}`)
           resolve()
         } else {
@@ -95,10 +92,7 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
             await db.collection('task_instances').updateOne(owned, retryUpdate(ti, error))
             console.warn(`[worker] ↩ ${ti.dag_id}.${ti.task_id} retrying (${ti.try_number + 1}/${ti.max_retries + 1})`)
           } else {
-            await db.collection('task_instances').updateOne(
-              owned,
-              { $set: { state: 'failed', ended_at: new Date(), error } }
-            )
+            await db.collection('task_instances').updateOne(owned, failedUpdate(error))
             console.error(`[worker] ✗ ${ti.dag_id}.${ti.task_id}: ${error}`)
           }
           resolve()
@@ -106,10 +100,7 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
       })
 
       child.on('error', async (err) => {
-        await db.collection('task_instances').updateOne(
-          owned,
-          { $set: { state: 'failed', ended_at: new Date(), error: err.message } }
-        )
+        await db.collection('task_instances').updateOne(owned, failedUpdate(err.message))
         reject(err)
       })
     })

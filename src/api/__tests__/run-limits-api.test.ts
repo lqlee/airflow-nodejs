@@ -213,16 +213,17 @@ describe('Dag metadata and task controls in the API', () => {
   it('GET /dags/:id/tasks returns weight, concurrency and callback info', async () => {
     register(meta('ctl_dag', {
       tasks: {
-        a: { priority: 3, weightRule: 'downstream', maxActiveTis: 2, maxActiveTisPerRun: 1, onRetry: () => {}, run: async () => {} },
+        a: { priority: 3, weightRule: 'downstream', maxActiveTis: 2, maxActiveTisPerRun: 1, onRetry: () => {}, onFailure: 'https://hooks.example/x', run: async () => {} },
         b: { run: async () => {} },
       },
     }))
     const tasks = (await app.inject({ method: 'GET', url: '/dags/ctl_dag/tasks' })).json() as Array<Record<string, unknown>>
     expect(tasks.find(t => t.task_id === 'a')).toMatchObject({
       priority: 3, weight_rule: 'downstream', max_active_tis: 2, max_active_tis_per_run: 1, has_on_retry: true,
+      callbacks: ['onFailure', 'onRetry'],
     })
     expect(tasks.find(t => t.task_id === 'b')).toMatchObject({
-      priority: 0, weight_rule: 'absolute', max_active_tis: null, max_active_tis_per_run: null, has_on_retry: false,
+      priority: 0, weight_rule: 'absolute', max_active_tis: null, max_active_tis_per_run: null, has_on_retry: false, callbacks: [],
     })
   })
 })

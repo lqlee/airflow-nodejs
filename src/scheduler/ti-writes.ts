@@ -7,7 +7,6 @@
  */
 import type { Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
-import { fireRetryCallback } from './callbacks.js'
 
 type TiKey = Pick<TaskInstance, 'dag_run_id' | 'task_id' | 'map_index'>
 
@@ -18,18 +17,18 @@ export function tiFilter(ti: TiKey): { dag_run_id: string; task_id: string; map_
 
 const IN_FLIGHT = { $in: ['running', 'deferred'] }
 
+/** Final results. `callback_pending` asks the scheduler to fire the task's callbacks (callbacks.ts). */
+export const successUpdate = (now: Date = new Date()) =>
+  ({ $set: { state: 'success', ended_at: now, callback_pending: 'success' } })
+export const failedUpdate = (error: string, now: Date = new Date()) =>
+  ({ $set: { state: 'failed', ended_at: now, error, callback_pending: 'failed' } })
+
 export async function markSuccess(db: Db, ti: TiKey): Promise<void> {
-  await db.collection('task_instances').updateOne(
-    { ...tiFilter(ti), state: IN_FLIGHT },
-    { $set: { state: 'success', ended_at: new Date() } },
-  )
+  await db.collection('task_instances').updateOne({ ...tiFilter(ti), state: IN_FLIGHT }, successUpdate())
 }
 
 export async function markFailed(db: Db, ti: TiKey, error: string): Promise<void> {
-  await db.collection('task_instances').updateOne(
-    { ...tiFilter(ti), state: IN_FLIGHT },
-    { $set: { state: 'failed', ended_at: new Date(), error } },
-  )
+  await db.collection('task_instances').updateOne({ ...tiFilter(ti), state: IN_FLIGHT }, failedUpdate(error))
 }
 
 /**
@@ -59,13 +58,14 @@ export function retryUpdate(ti: Parameters<typeof computeRetryDelay>[0], error: 
       ended_at: now,
       error,
       claimed_by: null,
+      callback_pending: 'retry',
+      callback_try: ti.try_number + 1,   // the attempt that failed (1-based), for onRetry
     },
     $inc: { try_number: 1 },
   }
 }
 
-/** Failed try with retries left → up_for_retry (only while still running) and fire onRetry. */
+/** Failed try with retries left → up_for_retry (only while still running); the scheduler fires onRetry. */
 export async function scheduleRetry(db: Db, ti: TaskInstance, error: string, now: Date = new Date()): Promise<void> {
-  void fireRetryCallback(ti, error)
   await db.collection('task_instances').updateOne({ ...tiFilter(ti), state: 'running' }, retryUpdate(ti, error, now))
 }

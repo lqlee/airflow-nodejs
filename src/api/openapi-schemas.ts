@@ -117,7 +117,9 @@ export const OPERATION_DOCS: Record<string, OperationDoc> = {
   },
   'POST /sla-alerts/:alertId/ack': { noBody: true },
   'GET /sla-alerts': { query: { unacked: { type: 'string', enum: ['true', 'false'], description: 'Only unacknowledged alerts' } } },
+  'GET /deadlines': { query: { dag_id: str(), dag_run_id: str(), missed: { type: 'string', enum: ['true', 'false'], description: 'Only missed (true) or pending (false) deadlines' }, limit: int() } },
   'GET /datasets': { query: { uri: str(), limit: int() } },
+  'GET /dataset-aliases': { query: { alias: str() } },
   'GET /dag-warnings': { query: { warning_type: str() } },
   'GET /event-logs': { query: { dag_id: str(), dag_run_id: str(), task_id: str(), event_type: { type: 'string', enum: [...EVENT_TYPES] }, ...page } },
 }

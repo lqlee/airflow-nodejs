@@ -22,7 +22,8 @@
 import { createDbClient } from '../db/factory.js'
 import { loadDags } from '../dag/loader.js'
 import { getDag } from '../dag/registry.js'
-import { getRunConf } from './run-conf.js'
+import { getRunContextFields } from './run-conf.js'
+import { recordTaskDatasetEvents, type EmittedDataset } from '../datasets/index.js'
 import { xcomPush, xcomPull } from '../xcom/index.js'
 import { getConnectionRuntime } from '../connections/index.js'
 import { getVariableRuntime } from '../variables/index.js'
@@ -66,7 +67,7 @@ try {
     process.exit(2)
   }
 
-  const conf = await getRunConf(db, runId)
+  const runFields = await getRunContextFields(db, runId)
 
   const xcom = {
     push: (key: string, value: unknown) => xcomPush(db, runId, dagId, taskId, mapIndex, key, value),
@@ -79,12 +80,15 @@ try {
     dagId, runId, taskId,
     mapIndex,
     mapValue: null,  // map_value not passed via env (large values); use XCom
-    conf,
+    ...runFields,
     xcom, connections, variables,
     defer: () => { throw new Error('ctx.defer() is not supported in Kubernetes executor mode') },
+    emitDataset: (uri: string, opts: { alias?: string; extra?: Record<string, unknown> } = {}) => { emitted.push({ uri, ...opts }) },
   }
+  const emitted: EmittedDataset[] = []
 
   await taskDef.run(ctx as any)
+  await recordTaskDatasetEvents(db, { dagId, runId, taskId }, emitted)
   console.log(`[worker-cli] ✓ ${dagId}.${taskId}`)
   process.exit(0)
 

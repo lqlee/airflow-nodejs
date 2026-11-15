@@ -1,6 +1,6 @@
 /** Mongo-style Db / client facade over Spanner. */
 import { Spanner, type Database } from '@google-cloud/spanner'
-import { SCHEMAS, SCHEMA_BY_COLLECTION, buildDdl } from './schema.js'
+import { SCHEMAS, SCHEMA_BY_COLLECTION, buildDdl, buildAddColumnDdl } from './schema.js'
 import { SpannerCollection, type Backend } from './collection.js'
 import type { Doc } from './eval.js'
 
@@ -83,8 +83,11 @@ export async function ensureSchema(spanner: Spanner, cfg: SpannerConnectionConfi
   for (let attempt = 0; ; attempt++) {
     const [tableRows] = await database.run({ sql: "SELECT table_name FROM information_schema.tables WHERE table_schema = ''", json: true }) as unknown as [Array<{ table_name: string }>]
     const [indexRows] = await database.run({ sql: "SELECT index_name FROM information_schema.indexes WHERE table_schema = '' AND index_type != 'PRIMARY_KEY'", json: true }) as unknown as [Array<{ index_name: string }>]
+    const [columnRows] = await database.run({ sql: "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = ''", json: true }) as unknown as [Array<{ table_name: string; column_name: string }>]
     const haveTables = new Set(tableRows.map(r => r.table_name))
     const haveIndexes = new Set(indexRows.map(r => r.index_name))
+    // Promoted columns added since the table was created — before the indexes that may use them
+    const addColumns = buildAddColumnDdl(haveTables, new Set(columnRows.map(r => `${r.table_name}.${r.column_name}`)))
 
     const missing = buildDdl().filter(stmt => {
       if (skipped.has(stmt)) return false
@@ -93,14 +96,14 @@ export async function ensureSchema(spanner: Spanner, cfg: SpannerConnectionConfi
       const i = INDEX_NAME.exec(stmt)
       return i ? !haveIndexes.has(i[1]) : true
     })
-    if (missing.length === 0) return
+    if (missing.length === 0 && addColumns.length === 0) return
     if (attempt >= 60) throw new Error(`Spanner schema still incomplete after waiting: ${missing.map(s => s.split('\n')[0]).join('; ')}`)
     if (attempt > 0) await new Promise(r => setTimeout(r, 1_000))
 
     // A unique index added to an EXISTING table can fail on rows that already violate it — apply
     // those one at a time so a failure only loses that constraint instead of blocking startup.
     const onExistingTable = (stmt: string) => stmt.startsWith('CREATE UNIQUE ') && haveTables.has(INDEX_TABLE.exec(stmt)?.[1] ?? '')
-    await applyDdl(database, missing.filter(stmt => !onExistingTable(stmt)))
+    await applyDdl(database, [...addColumns, ...missing.filter(stmt => !onExistingTable(stmt))])
     for (const stmt of missing.filter(onExistingTable)) {
       try { await applyDdl(database, [stmt]) } catch (e) {
         skipped.add(stmt)

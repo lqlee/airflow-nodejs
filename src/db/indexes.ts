@@ -21,6 +21,8 @@ export async function ensureIndexes(db: Db): Promise<void> {
     { key: { dag_run_id: 1, state: 1, next_poke_at: 1 } },  // sensor claim filter
     { key: { pool: 1, state: 1 } },                         // pool occupancy at claim time
     { key: { dag_id: 1, task_id: 1, state: 1 } },            // maxActiveTis count at claim time
+    // results whose callbacks are not fired yet (a handful at a time — partial keeps it tiny)
+    { key: { callback_pending: 1, dag_run_id: 1 }, partialFilterExpression: { callback_pending: { $type: 'string' } } },
   ])
 
   // xcoms: unique per (run, task, map_index, key) — map_index scopes mapped instances
@@ -43,6 +45,13 @@ export async function ensureIndexes(db: Db): Promise<void> {
     { key: { dag_id: 1 }, unique: true },
   ])
 
+  // deadlines: due-check (every tick), per-run prune / listing, per-Dag listing
+  await db.collection('deadlines').createIndexes([
+    { key: { missed: 1, deadline_time: 1 } },
+    { key: { dag_run_id: 1, missed: 1 } },
+    { key: { dag_id: 1, deadline_time: -1 } },
+  ])
+
   // sla_alerts: lookup by run (dedup) + unacked filter
   await db.collection('sla_alerts').createIndexes([
     { key: { dag_run_id: 1 }, unique: true },
@@ -58,6 +67,11 @@ export async function ensureIndexes(db: Db): Promise<void> {
   // dataset_events: aggregate latest event per URI efficiently
   await db.collection('dataset_events').createIndexes([
     { key: { uri: 1, emitted_at: -1 } },
+  ])
+
+  // dataset_alias_links: datasets attached to an alias at runtime — one row per (alias, uri)
+  await db.collection('dataset_alias_links').createIndexes([
+    { key: { alias: 1, uri: 1 }, unique: true },
   ])
 
   // dataset_watermarks: unique per (consumer, dataset) — prevents duplicate inserts

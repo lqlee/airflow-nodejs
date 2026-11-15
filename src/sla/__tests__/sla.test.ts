@@ -21,6 +21,7 @@ afterAll(async () => {
 afterEach(async () => {
   await db.collection('dag_runs').deleteMany({})
   await db.collection('sla_alerts').deleteMany({})
+  await db.collection('deadlines').deleteMany({})
 })
 
 const dagWithSla: DagDefinition = {

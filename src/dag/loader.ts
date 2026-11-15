@@ -10,6 +10,7 @@ import { analyzeWarnings, type DagWarning } from './warnings.js'
 import { ensureImages } from './images.js'
 import { loadProviders } from '../providers/loader.js'
 import type { DagDefinition } from './types.js'
+import { validateCondition } from '../datasets/conditions.js'
 
 // DAG_DIR env var allows overriding the default location — used in WCNP where
 // DAGs are bundled inside the npm package rather than mounted at ./dags/
@@ -69,6 +70,8 @@ export async function loadDags(db?: Db): Promise<void> {
         errors.push({ filename: file, error: msg, imported_at: now })
         continue
       }
+      // A malformed dataset condition is an import error, not a silently never-firing Dag
+      if (dag.datasets !== undefined) validateCondition(dag.datasets)
       // Stamp version onto the dag object (overwrites any author-set version)
       dag.version = version
       // Expand group→group dependencies into task-level edges before registration

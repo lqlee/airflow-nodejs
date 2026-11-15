@@ -57,12 +57,13 @@ async function collectDbMetrics(db: Db): Promise<string[]> {
   const dagIds = dags.map(d => d.id)
   const paused = await getPausedDagIds(db)
 
-  const [runLines, taskLines, pools, hitlPending, slaUnacked] = await Promise.all([
+  const [runLines, taskLines, pools, hitlPending, slaUnacked, deadlinesMissed] = await Promise.all([
     stateCounts(db, 'dag_runs', RUN_STATES, dagIds),
     stateCounts(db, 'task_instances', TASK_STATES, dagIds),
     listPools(db),
     db.collection('task_instances').countDocuments({ is_hitl: true, hitl_state: 'pending', state: 'queued' }),
     db.collection('sla_alerts').countDocuments({ acked: false }),
+    db.collection('deadlines').countDocuments({ missed: true }),
   ])
 
   const out: string[] = []
@@ -79,6 +80,7 @@ async function collectDbMetrics(db: Db): Promise<string[]> {
     pools.map(p => sample('airflow_pool_open_slots', p.open_slots, { pool: p.name }))))
   out.push(...family('airflow_hitl_pending_tasks', 'gauge', 'Tasks waiting for human approval.', [sample('airflow_hitl_pending_tasks', hitlPending)]))
   out.push(...family('airflow_sla_alerts_unacknowledged', 'gauge', 'SLA alerts not yet acknowledged.', [sample('airflow_sla_alerts_unacknowledged', slaUnacked)]))
+  out.push(...family('airflow_deadlines_missed', 'gauge', 'Missed deadline alerts still on record (retention purges old ones).', [sample('airflow_deadlines_missed', deadlinesMissed)]))
   return out
 }
 

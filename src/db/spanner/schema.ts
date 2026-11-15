@@ -7,8 +7,10 @@
  *   ns  — logical database name (DB_NAME), so many "databases" (tests!) share one Spanner database
  *   id  — _id with a type tag: 'o:<hex>' for ObjectId, 's:<text>' for strings
  *
- * Adding a promoted column later needs ALTER TABLE + a backfill — keep this list to fields that
- * are filtered/sorted/uniquely constrained on a hot path.
+ * A promoted column added later is created by ensureSchema (ALTER TABLE … ADD COLUMN) but NOT
+ * backfilled: existing rows read NULL there. Only add one whose value is null/absent on every existing
+ * document (a new field), or backfill it yourself. Keep this list to fields that are filtered, sorted
+ * or uniquely constrained on a hot path.
  */
 export type ColType = 'string' | 'float64' | 'bool' | 'timestamp'
 
@@ -35,17 +37,19 @@ export const SCHEMAS: TableSchema[] = [
   },
   {
     collection: 'task_instances',
-    columns: [S('dag_run_id'), S('dag_id'), S('task_id'), N('map_index'), S('state'), T('next_poke_at'), B('is_dynamic_placeholder'), B('is_branch'), B('is_short_circuit'), B('is_hitl'), S('hitl_state'), T('created_at')],
-    indexes: [idx('task_instances', ['dag_run_id', 'task_id', 'map_index'], true), idx('task_instances', ['state', 'dag_run_id']), idx('task_instances', ['dag_id', 'state']), idx('task_instances', ['dag_id', 'task_id', 'state'])],
+    columns: [S('dag_run_id'), S('dag_id'), S('task_id'), N('map_index'), S('state'), T('next_poke_at'), B('is_dynamic_placeholder'), B('is_branch'), B('is_short_circuit'), B('is_hitl'), S('hitl_state'), T('created_at'), S('callback_pending')],
+    indexes: [idx('task_instances', ['dag_run_id', 'task_id', 'map_index'], true), idx('task_instances', ['state', 'dag_run_id']), idx('task_instances', ['dag_id', 'state']), idx('task_instances', ['dag_id', 'task_id', 'state']), idx('task_instances', ['callback_pending', 'dag_run_id'], false, true)],
   },
   { collection: 'xcoms', columns: [S('dag_run_id'), S('task_id'), N('map_index'), S('key'), T('pushed_at')], indexes: [idx('xcoms', ['dag_run_id', 'task_id', 'map_index', 'key'], true)] },
   { collection: 'task_instance_tries', columns: [S('dag_run_id'), S('task_id'), N('map_index'), N('try_number')], indexes: [idx('task_instance_tries', ['dag_run_id', 'task_id', 'map_index', 'try_number'])] },
   { collection: 'task_logs', columns: [S('dag_run_id'), S('task_id'), T('ts')], indexes: [idx('task_logs', ['dag_run_id', 'task_id', 'ts'])] },
   { collection: 'dag_paused', columns: [S('dag_id')], indexes: [idx('dag_paused', ['dag_id'], true)] },
   { collection: 'sla_alerts', columns: [S('dag_run_id'), B('acked'), T('fired_at')], indexes: [idx('sla_alerts', ['dag_run_id'], true), idx('sla_alerts', ['acked', 'fired_at'])] },
+  { collection: 'deadlines', columns: [S('dag_id'), S('dag_run_id'), B('missed'), T('deadline_time')], indexes: [idx('deadlines', ['missed', 'deadline_time']), idx('deadlines', ['dag_run_id', 'missed']), idx('deadlines', ['dag_id', 'deadline_time'])] },
   { collection: 'api_keys', columns: [B('revoked'), T('created_at'), S('name')], indexes: [idx('api_keys', ['revoked', 'created_at']), idx('api_keys', ['name'])] },
   { collection: 'dataset_events', columns: [S('uri'), T('emitted_at')], indexes: [idx('dataset_events', ['uri', 'emitted_at'])] },
   { collection: 'dataset_watermarks', columns: [S('consumer_dag_id'), S('dataset_uri')], indexes: [idx('dataset_watermarks', ['consumer_dag_id', 'dataset_uri'], true)] },
+  { collection: 'dataset_alias_links', columns: [S('alias'), S('uri')], indexes: [idx('dataset_alias_links', ['alias', 'uri'], true)] },
   { collection: 'connections', columns: [S('conn_id'), S('conn_type')], indexes: [idx('connections', ['conn_id'], true), idx('connections', ['conn_type'])] },
   { collection: 'variables', columns: [S('key')], indexes: [idx('variables', ['key'], true)] },
   { collection: 'dag_versions', columns: [S('dag_id'), S('version'), T('first_seen')], indexes: [idx('dag_versions', ['dag_id', 'version'], true), idx('dag_versions', ['dag_id', 'first_seen'])] },
@@ -60,6 +64,13 @@ export const SCHEMAS: TableSchema[] = [
 export const SCHEMA_BY_COLLECTION = new Map(SCHEMAS.map(s => [s.collection, s]))
 
 const SQL_TYPE: Record<ColType, string> = { string: 'STRING(2048)', float64: 'FLOAT64', bool: 'BOOL', timestamp: 'TIMESTAMP' }
+
+/** ALTER TABLE statements for promoted columns missing from tables that already exist ("table.column" keys). */
+export function buildAddColumnDdl(haveTables: Set<string>, haveColumns: Set<string>): string[] {
+  return SCHEMAS.filter(s => haveTables.has(s.collection)).flatMap(s => s.columns
+    .filter(c => !haveColumns.has(`${s.collection}.${c.name}`))
+    .map(c => `ALTER TABLE ${s.collection} ADD COLUMN ${c.name} ${SQL_TYPE[c.type]}`))
+}
 
 /** GoogleSQL DDL for every table and index (ns is always the leading index column). */
 export function buildDdl(): string[] {

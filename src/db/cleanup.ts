@@ -15,7 +15,7 @@ import { getLogBackendName, getLogFilePath } from '../logs/index.js'
 
 const TERMINAL_RUN_STATES = ['success', 'failed', 'cancelled']
 /** Collections whose rows belong to a run through `dag_run_id`. */
-const RUN_CHILDREN = ['task_instances', 'task_instance_tries', 'xcoms', 'task_logs', 'sla_alerts', 'event_logs'] as const
+const RUN_CHILDREN = ['task_instances', 'task_instance_tries', 'xcoms', 'task_logs', 'sla_alerts', 'deadlines', 'event_logs'] as const
 
 export interface PurgeResult {
   dryRun: boolean

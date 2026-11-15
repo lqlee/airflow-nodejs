@@ -191,6 +191,7 @@ describe('container tasks', () => {
         step: {
           container: {
             image: 'this-image-does-not-exist-xyz:never',
+            pull: 'never',   // fail locally instead of waiting on a registry lookup
             command: ['echo', 'hi'],
           }
         }

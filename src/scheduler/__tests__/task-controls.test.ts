@@ -5,7 +5,7 @@ import { createRun, type TaskInstance } from '../runs.js'
 import { claimReadyTasks, expandDynamicMapped } from '../claim.js'
 import { advanceRun } from '../index.js'
 import { scheduleRetry } from '../executor.js'
-import { fireRetryCallback } from '../callbacks.js'
+import { fireRetryCallback, flushTaskCallbacks } from '../callbacks.js'
 import { computeEffectiveWeights } from '../weights.js'
 import { register, clearRegistry } from '../../dag/registry.js'
 import type { DagDefinition, RetryCallbackInfo } from '../../dag/types.js'
@@ -209,6 +209,7 @@ describe('onRetry', () => {
       const ti = (await db.collection<TaskInstance>('task_instances').findOneAndUpdate(
         { dag_run_id: runId }, { $set: { state: 'running' } }, { returnDocument: 'after' }))!
       await scheduleRetry(db, ti, 'failed once')
+      await Promise.all(await flushTaskCallbacks(db))
       const after = await db.collection('task_instances').findOne({ dag_run_id: runId })
       expect(after).toMatchObject({ state: 'up_for_retry', try_number: 1, error: 'failed once' })
       clearRegistry()
@@ -273,7 +274,7 @@ describe('onRetry — details', () => {
     const ti = (await db.collection<TaskInstance>('task_instances').findOneAndUpdate(
       { dag_run_id: runId, map_index: 1 }, { $set: { state: 'running' } }, { returnDocument: 'after' }))!
     await scheduleRetry(db, ti, 'e')
-    await waitFor(async () => calls.length, n => n >= 1)
+    await Promise.all(await flushTaskCallbacks(db))   // the scheduler fires the flagged retry
     expect(calls).toHaveLength(1)
     expect(calls[0]).toMatchObject({ mapIndex: 1, tryNumber: 1, maxRetries: 1 })
   })

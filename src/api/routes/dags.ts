@@ -8,6 +8,21 @@ import { getDagStats } from '../../stats/index.js'
 import { backfill, BACKFILL_MAX_RUNS } from '../../scheduler/backfill.js'
 import { listDagVersions, getDagSource } from '../../dag/version.js'
 import { validateParams } from '../../dag/params.js'
+import { normalizeCondition, conditionUris, conditionAliases, describeCondition } from '../../datasets/conditions.js'
+import type { DagDefinition } from '../../dag/types.js'
+
+/**
+ * datasets: the URIs (and alias:<name> entries) the Dag consumes — a flat list, as before.
+ * dataset_condition: the full condition ({ all } / { any } / { alias }); its text form: `a & (b | c)`.
+ */
+function datasetFields(d: DagDefinition) {
+  const cond = normalizeCondition(d.datasets)
+  return {
+    datasets: [...conditionUris(cond), ...conditionAliases(cond).map(a => `alias:${a}`)],
+    dataset_condition: cond,
+    dataset_condition_text: cond ? describeCondition(cond) : null,
+  }
+}
 
 export async function dagsRoutes(app: FastifyInstance): Promise<void> {
   // GET /dags — list all registered dags with pause state
@@ -19,9 +34,10 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
     const dags = listDags().filter(d => wanted.every(t => (d.tags ?? []).includes(t))).map(d => ({
       id: d.id,
       schedule: d.schedule,
+      schedule_mode: d.schedule ? (d.scheduleMode ?? 'trigger') : null,
       tags: d.tags ?? [],
       owner: d.owner ?? null,
-      datasets: d.datasets ?? [],
+      ...datasetFields(d),
       outlets: d.outlets ?? [],
       tasks: Object.keys(d.tasks),
       is_paused: paused.has(d.id),
@@ -38,6 +54,8 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({
       id: dag.id,
       schedule: dag.schedule,
+      schedule_mode: dag.schedule ? (dag.scheduleMode ?? 'trigger') : null,
+      trigger_interval_ms: dag.schedule && dag.scheduleMode !== 'interval' ? (dag.triggerInterval ?? 0) : null,
       tags: dag.tags ?? [],
       owner: dag.owner ?? null,
       doc_md: dag.docMd ?? null,
@@ -45,7 +63,7 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
       start_date: dag.startDate && !Number.isNaN(new Date(dag.startDate).getTime()) ? new Date(dag.startDate).toISOString() : null,
       max_active_runs: dag.maxActiveRuns ?? null,
       run_timeout_ms: dag.runTimeout ?? null,
-      datasets: dag.datasets ?? [],
+      ...datasetFields(dag),
       outlets: dag.outlets ?? [],
       is_paused: isPaused,
       groups: dag.groups
@@ -99,7 +117,9 @@ export async function dagsRoutes(app: FastifyInstance): Promise<void> {
       weight_rule: t.weightRule ?? 'absolute',
       max_active_tis: t.maxActiveTis ?? null,
       max_active_tis_per_run: t.maxActiveTisPerRun ?? null,
-      has_on_retry: typeof t.onRetry === 'function',
+      has_on_retry: t.onRetry !== undefined,
+      /** Callback hooks the task defines (names only — never the targets, which may hold URLs). */
+      callbacks: (['onExecute', 'onSuccess', 'onFailure', 'onRetry'] as const).filter(k => t[k] !== undefined),
       is_setup: t.setup === true,
       is_teardown: t.teardown === true,
       on_failure_fail_dagrun: t.teardown === true && t.onFailureFailDagrun === true,

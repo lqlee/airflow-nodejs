@@ -10,6 +10,7 @@ import { dagsRoutes } from './routes/dags.js'
 import { dagRunsRoutes } from './routes/dag-runs.js'
 import { taskActionsRoutes } from './routes/task-actions.js'
 import { slaRoutes } from './routes/sla.js'
+import { deadlinesRoutes } from './routes/deadlines.js'
 import { apiKeysRoutes } from './routes/api-keys.js'
 import { datasetsRoutes } from './routes/datasets.js'
 import { connectionsRoutes } from './routes/connections.js'
@@ -130,6 +131,7 @@ export function buildServer(db: Db, opts: ServerOptions = {}): FastifyInstance {
     app.register(dagRunsRoutes)
     app.register(taskActionsRoutes)
     app.register(slaRoutes)
+    app.register(deadlinesRoutes)
     app.register(apiKeysRoutes)
     app.register(datasetsRoutes)
     app.register(connectionsRoutes)

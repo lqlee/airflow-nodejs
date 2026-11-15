@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB (or Cloud Spanner)**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-1,560+ tests · 22 API route modules · multi-user RBAC + OIDC SSO · multi-replica safe · user code isolated from the control plane · Docker-ready
+1,580+ tests · 22 API route modules · `anode` CLI · multi-user RBAC + OIDC SSO · multi-replica safe · user code isolated from the control plane · Docker-ready
 
 ---
 
@@ -15,7 +15,7 @@ A production-grade reimplementation of Apache Airflow's core concepts in **Node.
 | **Observability** | Deadline alerts (SLA as an alias), run statistics + duration histogram, event/audit log, task try history, dag warnings, import errors |
 | **Data flow** | XCom push/pull (full CRUD), connections store (encrypted), variables store (encrypted), per-run conf/tags/notes |
 | **Lifecycle** | Task and Dag callbacks / notifiers (functions, `{ notify }` objects, webhooks), templated fields with macros, Human-in-the-Loop (HITL) approval gates, clear (with downstream / upstream / failed only), re-run, mark task or run success / failed |
-| **Operations** | Graceful shutdown with worker drain, config API, providers API, plugins API |
+| **Operations** | Graceful shutdown with worker drain, config API, providers API, plugins API, `anode` command-line client (`dags list/trigger/pause`, `tasks test`) |
 | **Auth** | Multi-user RBAC (viewer / editor / admin roles), OIDC SSO for the UI (authorization code + PKCE) and OIDC bearer tokens for the API, scrypt-hashed DB-backed API keys, env-key fallback |
 | **Security** | Dag files parsed in a separate process into serialized Dags — the scheduler and API never import user code; callbacks and timetables run in a sandbox process; task workers hold no database credentials (execution API with task-scoped tokens); encryption key rotation; secret masking in task logs; Vault / Akeyless secrets backends; HttpOnly session cookie + CSRF token; strict Content-Security-Policy with React served locally |
 | **Versioning** | Dag version history (sha256 hash), source code snapshots, backfill_id linkage on runs |
@@ -541,7 +541,47 @@ npm run test:spanner # run the same suite against the Spanner emulator (localhos
 npm run spanner:ddl  # print the Spanner DDL (for DBA-managed schemas)
 npm run db:cleanup -- --days 30 [--dry-run] [--batch-size 100]
                      # purge finished runs older than N days (needs npm run build first)
+npm run anode -- <group> <command>   # the CLI from source (see below)
 ```
+
+## Command-line client (`anode`)
+
+`anode` talks to a running deployment through the REST API; command names follow the Airflow CLI.
+Installing the package puts it on the `PATH` (`bin`); from a checkout use `npm run anode --` or
+`node dist/cli/main.js`.
+
+```bash
+export ANODE_API_URL=http://localhost:3000   # default
+export ANODE_API_TOKEN=<api key or OIDC access token>   # when auth is on (or --url / --token)
+
+anode dags list [--tag etl]                  # -o json for machine-readable output
+anode dags show <dag_id>
+anode dags trigger <dag_id> [--conf '{"region":"eu"}'] [--tag T] [--note N] [--wait [--timeout SEC]]
+anode dags pause <dag_id> / anode dags unpause <dag_id>
+anode dags list-runs <dag_id> [--limit 20]
+anode dags list-import-errors
+anode tasks list <dag_id>
+anode tasks states-for-dag-run <run_id>
+anode tasks test <dag_id> <task_id> [--logical-date 2026-03-02] [--conf JSON]
+                 [--map-index N | --map-value JSON] [--run-id ID] [--dags-dir DIR | --file F]
+```
+
+Exit codes: `0` success, `1` failure (API error, failed run with `--wait`, failed task), `2` usage error.
+
+`tasks test` runs one task's function **in the CLI process** without dependency checks and without
+writing any state — like `airflow tasks test`. It imports the Dag file from `DAG_DIR` (or `--dags-dir` /
+`--file`), so run it where the Dag code is checked out, never on the control plane.
+
+| Task reads | Comes from |
+|---|---|
+| XCom | its own pushes (printed, kept in memory); other tasks' XComs of a real run with `--run-id` (REST), else `null` |
+| variables / connections | the local secrets backend first (`SECRETS_BACKEND=env` with `AIRFLOW_VAR_*` / `AIRFLOW_CONN_*`), then the REST API — which never returns secret variable values or connection passwords/extras |
+| conf / params | `--conf`, validated and merged with the Dag's param defaults |
+| logical date / data interval | `--logical-date` and the Dag's schedule; none by default (like a manual run) |
+
+`run`, `poke` (sensor, polled at its interval), `branch` and `shortCircuit` tasks are supported; a
+`ctx.defer()` trigger is polled in-process. Shell, Python, Java, container, Kubernetes and cross-Dag tasks
+need the scheduler — trigger the Dag for those. Secrets the task reads are masked in the CLI's output.
 
 ---
 

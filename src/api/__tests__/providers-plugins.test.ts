@@ -67,6 +67,26 @@ describe('GET /providers', () => {
   })
 })
 
+describe('built-in providers', () => {
+  it('GET /providers lists them first with their operators and connection types', async () => {
+    const body = (await app.inject({ method: 'GET', url: '/providers' })).json()
+    expect(body.builtin_providers.map((p: { package_name: string }) => p.package_name)).toEqual(['common-sql', 'google', 'apache-kafka', 'smtp'])
+    expect(body.providers[0]).toMatchObject({
+      package_name: 'common-sql', provider_type: 'builtin', source: 'builtin',
+      operator_names: ['SQLExecuteQueryOperator', 'SQLCheckOperator', 'SqlSensor'], connection_types: ['postgres', 'mysql'],
+    })
+    const one = await app.inject({ method: 'GET', url: '/providers/apache-kafka' })
+    expect(one.json()).toMatchObject({ provider_type: 'builtin', operator_names: ['ProduceToTopicOperator', 'ConsumeFromTopicOperator', 'AwaitMessageSensor'] })
+  })
+
+  it('GET /connection-types describes the fields, extra keys and driver of each type', async () => {
+    const types = (await app.inject({ method: 'GET', url: '/connection-types' })).json() as { conn_type: string; driver: string | null; extra_keys: string[] }[]
+    expect(types.map(t => t.conn_type)).toEqual(['postgres', 'mysql', 'google_cloud_platform', 'kafka', 'smtp'])
+    expect(types.find(t => t.conn_type === 'kafka')).toMatchObject({ driver: 'kafkajs', extra_keys: expect.arrayContaining(['bootstrap.servers', 'sasl.mechanism']) })
+    expect(types.find(t => t.conn_type === 'google_cloud_platform')?.driver).toBeNull()
+  })
+})
+
 describe('GET /providers/:packageName', () => {
   it('returns 200 for a known package', async () => {
     const res = await app.inject({ method: 'GET', url: '/providers/fastify' })

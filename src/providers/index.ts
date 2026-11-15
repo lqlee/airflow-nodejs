@@ -7,6 +7,18 @@ export { listProviders, getProvider, getOperator, registerProvider } from './reg
 export { loadProviders } from './loader.js'
 export type { ProviderDefinition, ProviderRecord, OperatorFactory } from './registry.js'
 
+// Built-in operators (SQL, Google Cloud, Kafka, email) — see providers/builtin/
+export {
+  operatorTask,
+  SQLExecuteQueryOperator, SQLCheckOperator, SqlSensor,
+  LocalFilesystemToGCSOperator, GCSToLocalFilesystemOperator, GCSListObjectsOperator, GCSDeleteObjectsOperator,
+  GCSObjectExistenceSensor, BigQueryInsertJobOperator, BigQueryCheckOperator,
+  ProduceToTopicOperator, ConsumeFromTopicOperator, AwaitMessageSensor,
+  EmailOperator,
+} from './builtin/operators.js'
+export type { OperatorOptions } from './builtin/operators.js'
+export { CONNECTION_TYPES } from './builtin/catalog.js'
+
 /**
  * Helper to define a provider with full type inference.
  * Use in dags/providers/*.js files:

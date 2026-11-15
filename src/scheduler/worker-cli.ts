@@ -27,6 +27,7 @@ import { resolve } from 'node:path'
 import { getDagsDir, parseDagFile } from '../dag/loader.js'
 import { httpExecutionClient } from '../execution/client.js'
 import { buildApiTaskContext } from '../execution/task-context.js'
+import { withOperatorRuntime } from '../providers/builtin/runtime.js'
 import { installStreamMasking, redact } from '../secrets/masker.js'
 
 // Secrets the task reads are masked in everything the pod prints (its stdout is the task log)
@@ -72,10 +73,10 @@ try {
   const source = await api.call('task.source') as { file: string | null; run: string }
   const run = await resolveRunFn(source)
   const { ctx, recordDatasets } = await buildApiTaskContext(api, { dagId, runId, taskId, mapIndex })
-  await run({
+  await run(withOperatorRuntime({
     ...ctx,
     defer: () => { throw new Error('ctx.defer() is not supported in Kubernetes executor mode') },
-  })
+  }))
   await recordDatasets()
   console.log(`[worker-cli] ✓ ${dagId}.${taskId}`)
 } catch (err: unknown) {

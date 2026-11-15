@@ -121,8 +121,8 @@ export const PLUGIN_REGISTRY: PluginInfo[] = [
   },
   {
     name: 'providers',
-    description: 'Runtime npm package discovery',
-    routes: ['/providers', '/providers/:packageName'],
+    description: 'Built-in, local and npm providers; connection types',
+    routes: ['/providers', '/providers/:packageName', '/connection-types'],
     category: 'discovery',
   },
   {

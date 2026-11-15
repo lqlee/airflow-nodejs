@@ -18,6 +18,7 @@ import type { LogLevel } from '../logs/index.js'
 import { installStreamMasking, redact } from '../secrets/masker.js'
 import { executionClientFromEnv } from '../execution/client.js'
 import { buildApiTaskContext } from '../execution/task-context.js'
+import { withOperatorRuntime } from '../providers/builtin/runtime.js'
 
 // Secrets the task reads (connections, secret variables) are masked in everything it prints
 installStreamMasking()
@@ -86,7 +87,8 @@ process.on('message', async (msg: WorkerMsg) => {
     // eslint-disable-next-line no-new-func
     const fn_ = new Function(`return (${fn})`)() as (ctx: unknown) => Promise<unknown>
 
-    const fullCtx = { ...apiCtx, ...ctx, defer, log }
+    // runOperator: built-in provider operators (providers/builtin) call it from their run function
+    const fullCtx = withOperatorRuntime({ ...apiCtx, ...ctx, defer, log })
 
     if (msg.type === 'poke') {
       const ready = await fn_(fullCtx) as boolean

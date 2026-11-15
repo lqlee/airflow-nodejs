@@ -31,6 +31,7 @@ const mapIndex = { map_index: int('Mapped instance index; omit for all instances
 const page = { limit: int('Page size'), cursor: str('Opaque cursor from the previous page') }
 
 export const OPERATION_DOCS: Record<string, OperationDoc> = {
+  'GET /connection-types': { summary: 'Connection types read by the built-in providers: fields, extra keys and the npm driver each needs' },
   // ── Dags ──
   'GET /auth/session': { summary: 'Who am I: auth mode, role, user, CSRF token and the sign-in methods on offer' },
   'GET /auth/login': { summary: 'Start the OIDC browser login (authorization code + PKCE) — redirects to the identity provider', query: { return_to: str('UI path to come back to (same-origin paths only)') } },

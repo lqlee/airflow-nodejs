@@ -2,7 +2,7 @@
   "name": "airflow-nodejs",
   "version": "0.1.0",
   "type": "module",
-  "//files": "explicit allowlist for npm pack \u2014 .gitignore excludes dist/, which would otherwise strip the built output when installed as a git dependency",
+  "//files": "explicit allowlist for npm pack — .gitignore excludes dist/, which would otherwise strip the built output when installed as a git dependency",
   "files": [
     "dags",
     "!dags/images",
@@ -47,6 +47,7 @@
     "bullmq": "^5.80.2",
     "cron-parser": "^4.9.0",
     "fastify": "^5.4.0",
+    "google-auth-library": "^11.3.4",
     "ioredis": "^5.11.1",
     "mongodb": "^6.16.0",
     "node-cron": "^3.0.3",
@@ -54,9 +55,28 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
+  "//peerDependencies": "drivers for the built-in providers — install only the ones your Dags use (npm install pg); a task using a missing one fails with an install hint",
+  "peerDependencies": {
+    "kafkajs": "^2.2.4",
+    "mysql2": "^3.24.6",
+    "nodemailer": "^8.0.11",
+    "pg": "^8.23.1"
+  },
+  "peerDependenciesMeta": {
+    "kafkajs": { "optional": true },
+    "mysql2": { "optional": true },
+    "nodemailer": { "optional": true },
+    "pg": { "optional": true }
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/node-cron": "^3.0.11",
+    "@types/nodemailer": "^8.0.2",
+    "@types/pg": "^8.23.1",
+    "kafkajs": "^2.2.4",
+    "mysql2": "^3.24.6",
+    "nodemailer": "^8.0.11",
+    "pg": "^8.23.1",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"

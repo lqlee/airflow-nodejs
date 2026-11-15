@@ -1,0 +1,42 @@
+# Services for the built-in provider integration tests (src/providers/builtin/__tests__/integration.test.ts).
+#
+#   docker compose -f docker-compose.providers-test.yml up -d
+#   PROVIDERS_IT=1 npx vitest run src/providers
+#   docker compose -f docker-compose.providers-test.yml down
+#
+# Without PROVIDERS_IT=1 those tests are skipped. Ports are offset (5xxxx) to stay clear of local services.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: airflow, POSTGRES_PASSWORD: airflow, POSTGRES_DB: it }
+    ports: ["55432:5432"]
+  mysql:
+    image: mysql:8.4
+    environment: { MYSQL_ROOT_PASSWORD: airflow, MYSQL_DATABASE: it, MYSQL_USER: airflow, MYSQL_PASSWORD: airflow }
+    ports: ["53306:3306"]
+  kafka:
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:59092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    ports: ["59092:9092"]
+  mailpit:
+    image: axllent/mailpit:latest
+    ports: ["51025:1025", "58025:8025"]
+  gcs:
+    image: fsouza/fake-gcs-server:latest
+    command: ["-scheme", "http", "-port", "4443", "-public-host", "localhost:54443"]
+    ports: ["54443:4443"]
+  bigquery:
+    image: ghcr.io/goccy/bigquery-emulator:latest
+    command: ["--project=it-project", "--port=9050"]
+    ports: ["59050:9050"]

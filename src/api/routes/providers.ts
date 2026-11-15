@@ -1,5 +1,8 @@
 /**
- * Providers API — two kinds of providers:
+ * Providers API — three kinds of providers:
+ *
+ * 0. Built-in providers (providers/builtin) — SQL, Google Cloud, Kafka and SMTP operators that ship
+ *    with airflow-nodejs; their drivers are optional peer dependencies.
  *
  * 1. npm packages (runtime dependencies) — the Node.js equivalent of pip providers.
  *    Static list read from package.json at startup.
@@ -13,7 +16,8 @@ import type { FastifyInstance } from 'fastify'
 import { readFile } from 'node:fs/promises'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { listProviders } from '../../providers/registry.js'
+import { listAllProviders } from '../../providers/registry.js'
+import { CONNECTION_TYPES } from '../../providers/builtin/catalog.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PKG_PATH = resolve(__dirname, '../../../package.json')
@@ -32,7 +36,8 @@ export interface LocalProviderInfo {
   description: string
   operator_names: string[]
   connection_types: string[]
-  provider_type: 'local'
+  role: string
+  provider_type: 'local' | 'builtin'
   source: string
 }
 
@@ -49,6 +54,7 @@ const ROLE_MAP: Record<string, string> = {
   'ioredis': 'Redis client for BullMQ',
   'pino': 'Structured logging',
   'cron-parser': 'Cron expression parsing (backfill)',
+  'google-auth-library': 'Google Cloud credentials (google provider)',
 }
 
 let _npmProviders: NpmProviderInfo[] | null = null
@@ -72,28 +78,39 @@ async function loadNpmProviders(): Promise<NpmProviderInfo[]> {
   return _npmProviders
 }
 
+function toInfo(p: ReturnType<typeof listAllProviders>[number]): LocalProviderInfo {
+  return {
+    package_name: p.name,
+    version: p.version,
+    description: p.description,
+    operator_names: p.operator_names,
+    connection_types: p.connection_types,
+    role: p.source === 'builtin' ? 'built-in operators' : 'local operators',
+    provider_type: p.source === 'builtin' ? 'builtin' : 'local',
+    source: p.source,
+  }
+}
+
 export async function providersRoutes(app: FastifyInstance): Promise<void> {
+  // GET /connection-types — connection types the built-in providers read: fields, extra keys, driver
+  app.get('/connection-types', async (_req, reply) => reply.send(CONNECTION_TYPES))
+
   // GET /providers — list npm packages AND local providers from dags/providers/
   app.get('/providers', async (_req, reply) => {
     const [npmProviders, localProviders] = await Promise.all([
       loadNpmProviders(),
-      Promise.resolve(listProviders()),
+      Promise.resolve(listAllProviders()),
     ])
 
-    const local: LocalProviderInfo[] = localProviders.map(p => ({
-      package_name: p.name,
-      version: p.version,
-      description: p.description,
-      operator_names: p.operator_names,
-      connection_types: p.connection_types,
-      provider_type: 'local' as const,
-      source: 'dags/providers',
-    }))
+    const records: LocalProviderInfo[] = localProviders.map(toInfo)
+    const builtin = records.filter(p => p.provider_type === 'builtin')
+    const local = records.filter(p => p.provider_type === 'local')
 
-    const all: ProviderInfo[] = [...local, ...npmProviders]
+    const all: ProviderInfo[] = [...builtin, ...local, ...npmProviders]
 
     return reply.send({
       providers: all,
+      builtin_providers: builtin,
       local_providers: local,
       npm_providers: npmProviders,
       total_entries: all.length,
@@ -104,19 +121,9 @@ export async function providersRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { packageName: string } }>('/providers/:packageName', async (req, reply) => {
     const name = decodeURIComponent(req.params.packageName)
 
-    // Check local providers first
-    const localDef = listProviders().find(p => p.name === name)
-    if (localDef) {
-      return reply.send({
-        package_name: localDef.name,
-        version: localDef.version,
-        description: localDef.description,
-        operator_names: localDef.operator_names,
-        connection_types: localDef.connection_types,
-        provider_type: 'local',
-        source: 'dags/providers',
-      })
-    }
+    // Built-in and local providers first
+    const localDef = listAllProviders().find(p => p.name === name)
+    if (localDef) return reply.send(toInfo(localDef))
 
     // Fall back to npm providers
     const npmProviders = await loadNpmProviders()

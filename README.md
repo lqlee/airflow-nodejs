@@ -2,7 +2,7 @@
 
 A production-grade reimplementation of Apache Airflow's core concepts in **Node.js + Fastify + MongoDB (or Cloud Spanner)**, built to be lightweight, self-contained, and deployable as a single Docker image.
 
-1,580+ tests · 22 API route modules · `anode` CLI · multi-user RBAC + OIDC SSO · multi-replica safe · user code isolated from the control plane · Docker-ready
+1,600+ tests · 22 API route modules · `anode` CLI · SQL / GCS / BigQuery / Kafka / email providers · multi-user RBAC + OIDC SSO · multi-replica safe · user code isolated from the control plane · Docker-ready
 
 ---
 
@@ -15,6 +15,7 @@ A production-grade reimplementation of Apache Airflow's core concepts in **Node.
 | **Observability** | Deadline alerts (SLA as an alias), run statistics + duration histogram, event/audit log, task try history, dag warnings, import errors |
 | **Data flow** | XCom push/pull (full CRUD), connections store (encrypted), variables store (encrypted), per-run conf/tags/notes |
 | **Lifecycle** | Task and Dag callbacks / notifiers (functions, `{ notify }` objects, webhooks), templated fields with macros, Human-in-the-Loop (HITL) approval gates, clear (with downstream / upstream / failed only), re-run, mark task or run success / failed |
+| **Providers** | Built-in operators: `SQLExecuteQueryOperator` / `SQLCheckOperator` / `SqlSensor` (PostgreSQL, MySQL), Cloud Storage and BigQuery, Kafka produce / consume / await, `EmailOperator` (SMTP) — each with its connection type; plus local providers in `dags/providers/` |
 | **Operations** | Graceful shutdown with worker drain, config API, providers API, plugins API, `anode` command-line client (`dags list/trigger/pause`, `tasks test`) |
 | **Auth** | Multi-user RBAC (viewer / editor / admin roles), OIDC SSO for the UI (authorization code + PKCE) and OIDC bearer tokens for the API, scrypt-hashed DB-backed API keys, env-key fallback |
 | **Security** | Dag files parsed in a separate process into serialized Dags — the scheduler and API never import user code; callbacks and timetables run in a sandbox process; task workers hold no database credentials (execution API with task-scoped tokens); encryption key rotation; secret masking in task logs; Vault / Akeyless secrets backends; HttpOnly session cookie + CSRF token; strict Content-Security-Policy with React served locally |
@@ -312,7 +313,8 @@ GET  /import-errors                            dag load failures
 ```
 GET  /api-keys | POST                          list / create API key (admin only)
 DELETE /api-keys/:keyId                        revoke API key (admin only)
-GET  /providers                                installed npm runtime packages
+GET  /providers | /providers/:name             built-in, local and npm providers
+GET  /connection-types                         connection types of the built-in providers (fields, extra keys, driver)
 GET  /plugins                                  registered route modules
 GET  /config | /config/:section                runtime configuration (admin only)
 GET  /auth/session                             who am I + CSRF token + sign-in methods (UI)
@@ -491,6 +493,8 @@ the task is then retried elsewhere while the old pod finishes.
 | `LOG_BACKEND` | `file` | Task log storage: `file` (default) or `mongodb` |
 | `LOG_DIR` | `./logs` | Directory for task log files (when `LOG_BACKEND=file`) |
 | `SECRETS_BACKEND` | `none` | Secrets fallback: `none`, `env`, `file`, `vault`, `akeyless` |
+| `GOOGLE_CLOUD_PROJECT` | _(from credentials)_ | Default project for the BigQuery operators (also connection extra `project` / `projectId`) |
+| `STORAGE_EMULATOR_HOST` / `BIGQUERY_EMULATOR_HOST` | _(unset)_ | Point the Cloud Storage / BigQuery operators at emulators (no credentials sent) |
 | `SECRETS_FILE_PATH` | _(unset)_ | Path to secrets JSON file (when `SECRETS_BACKEND=file`) |
 | `KUBERNETES_EXECUTOR` | _(unset)_ | Set to `true` to dispatch all tasks as K8s pods |
 | `KUBERNETES_NAMESPACE` | `default` | Kubernetes namespace for executor pods |
@@ -1086,6 +1090,7 @@ npm test
 ```
 
 Each test suite uses an isolated database (`airflow_test_*`) and cleans up after itself.
+The built-in provider integration tests need their services and `PROVIDERS_IT=1` (see [Built-in providers](#built-in-providers)).
 
 ---
 
@@ -1899,6 +1904,63 @@ See `dags/sms_notification_demo.js` for a complete example.
 
 ---
 
+## Built-in providers
+
+Operators for common systems ship with airflow-nodejs (Airflow's provider names and operator names):
+
+| Provider | Operators | Connection type | Driver (`npm install …`) |
+|---|---|---|---|
+| `common-sql` | `SQLExecuteQueryOperator`, `SQLCheckOperator`, `SqlSensor` | `postgres`, `mysql` | `pg`, `mysql2` |
+| `google` | `LocalFilesystemToGCSOperator`, `GCSToLocalFilesystemOperator`, `GCSListObjectsOperator`, `GCSDeleteObjectsOperator`, `GCSObjectExistenceSensor`, `BigQueryInsertJobOperator`, `BigQueryCheckOperator` | `google_cloud_platform` (optional) | — (REST) |
+| `apache-kafka` | `ProduceToTopicOperator`, `ConsumeFromTopicOperator`, `AwaitMessageSensor` | `kafka` | `kafkajs` |
+| `smtp` | `EmailOperator` | `smtp` (default id `smtp_default`) | `nodemailer` |
+
+Drivers are **optional peer dependencies**: install only those your Dags use, in the deployment that
+runs the workers (and in Kubernetes task images). A task whose driver is missing fails with an install hint.
+
+```js
+import { SQLExecuteQueryOperator, SqlSensor, BigQueryInsertJobOperator, EmailOperator } from 'airflow-nodejs/providers'
+
+export default {
+  id: 'daily_sales', schedule: '0 6 * * *',
+  tasks: {
+    wait:   SqlSensor({ connId: 'warehouse', sql: "SELECT COUNT(*) FROM staging.sales WHERE ds = '{{ ds }}'", pokeInterval: 60_000 }),
+    load:   SQLExecuteQueryOperator({ connId: 'warehouse', dependsOn: ['wait'], retries: 2, sql: [
+              "DELETE FROM sales WHERE ds = $1",
+              "INSERT INTO sales SELECT * FROM staging.sales WHERE ds = $1",
+            ], parameters: ['{{ ds }}'] }),
+    totals: BigQueryInsertJobOperator({ dependsOn: ['load'], sql: "SELECT region, SUM(amount) AS total FROM ds.sales WHERE ds = '{{ ds }}' GROUP BY region" }),
+    notify: EmailOperator({ dependsOn: ['totals'], to: 'sales-team@example.com', subject: 'Sales loaded for {{ ds }}', text: 'Done.' }),
+  },
+}
+```
+
+- An operator call returns a plain task. Task options (`dependsOn`, `retries`, `pool`, `timeout`, callbacks…)
+  pass through; operator options must be plain data and are checked when the Dag is parsed (an unknown or
+  missing option is an import error).
+- String options are templated at run time: `{{ ds }}`, `{{ params.x }}`, `{{ data_interval_start }}`,
+  `{{ map_value }}` (with `expand`), macros.
+- The result is pushed as XCom `return_value` (rows of a query — at most `maxRows` / `maxResults`, default
+  1000 — or `{ rowCount }`, object names, consumed messages, …); `doXcomPush: false` turns that off.
+- Operators run in the task worker and read their connection through the execution API, so workers still
+  hold no database credentials; passwords are masked in task logs. Connections can also come from a secrets
+  backend (`AIRFLOW_CONN_WAREHOUSE='postgres://user:pass@host:5432/db'`).
+- SQL: several statements (an array, or `splitStatements: true`) run in one transaction unless `autocommit`;
+  parameters are bound by the driver (`$1` for postgres, `?` or `:name` with an object for mysql).
+- Google: without `connId`, Application Default Credentials (workload identity). Connection extra:
+  `project`, `keyfile_dict`, `key_path`, `scope`. `STORAGE_EMULATOR_HOST` / `BIGQUERY_EMULATOR_HOST` point
+  at emulators.
+- Kafka: connection host = bootstrap servers, login/password = SASL; extra takes Airflow's librdkafka-style
+  keys (`bootstrap.servers`, `security.protocol`, `sasl.mechanism`, `group.id`, …). Consumers commit only
+  the offsets of the messages they returned.
+- SMTP extra (as Airflow): `from_email`, `disable_ssl` (default false → implicit TLS on 465),
+  `disable_tls`, `timeout`.
+
+`GET /connection-types` lists each type's fields, extra keys and driver.
+
+Integration tests against real services: `docker compose -f docker-compose.providers-test.yml up -d`
+then `PROVIDERS_IT=1 npx vitest run src/providers` (skipped otherwise).
+
 ## Providers Ecosystem
 
 Providers are reusable operator libraries — the Node.js equivalent of Airflow's community pip providers. Place provider files in `dags/providers/` and they're auto-discovered at startup.
@@ -1950,8 +2012,9 @@ export default dag({
 
 ```bash
 GET /providers
-# Returns npm packages (dependencies) AND local providers from dags/providers/
+# Returns built-in providers, local providers from dags/providers/ AND npm packages (dependencies)
 # {
+#   "builtin_providers": [{ "package_name": "common-sql", "operator_names": ["SQLExecuteQueryOperator", ...] }, ...],
 #   "local_providers": [
 #     { "package_name": "http-provider", "operator_names": ["HttpGetOperator", ...] }
 #   ],
@@ -1962,7 +2025,7 @@ GET /providers
 GET /providers/http-provider   # single provider details
 ```
 
-**Built-in example providers** (in `dags/providers/`):
+**Example local providers** (in `dags/providers/`):
 
 | Provider | Operators |
 |---|---|

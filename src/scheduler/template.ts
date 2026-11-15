@@ -14,6 +14,7 @@
  *   data_interval_start   — ISO string of the run's data interval, '' when it has none
  *   data_interval_end
  *   conf.key, params.key  — trigger-time conf (params defaults are merged into it at trigger time)
+ *   map_index, map_value  — mapped provider-operator instances (null otherwise)
  * Macros:
  *   macros.ds_add(ds, days)                     — '2024-01-01', 5 → '2024-01-06'
  *   macros.ds_format(ds, in_fmt, out_fmt)       — strftime subset: %Y %m %d %H %M %S %j %y %b
@@ -32,6 +33,9 @@ export interface TemplateContext {
   conf: Record<string, unknown>
   data_interval_start?: Date | null
   data_interval_end?: Date | null
+  /** Mapped task instances (provider operators): the instance's index and input value. */
+  map_index?: number | null
+  map_value?: unknown
 }
 
 // ── date helpers ──────────────────────────────────────────────────────────────
@@ -113,6 +117,8 @@ function buildScope(ctx: TemplateContext): Scope {
     data_interval_end: iso(ctx.data_interval_end),
     conf: ctx.conf,
     params: ctx.conf,
+    map_index: ctx.map_index ?? null,
+    map_value: ctx.map_value ?? null,
     macros: MACROS,
   }
 }

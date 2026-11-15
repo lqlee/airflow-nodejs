@@ -26,6 +26,7 @@ import { getSecretsBackend } from '../secrets/index.js'
 import { registerSecret, registerSensitiveFields, redact } from '../secrets/masker.js'
 import type { ConnectionRuntime } from '../connections/index.js'
 import type { EmittedDataset } from '../datasets/index.js'
+import { withOperatorRuntime } from '../providers/builtin/runtime.js'
 import { ApiError, type ApiClient } from './client.js'
 import type { Io } from './output.js'
 
@@ -217,6 +218,7 @@ export async function testTask(opts: TaskTestOptions): Promise<TaskTestResult> {
       },
       log: { debug: log('DEBUG', io.out), info: log('INFO', io.out), warn: log('WARN', io.err), error: log('ERROR', io.err) },
     }
+    withOperatorRuntime(baseCtx)   // built-in provider operators call ctx.runOperator
     const ctx = {
       ...baseCtx,
       defer: (trigger: TaskFn, o: { timeout?: number; interval?: number } = {}): Promise<never> => {

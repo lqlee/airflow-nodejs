@@ -50,6 +50,14 @@ const remaining = async (runId: string) =>
   Object.fromEntries(await Promise.all(CHILDREN.map(async c => [c, await db.collection(c).countDocuments({ dag_run_id: runId })])))
 
 describe('purgeOldRuns', () => {
+  it('with LOG_BACKEND=gcs, removes staged files left behind (the objects age out by bucket lifecycle)', async () => {
+    process.env.LOG_BACKEND = 'gcs'
+    const old = await seedRun('success', daysAgo(40))
+    const res = await purgeOldRuns(db, { olderThan: CUTOFF })
+    expect(res.logDirs).toBe(1)
+    expect(await exists(dirname(getLogFilePath('d', old, 't')))).toBe(false)
+  })
+
   it('deletes finished runs older than the cutoff with all their rows and log files', async () => {
     const oldOk = await seedRun('success', daysAgo(40))
     const oldFailed = await seedRun('failed', daysAgo(31))

@@ -11,7 +11,7 @@ import { createDbClient } from '../db/factory.js'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { createRedisConnection, QUEUE_NAME } from './connection.js'
-import { appendLog } from '../logs/index.js'
+import { appendLog, uploadTaskLogOnExit } from '../logs/index.js'
 import type { Db } from 'mongodb'
 import type { TaskJobData } from './producer.js'
 import { INSTANCE_ID, startLiveness, shutdownLiveness } from '../scheduler/instance.js'
@@ -19,6 +19,10 @@ import { retryUpdate, successUpdate, failedUpdate } from '../scheduler/ti-writes
 import { forkTaskWorker } from '../sandbox/fork.js'
 import { serveExecutionApi } from '../execution/ipc.js'
 import { taskScope } from '../execution/scope.js'
+import { recordTry } from '../scheduler/tries.js'
+import { drainPool } from '../scheduler/pool.js'
+import { installJsonConsole, echoTaskLine } from '../observability/json-console.js'
+import { initTracing, shutdownTracing } from '../observability/tracing.js'
 
 const DB_NAME   = process.env.DB_NAME   ?? 'airflow'
 const CONCURRENCY = Number(process.env.WORKER_CONCURRENCY ?? 4)
@@ -40,7 +44,8 @@ export async function adoptClaim(db: Db, ti: TaskJobData['ti']): Promise<Record<
   return adopted.matchedCount === 0 ? null : { ...tiKey, state: 'running', claimed_by: INSTANCE_ID }
 }
 
-async function processJob(job: Job<TaskJobData>): Promise<void> {
+/** Run one queued task job (exported for tests; BullMQ calls it). */
+export async function processJob(job: Job<TaskJobData>): Promise<void> {
   const { ti, fn } = job.data
   const client = createDbClient()
 
@@ -59,16 +64,17 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
       // No database credentials in the worker: it reaches XCom, connections etc. through this process
       const child = forkTaskWorker()
       serveExecutionApi(child, db, taskScope(ti))
+      uploadTaskLogOnExit(child, ti)
 
       const rl_out = createInterface({ input: child.stdout! })
       rl_out.on('line', (line) => {
-        process.stdout.write(`[${ti.task_id}] ${line}\n`)
+        echoTaskLine(ti, 'stdout', line, `[${ti.task_id}] ${line}`)
         void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line)
       })
 
       const rl_err = createInterface({ input: child.stderr! })
       rl_err.on('line', (line) => {
-        process.stderr.write(`[${ti.task_id}] ${line}\n`)
+        echoTaskLine(ti, 'stderr', line, `[${ti.task_id}] ${line}`)
         void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line)
       })
 
@@ -78,12 +84,14 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
         if (msg.type !== 'done') return
         if (msg.outcome === 'success') {
           await db.collection('task_instances').updateOne(owned, successUpdate())
+          await recordTry(db, ti, 'success', new Date())
           console.log(`[worker] ✓ ${ti.dag_id}.${ti.task_id}`)
           resolve()
         } else {
           const error = msg.outcome === 'fail' || !msg.outcome
             ? (msg.error ?? 'unknown error')
             : `outcome '${msg.outcome}' (sensors and ctx.defer()) is not supported by BullMQ workers`
+          await recordTry(db, ti, 'failed', new Date(), error)
           if (ti.try_number < ti.max_retries) {
             // Requeue for retry
             // up_for_retry with next_retry_at — the scheduler re-claims and re-enqueues once the delay passes
@@ -99,6 +107,7 @@ async function processJob(job: Job<TaskJobData>): Promise<void> {
 
       child.on('error', async (err) => {
         await db.collection('task_instances').updateOne(owned, failedUpdate(err.message))
+        await recordTry(db, ti, 'failed', new Date(), err.message)
         reject(err)
       })
     })
@@ -138,6 +147,8 @@ export async function stopWorker(): Promise<void> {
 
 // Allow running as standalone: npx tsx src/queue/consumer.ts
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  installJsonConsole()
+  await initTracing()
   // A standalone worker owns the tasks it adopts, so it must heartbeat (never leads the scheduler)
   const livenessClient = createDbClient()
   await livenessClient.connect({ light: true })
@@ -148,6 +159,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
   const stop = async () => {
     await stopWorker()   // waits for active jobs
+    await drainPool({ timeoutMs: 20_000 })   // their try records and log uploads
+    await shutdownTracing()
     await shutdownLiveness(livenessDb)
     await livenessClient.close()
     process.exit(0)

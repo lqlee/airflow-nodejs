@@ -5,7 +5,8 @@ import type { TaskInstance } from './runs.js'
 import { getDag } from '../dag/registry.js'
 import { tiFilter, markSuccess, markFailed, scheduleRetry, computeRetryDelay } from './ti-writes.js'
 import { acquire, release, freeWorkerSlots, trackWork } from './pool.js'
-import { appendLog, parseLevelFromLine } from '../logs/index.js'
+import { echoTaskLine } from '../observability/json-console.js'
+import { appendLog, parseLevelFromLine, uploadTaskLogOnExit } from '../logs/index.js'
 import { enqueueTask } from '../queue/producer.js'
 import { sensorOutcome } from './sensor.js'
 import { recordTry } from './tries.js'
@@ -137,6 +138,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     // No database credentials in the worker: it reaches XCom, connections etc. through us (execution API)
     const child = forkTaskWorker()
     serveExecutionApi(child, db, taskScope(ti))
+    uploadTaskLogOnExit(child, ti)
 
     // ── Timeout (task-level, not sensor deadline) ─────────────────────
     let timedOut = false
@@ -162,13 +164,13 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     // parseLevelFromLine detects [INFO]/[WARN]/[ERROR]/[DEBUG] prefixes from ctx.log.*
     const rl_out = createInterface({ input: child.stdout! })
     rl_out.on('line', (line) => {
-      process.stdout.write(`${line}\n`)
+      echoTaskLine(ti, 'stdout', line)
       void trackWork(appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line, parseLevelFromLine(line) ?? 'info').catch(logWriteFailed))
     })
 
     const rl_err = createInterface({ input: child.stderr! })
     rl_err.on('line', (line) => {
-      process.stderr.write(`${line}\n`)
+      echoTaskLine(ti, 'stderr', line)
       void trackWork(appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line, parseLevelFromLine(line) ?? 'error').catch(logWriteFailed))
     })
 
@@ -319,6 +321,7 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
         TASK_ID: ti.task_id,
       },
     })
+    uploadTaskLogOnExit(child, ti)
 
     let timedOut = false
     let errored = false   // set by error handler so close handler doesn't double-process ENOENT
@@ -344,12 +347,12 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
     const stderrLines: string[] = []
 
     createInterface({ input: child.stdout }).on('line', (line) => {
-      process.stdout.write(`${line}\n`)
+      echoTaskLine(ti, 'stdout', line)
       void trackWork(appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line, parseLevelFromLine(line) ?? 'info').catch(logWriteFailed))
     })
 
     createInterface({ input: child.stderr }).on('line', (line) => {
-      process.stderr.write(`${line}\n`)
+      echoTaskLine(ti, 'stderr', line)
       stderrLines.push(line)
       void trackWork(appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line, parseLevelFromLine(line) ?? 'error').catch(logWriteFailed))
     })
@@ -815,6 +818,7 @@ async function executeRunFn(
     // No database credentials in the worker: it reaches XCom, connections etc. through us (execution API)
     const child = forkTaskWorker()
     serveExecutionApi(child, db, taskScope(ti))
+    uploadTaskLogOnExit(child, ti)
 
     let timedOut = false
     let killTimer: ReturnType<typeof setTimeout> | null = null
@@ -837,13 +841,13 @@ async function executeRunFn(
 
     const rl_out = createInterface({ input: child.stdout! })
     rl_out.on('line', (line) => {
-      process.stdout.write(`${line}\n`)
+      echoTaskLine(ti, 'stdout', line)
       void trackWork(appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line, parseLevelFromLine(line) ?? 'info').catch(logWriteFailed))
     })
 
     const rl_err = createInterface({ input: child.stderr! })
     rl_err.on('line', (line) => {
-      process.stderr.write(`${line}\n`)
+      echoTaskLine(ti, 'stderr', line)
       void trackWork(appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line, parseLevelFromLine(line) ?? 'error').catch(logWriteFailed))
     })
 

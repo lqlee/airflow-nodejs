@@ -46,11 +46,12 @@ import type { TaskInstance } from './runs.js'
 import { buildPodName } from './executor.js'
 import { markSuccess, markFailed, scheduleRetry } from './ti-writes.js'
 import { acquire, release } from './pool.js'
-import { appendLog } from '../logs/index.js'
+import { appendLog, uploadTaskLogOnExit } from '../logs/index.js'
 import { createInterface } from 'node:readline'
 import { recordTry } from './tries.js'
 import { signTaskToken } from '../execution/token.js'
 import { taskScope } from '../execution/scope.js'
+import { echoTaskLine } from '../observability/json-console.js'
 
 export const USE_KUBERNETES_EXECUTOR = Boolean(process.env.KUBERNETES_EXECUTOR)
 
@@ -167,6 +168,7 @@ export async function executeTaskOnKubernetes(
 
   return new Promise((done) => {
     const child = spawn('kubectl', args)
+    uploadTaskLogOnExit(child, ti)
 
     let timedOut = false
     let errored = false
@@ -190,11 +192,11 @@ export async function executeTaskOnKubernetes(
     const stderrLines: string[] = []
 
     createInterface({ input: child.stdout }).on('line', (line) => {
-      process.stdout.write(`${line}\n`)
+      echoTaskLine(ti, 'stdout', line)
       void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line)
     })
     createInterface({ input: child.stderr }).on('line', (line) => {
-      process.stderr.write(`${line}\n`)
+      echoTaskLine(ti, 'stderr', line)
       stderrLines.push(line)
       void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line)
     })

@@ -492,8 +492,12 @@ the task is then retried elsewhere while the old pod finishes.
 | `GLOBAL_SLACK_FAILURE_WEBHOOK` | _(unset)_ | Slack webhook — fires on failure only |
 | `GLOBAL_SUCCESS_WEBHOOK` | _(unset)_ | Generic JSON webhook — fires on every success run |
 | `GLOBAL_FAILURE_WEBHOOK` | _(unset)_ | Generic JSON webhook — fires on every failure run |
-| `LOG_BACKEND` | `file` | Task log storage: `file` (default) or `mongodb` |
-| `LOG_DIR` | `./logs` | Directory for task log files (when `LOG_BACKEND=file`) |
+| `LOG_BACKEND` | `file` | Task log storage: `file` (default), `mongodb` or `gcs` (see [Traces, JSON logs and remote task logs](#traces-json-logs-and-remote-task-logs)) |
+| `LOG_DIR` | `./logs` | Directory for task log files (`file`; staging for `gcs`) |
+| `LOG_GCS_BUCKET` / `LOG_GCS_PREFIX` | _(unset)_ / `task-logs` | Bucket and object prefix for `LOG_BACKEND=gcs` |
+| `LOG_FORMAT` | _(plain)_ | `json`: server console output as one JSON object per line (Splunk) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(unset)_ | Turns on OpenTelemetry traces (OTLP/HTTP); also `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_TRACES_EXPORTER=console`, `OTEL_SDK_DISABLED` |
+| `OTEL_SERVICE_NAME` | `airflow-nodejs` | Service name on spans and JSON log lines |
 | `SECRETS_BACKEND` | `none` | Secrets fallback: `none`, `env`, `file`, `vault`, `akeyless` |
 | `GOOGLE_CLOUD_PROJECT` | _(from credentials)_ | Default project for the BigQuery operators (also connection extra `project` / `projectId`) |
 | `STORAGE_EMULATOR_HOST` / `BIGQUERY_EMULATOR_HOST` | _(unset)_ | Point the Cloud Storage / BigQuery operators at emulators (no credentials sent) |
@@ -2283,6 +2287,39 @@ GET /dag-runs/:runId/tasks/:taskId/logs?level=error&stream=stderr
 For `shell:`, `python:`, `java:`, `container:` tasks: stdout lines are stored as `info`, stderr as `error`. Lines that match `[LEVEL]` prefixes are detected automatically.
 
 ---
+
+## Traces, JSON logs and remote task logs
+
+**Traces.** Set `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g. `http://otel-collector:4318`) and every Dag run emits
+a span (`dag_run <dag_id>`, from when it was queued to when it finished) with one child span per task
+try (`task <dag_id>.<task_id>`, from start to end). Attributes: `airflow.dag_id`, `airflow.run_id`,
+`airflow.run.state`, `airflow.task_id`, `airflow.task.try_number`, `airflow.task.map_index`,
+`airflow.task.state`; failures carry an error status with the message.
+
+Spans are written when the run or try finishes, with their real start time, so long runs, restarts and
+several replicas need no open spans. The run's trace id comes from the run id, so every try of every
+task — on any replica, in any executor — joins the same trace; clearing a finished run starts a new
+run span in that trace. `OTEL_TRACES_EXPORTER=console` prints spans instead (local debugging).
+
+**JSON logs.** `LOG_FORMAT=json` turns the server's console output into one JSON object per line on
+stdout, ready for Splunk without a parsing rule:
+
+```json
+{"ts":"2026-03-02T06:00:00.123Z","level":"info","logger":"scheduler","msg":"run 65f… → success","service":"airflow-nodejs","pid":7}
+{"ts":"2026-03-02T06:00:00.456Z","level":"warn","logger":"task","msg":"[WARN] slow","service":"airflow-nodejs","pid":7,"dag_id":"etl","run_id":"65f…","task_id":"load"}
+```
+
+Task output echoed by the server is tagged with the task instance; known secret values are masked.
+
+**Task logs on Cloud Storage.** `LOG_BACKEND=gcs` with `LOG_GCS_BUCKET` (and optionally
+`LOG_GCS_PREFIX`, default `task-logs`): while a task runs, its lines go to the local file under
+`LOG_DIR`; when its process exits they are appended to
+`gs://<bucket>/<prefix>/<dag_id>/<run_id>/<task_id>.log` and the local file is removed. The UI and
+`GET /dag-runs/:id/tasks/:taskId/logs` read the object plus any lines not uploaded yet, so logs survive
+pod restarts and a retry on another replica still shows the earlier tries. If an upload fails the lines
+stay local and go up with the next try. Old objects: add a bucket lifecycle rule (age-based delete) — the
+run cleanup removes database rows and local files only. Credentials: Application Default Credentials (workload identity
+on WCNP — the service account needs `storage.objects.get`, `storage.objects.create` and `storage.objects.delete` — appending rewrites the object — e.g. `roles/storage.objectUser` on the bucket).
 
 ## Shell Task Support
 

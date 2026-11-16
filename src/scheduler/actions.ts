@@ -16,6 +16,7 @@ import { getDag } from '../dag/registry.js'
 import { recordEvent } from '../events/index.js'
 import { pruneDeadlines, requeueDeadlines } from '../deadlines/index.js'
 import { TI_CLEARABLE, TI_FINISHED, type TiSettableState } from './states.js'
+import { emitRunSpan, type RunForSpan } from '../observability/tracing.js'
 
 export interface TiRef { task_id: string; map_index: number | null; state: string }
 
@@ -221,6 +222,10 @@ export async function setRunState(
     { $set: { state, ended_at: now, ...(sel.run.started_at ? {} : { started_at: now }) } },
   )
   if (state === 'success') await pruneDeadlines(db, runId)
+  // Marking an unfinished run ends its attempt; re-marking a finished one does not start a new one
+  if (sel.run.state === 'queued' || sel.run.state === 'running') {
+    emitRunSpan({ ...(sel.run as unknown as RunForSpan), state, ended_at: now, started_at: (sel.run.started_at as Date | undefined) ?? now })
+  }
   void recordEvent(db, 'run_state_set', {
     dag_id: sel.run.dag_id as string,
     dag_run_id: runId,

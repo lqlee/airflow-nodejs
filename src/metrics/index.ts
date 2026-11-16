@@ -13,7 +13,8 @@ import { TI_STATES } from '../scheduler/states.js'
 import { AUTH_ENABLED } from '../auth/index.js'
 import { family, sample, renderHttpMetrics, getSchedulerStats } from './registry.js'
 
-export const RUN_STATES = ['queued', 'running', 'success', 'failed', 'cancelled'] as const
+import { RUN_STATES } from '../scheduler/runs.js'
+export { RUN_STATES }
 export const TASK_STATES = TI_STATES
 
 const startedAtSeconds = Date.now() / 1000

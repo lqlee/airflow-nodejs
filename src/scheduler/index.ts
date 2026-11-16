@@ -23,6 +23,7 @@ import { recordEvent } from '../events/index.js'
 import { flushTaskCallbacks, fireExecuteCallbacks, notify } from './callbacks.js'
 import { recordSchedulerTick } from '../metrics/registry.js'
 import { getPausedBackfillIds, buildActiveRunFilter } from './backfill-filter.js'
+import { emitRunSpan, type RunForSpan } from '../observability/tracing.js'
 
 const POLL_INTERVAL_MS = 5_000
 
@@ -242,6 +243,7 @@ export async function advanceRun(db: Db, dagRunId: string, webhookOptions?: Deli
     )
     if (!transitioned) return  // another tick already finalized this run
     console.log(`[scheduler] run ${dagRunId} → ${finalState}`)
+    emitRunSpan(transitioned as unknown as RunForSpan)
 
     // Audit — after CAS win so only the winning tick records the event
     void recordEvent(db, finalState === 'success' ? 'run_success' : 'run_failed', {
@@ -383,6 +385,7 @@ export async function cancelRun(db: Db, dagRunId: string): Promise<boolean> {
   )
 
   console.log(`[scheduler] run ${dagRunId} → cancelled`)
+  emitRunSpan(result as unknown as RunForSpan)
   void recordEvent(db, 'run_cancelled', {
     dag_id: result.dag_id as string,
     dag_run_id: dagRunId,

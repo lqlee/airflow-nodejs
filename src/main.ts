@@ -9,7 +9,12 @@ import { releaseLease } from './scheduler/lease.js'
 import { buildServer } from './api/server.js'
 import { startWorker, stopWorker } from './queue/consumer.js'
 import { closeQueue } from './queue/producer.js'
-import { drainPool, activeWorkers, queueDepth } from './scheduler/pool.js'
+import { drainPool, activeWorkers, queueDepth, pendingWork } from './scheduler/pool.js'
+import { installJsonConsole } from './observability/json-console.js'
+import { initTracing, shutdownTracing } from './observability/tracing.js'
+
+// LOG_FORMAT=json: one JSON object per console line, for Splunk — before anything else logs
+installJsonConsole()
 
 const PORT = Number(process.env.PORT ?? 3000)
 const HOST = process.env.HOST ?? '0.0.0.0'
@@ -17,6 +22,7 @@ const USE_BULLMQ = Boolean(process.env.REDIS_URL)
 const DRAIN_TIMEOUT_MS = Number(process.env.DRAIN_TIMEOUT_MS ?? 20_000)
 
 async function main(): Promise<void> {
+  if (await initTracing()) console.log('[tracing] OpenTelemetry traces on — a span per Dag run and per task try')
   const db = await connectDb()
   await ensureIndexes(db)
   // No startup recovery: tasks left running by a dead process are reaped as zombies once its
@@ -67,13 +73,14 @@ async function main(): Promise<void> {
 
     // 3. Drain worker pool (local-fork mode only).
     //    MUST drain before closeDb(): queued waiters will acquire() → fork() → write DB
-    //    once a slot frees even after we stopped forking new tasks. Both counters must
-    //    be zero, not just active.
+    //    once a slot frees even after we stopped forking new tasks. Active, queued and pending
+    //    (outcome writes, try records, log uploads) must all be zero.
     if (!USE_BULLMQ) {
       const a = activeWorkers()
       const q = queueDepth()
-      if (a > 0 || q > 0) {
-        console.log(`[main] draining worker pool (active=${a}, queued=${q}, timeout=${DRAIN_TIMEOUT_MS}ms)...`)
+      const p = pendingWork()
+      if (a > 0 || q > 0 || p > 0) {
+        console.log(`[main] draining worker pool (active=${a}, queued=${q}, pending=${p}, timeout=${DRAIN_TIMEOUT_MS}ms)...`)
         const result = await drainPool({ timeoutMs: DRAIN_TIMEOUT_MS })
         if (result.drained) {
           console.log('[main] worker pool drained')
@@ -86,10 +93,13 @@ async function main(): Promise<void> {
     // 4. BullMQ worker drain (waits for active BullMQ jobs).
     await stopWorker()
     await closeQueue()
+    //    The last jobs' try records and log uploads
+    if (USE_BULLMQ && pendingWork() > 0) await drainPool({ timeoutMs: DRAIN_TIMEOUT_MS })
 
     // 5. Hand tasks this process still owns back to the queue (no retry spent), then deregister.
     await releaseOwnedTasks(db).catch(err => console.warn('[main] task hand-back failed:', (err as Error).message))
     await shutdownLiveness(db)
+    await shutdownTracing()   // flush the last spans
 
     // 6. Close DB last — all in-flight writes are done.
     await closeDb()

@@ -7,6 +7,11 @@
  * Select via LOG_BACKEND env var:
  *   LOG_BACKEND=file      (default) — logs/<dag_id>/<run_id>/<task_id>.log
  *   LOG_BACKEND=mongodb   — MongoDB task_logs collection
+ *   LOG_BACKEND=gcs       — lines are written to the local file while the task runs; when its process
+ *                           exits they are appended to gs://$LOG_GCS_BUCKET/$LOG_GCS_PREFIX/<same path>
+ *                           and the local file is removed. Reads return the object plus any local lines
+ *                           not uploaded yet, so a retry on another replica — or a restarted pod —
+ *                           still shows every try. See ./gcs.ts.
  *
  * Log directory: LOG_DIR env var, default: './logs' (relative to cwd).
  *
@@ -18,10 +23,13 @@
  */
 
 import type { Db } from 'mongodb'
-import { appendFile, mkdir, readFile } from 'node:fs/promises'
-import { resolve, dirname } from 'node:path'
+import { appendFile, mkdir, readFile, unlink } from 'node:fs/promises'
+import { resolve, dirname, relative, sep } from 'node:path'
 import { existsSync } from 'node:fs'
+import type { ChildProcess } from 'node:child_process'
 import { redact } from '../secrets/masker.js'
+import { trackWork } from '../scheduler/pool.js'
+import { gcsLogLocation, downloadObject, uploadObject } from './gcs.js'
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -39,11 +47,11 @@ const LEVEL_RANK: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error
 
 // ── Backend selection ─────────────────────────────────────────────────────────
 
-type LogBackend = 'file' | 'mongodb'
+type LogBackend = 'file' | 'mongodb' | 'gcs'
 
 function getBackend(): LogBackend {
   const b = (process.env.LOG_BACKEND ?? 'file').toLowerCase().trim()
-  return (b === 'mongodb') ? 'mongodb' : 'file'
+  return b === 'mongodb' || b === 'gcs' ? b : 'file'
 }
 
 function getLogDir(): string {
@@ -72,6 +80,18 @@ function taskLogPath(dagId: string, runId: string, taskId: string): string {
   return resolve(getLogDir(), safeName(dagId), safeName(runId), `${safeName(taskId)}.log`)
 }
 
+/**
+ * Operations on one log file run one after another, in call order: appends keep the order the lines
+ * were produced in, and an upload (gcs) sees every line appended before it was requested.
+ */
+const fileQueues = new Map<string, Promise<void>>()
+function inFileOrder(path: string, op: () => Promise<void>): Promise<void> {
+  const next = (fileQueues.get(path) ?? Promise.resolve()).catch(() => {}).then(op)
+  fileQueues.set(path, next)
+  next.finally(() => { if (fileQueues.get(path) === next) fileQueues.delete(path) }).catch(() => {})
+  return next
+}
+
 // ── File backend ──────────────────────────────────────────────────────────────
 
 async function appendLogFile(
@@ -79,12 +99,12 @@ async function appendLogFile(
   stream: 'stdout' | 'stderr', line: string, level: LogLevel,
 ): Promise<void> {
   const filePath = taskLogPath(dagId, runId, taskId)
-  const dir = dirname(filePath)
-  if (!existsSync(dir)) {
-    await mkdir(dir, { recursive: true })
-  }
   const entry = JSON.stringify({ ts: new Date().toISOString(), stream, level, line }) + '\n'
-  await appendFile(filePath, entry, 'utf8')
+  await inFileOrder(filePath, async () => {
+    const dir = dirname(filePath)
+    if (!existsSync(dir)) await mkdir(dir, { recursive: true })
+    await appendFile(filePath, entry, 'utf8')
+  })
 }
 
 async function readLogFile(
@@ -93,8 +113,14 @@ async function readLogFile(
 ): Promise<LogLine[]> {
   const filePath = taskLogPath(dagId, runId, taskId)
   if (!existsSync(filePath)) return []
+  return parseLogFile(await readFile(filePath, 'utf8'), dagId, runId, taskId, opts)
+}
 
-  const raw = await readFile(filePath, 'utf8')
+/** The JSON-lines format shared by the file and gcs backends → LogLines, filtered. */
+function parseLogFile(
+  raw: string, dagId: string, runId: string, taskId: string,
+  opts: { level?: LogLevel; stream?: 'stdout' | 'stderr' } = {},
+): LogLine[] {
   const minRank = opts.level ? LEVEL_RANK[opts.level] : 0
 
   const lines: LogLine[] = []
@@ -118,6 +144,59 @@ async function readLogFile(
     }
   }
   return lines  // already ordered by append time (file is append-only)
+}
+
+// ── GCS backend (local staging file + one object per task instance) ──────────
+
+function gcsObjectName(dagId: string, runId: string, taskId: string): { bucket: string; name: string } {
+  const { bucket, prefix } = gcsLogLocation()
+  const rel = relative(getLogDir(), taskLogPath(dagId, runId, taskId)).split(sep).join('/')
+  return { bucket, name: prefix ? `${prefix}/${rel}` : rel }
+}
+
+async function readLogGcs(
+  dagId: string, runId: string, taskId: string,
+  opts: { level?: LogLevel; stream?: 'stdout' | 'stderr' } = {},
+): Promise<LogLine[]> {
+  const { bucket, name } = gcsObjectName(dagId, runId, taskId)
+  const filePath = taskLogPath(dagId, runId, taskId)
+  const [remote, local] = await Promise.all([
+    downloadObject(bucket, name),
+    existsSync(filePath) ? readFile(filePath, 'utf8').catch(() => '') : Promise.resolve(''),
+  ])
+  return parseLogFile(`${remote ?? ''}${local}`, dagId, runId, taskId, opts)
+}
+
+/**
+ * LOG_BACKEND=gcs: append the task's staged lines to its object and remove the local file. No-op for
+ * the other backends, or when nothing is staged.
+ */
+export async function uploadTaskLog(dagId: string, runId: string, taskId: string): Promise<void> {
+  if (getBackend() !== 'gcs') return
+  const filePath = taskLogPath(dagId, runId, taskId)
+  await inFileOrder(filePath, async () => {
+    if (!existsSync(filePath)) return
+    const local = await readFile(filePath, 'utf8')
+    if (local) {
+      const { bucket, name } = gcsObjectName(dagId, runId, taskId)
+      const remote = await downloadObject(bucket, name)   // earlier tries, possibly from another replica
+      await uploadObject(bucket, name, `${remote ?? ''}${local}`)
+    }
+    await unlink(filePath)
+  })
+}
+
+/**
+ * Upload the task's log once `child` (the process whose output is being logged) has exited and its
+ * output streams are drained, so the last lines are included. Tracked, so graceful shutdown waits.
+ */
+export function uploadTaskLogOnExit(child: ChildProcess, ti: { dag_id: string; dag_run_id: string; task_id: string }): void {
+  if (getBackend() !== 'gcs') return
+  child.once('close', () => {
+    void trackWork(uploadTaskLog(ti.dag_id, ti.dag_run_id, ti.task_id).catch((err: unknown) => {
+      console.error(`[logs] uploading the log of ${ti.dag_id}.${ti.task_id} (run ${ti.dag_run_id}) failed — kept locally: ${(err as Error).message}`)
+    }))
+  })
 }
 
 // ── MongoDB backend ───────────────────────────────────────────────────────────
@@ -169,7 +248,7 @@ export async function appendLog(
   // Second line of defence: secrets this process knows are masked even if the worker missed them
   const masked = redact(line)
 
-  if (backend === 'file') {
+  if (backend === 'file' || backend === 'gcs') {
     await appendLogFile(dagId, dagRunId, taskId, stream, masked, resolvedLevel)
   } else {
     await appendLogMongo(db, dagId, dagRunId, taskId, stream, masked, resolvedLevel)
@@ -196,6 +275,9 @@ export async function getTaskLogs(
     const resolvedDagId = dagId ?? await resolveDagIdFromRun(dagRunId)
     if (!resolvedDagId) return []
     return readLogFile(resolvedDagId, dagRunId, taskId, opts)
+  } else if (backend === 'gcs') {
+    if (!dagId) return []
+    return readLogGcs(dagId, dagRunId, taskId, opts)
   } else {
     return readLogMongo(db, dagId ?? '', dagRunId, taskId, opts)
   }
@@ -218,7 +300,7 @@ export function getLogFilePath(dagId: string, runId: string, taskId: string): st
   return taskLogPath(dagId, runId, taskId)
 }
 
-/** Returns the current log backend name ('file' or 'mongodb'). */
+/** Returns the current log backend name ('file', 'mongodb' or 'gcs'). */
 export function getLogBackendName(): LogBackend {
   return getBackend()
 }

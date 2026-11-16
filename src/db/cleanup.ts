@@ -39,7 +39,8 @@ export async function purgeOldRuns(db: Db, opts: PurgeOptions): Promise<PurgeRes
   const result: PurgeResult = { dryRun, olderThan: opts.olderThan, runs: 0, rows: {}, logDirs: 0 }
   const add = (coll: string, n: number) => { result.rows[coll] = (result.rows[coll] ?? 0) + n }
   const runFilter = { state: { $in: TERMINAL_RUN_STATES }, created_at: { $lt: opts.olderThan } }
-  const fileLogs = getLogBackendName() === 'file'
+  // gcs: only leftover staged files here — the objects age out by a bucket lifecycle rule
+  const fileLogs = getLogBackendName() === 'file' || getLogBackendName() === 'gcs'
 
   for (let offset = 0; ; offset += dryRun ? batchSize : 0) {
     // Deleting shrinks the result set, so a real purge always reads the first page; a dry run pages through

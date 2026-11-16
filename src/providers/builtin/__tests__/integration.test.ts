@@ -1,8 +1,11 @@
 /**
  * Built-in providers against real services (docker-compose.providers-test.yml):
  *
- *   docker compose -f docker-compose.providers-test.yml up -d
- *   PROVIDERS_IT=1 npx vitest run src/providers
+ *   docker-compose -f docker-compose.providers-test.yml up -d
+ *   npx vitest run src/providers
+ *
+ * Each block runs when the services it needs are reachable and is skipped otherwise, with a log line
+ * saying why (it-services.ts; PROVIDERS_IT=1 turns an unreachable service into a failure, =0 skips all).
  *
  * The first block runs operators through the scheduler (forked worker, connections from the database
  * over the execution API); the rest call the worker runtime directly to cover each operator's behaviour.
@@ -24,8 +27,9 @@ import { createRun } from '../../../scheduler/runs.js'
 import { advanceRun } from '../../../scheduler/index.js'
 import { waitFor } from '../../../scheduler/__tests__/wait-for.js'
 import { xcomPull } from '../../../xcom/index.js'
+import { checkServices } from './it-services.js'
 
-const IT = process.env.PROVIDERS_IT === '1'
+const { has } = await checkServices()
 const RUN = randomBytes(3).toString('hex')
 
 const CONNS: Record<string, ConnectionRuntime> = {
@@ -55,7 +59,7 @@ async function mailpitMessages(): Promise<{ ID: string; Subject: string; To: { A
   return ((await res.json()) as { messages: never[] }).messages
 }
 
-describe.skipIf(!IT)('providers through the scheduler', () => {
+describe.skipIf(!has('postgres', 'kafka', 'mailpit'))('providers through the scheduler', () => {
   const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
   let client: MongoClient
   let db: Db
@@ -123,8 +127,8 @@ describe.skipIf(!IT)('providers through the scheduler', () => {
   }, 90_000)
 })
 
-describe.skipIf(!IT)('common-sql', () => {
-  it('postgres: binds parameters, rolls back a failed multi-statement run and caps rows', async () => {
+describe('common-sql', () => {
+  it.skipIf(!has('postgres'))('postgres: binds parameters, rolls back a failed multi-statement run and caps rows', async () => {
     const t = `it_pg_${RUN}`
     const { run, pushed } = ctxFor()
     await run('sql.execute', { connId: 'it_pg', sql: `CREATE TABLE ${t} (id int primary key, name text); INSERT INTO ${t} VALUES (1, 'a'), (2, 'b'), (3, 'c')`, splitStatements: true })
@@ -146,7 +150,7 @@ describe.skipIf(!IT)('common-sql', () => {
     await run('sql.execute', { connId: 'it_pg', sql: `DROP TABLE ${t}` })
   })
 
-  it('mysql: positional and named parameters, affected rows, transactions', async () => {
+  it.skipIf(!has('mysql'))('mysql: positional and named parameters, affected rows, transactions', async () => {
     const t = `it_my_${RUN}`
     const { run } = ctxFor()
     await run('sql.execute', { connId: 'it_mysql', sql: `CREATE TABLE ${t} (id int primary key, name varchar(10))` })
@@ -160,7 +164,7 @@ describe.skipIf(!IT)('common-sql', () => {
   })
 })
 
-describe.skipIf(!IT)('apache-kafka', () => {
+describe.skipIf(!has('kafka'))('apache-kafka', () => {
   it('consumers commit only what they returned; the sensor finds a matching message', async () => {
     const topic = `it-kafka-${RUN}`
     const { Kafka } = (await import('kafkajs')).default
@@ -182,7 +186,7 @@ describe.skipIf(!IT)('apache-kafka', () => {
   }, 60_000)
 })
 
-describe.skipIf(!IT)('google', () => {
+describe.skipIf(!has('gcs') && !has('bigquery'))('google', () => {
   const saved = { ...process.env }
   let dir: string
   beforeAll(async () => {
@@ -190,13 +194,13 @@ describe.skipIf(!IT)('google', () => {
     process.env.BIGQUERY_EMULATOR_HOST = 'http://localhost:59050'
     process.env.GOOGLE_CLOUD_PROJECT = 'it-project'
     dir = await mkdtemp(join(tmpdir(), 'anode-gcs-'))
-    await fetch('http://localhost:54443/storage/v1/b?project=it-project', {
+    if (has('gcs')) await fetch('http://localhost:54443/storage/v1/b?project=it-project', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: `it-bucket-${RUN}` }),
     })
   })
   afterAll(async () => { process.env = saved; await rm(dir, { recursive: true, force: true }) })
 
-  it('GCS: upload, list, exists, download, delete by prefix', async () => {
+  it.skipIf(!has('gcs'))('GCS: upload, list, exists, download, delete by prefix', async () => {
     const bucket = `it-bucket-${RUN}`
     const { run } = ctxFor()
     const src = join(dir, 'in.csv')
@@ -219,7 +223,7 @@ describe.skipIf(!IT)('google', () => {
     await expect(run('gcs.delete', { bucket })).rejects.toThrow(/exactly one of objects or a non-empty prefix/)
   })
 
-  it('BigQuery: query rows typed by schema; check fails on a falsy value', async () => {
+  it.skipIf(!has('bigquery'))('BigQuery: query rows typed by schema; check fails on a falsy value', async () => {
     const { run, pushed } = ctxFor()
     expect(await run('bigquery.job', { sql: "SELECT 1 AS n, 'a' AS s, TRUE AS ok" })).toEqual([{ n: 1, s: 'a', ok: true }])
     expect(pushed.return_value).toEqual([{ n: 1, s: 'a', ok: true }])
@@ -228,7 +232,7 @@ describe.skipIf(!IT)('google', () => {
   }, 60_000)
 })
 
-describe.skipIf(!IT)('smtp', () => {
+describe.skipIf(!has('mailpit'))('smtp', () => {
   it('sends text and html with attachments; recipients may be a comma-separated string', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'anode-mail-'))
     const file = join(dir, 'report.txt')

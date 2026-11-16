@@ -1,10 +1,12 @@
 # Services for the built-in provider integration tests (src/providers/builtin/__tests__/integration.test.ts).
 #
-#   docker compose -f docker-compose.providers-test.yml up -d
-#   PROVIDERS_IT=1 npx vitest run src/providers
-#   docker compose -f docker-compose.providers-test.yml down
+#   docker-compose -f docker-compose.providers-test.yml up -d
+#   npx vitest run src/providers
+#   docker-compose -f docker-compose.providers-test.yml down
 #
-# Without PROVIDERS_IT=1 those tests are skipped. Ports are offset (5xxxx) to stay clear of local services.
+# Tests whose services are not reachable are skipped, with a log line saying which and how to start them
+# (PROVIDERS_IT=1 makes an unreachable service a failure, PROVIDERS_IT=0 skips them all).
+# Ports are offset (5xxxx) to stay clear of local services.
 services:
   postgres:
     image: postgres:16-alpine

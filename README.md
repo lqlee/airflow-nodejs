@@ -1090,7 +1090,7 @@ npm test
 ```
 
 Each test suite uses an isolated database (`airflow_test_*`) and cleans up after itself.
-The built-in provider integration tests need their services and `PROVIDERS_IT=1` (see [Built-in providers](#built-in-providers)).
+The built-in provider integration tests run when their services are up and are skipped otherwise (see [Built-in providers](#built-in-providers)).
 
 ---
 
@@ -1958,8 +1958,10 @@ export default {
 
 `GET /connection-types` lists each type's fields, extra keys and driver.
 
-Integration tests against real services: `docker compose -f docker-compose.providers-test.yml up -d`
-then `PROVIDERS_IT=1 npx vitest run src/providers` (skipped otherwise).
+Integration tests against real services: `docker-compose -f docker-compose.providers-test.yml up -d`, then
+`npx vitest run src/providers` (or `npm test`). Tests whose services are not reachable are skipped, with a
+`[providers-it]` log line naming them and the command to start them; `PROVIDERS_IT=1` makes an unreachable
+service a failure (CI), `PROVIDERS_IT=0` skips them all.
 
 ## Providers Ecosystem
 

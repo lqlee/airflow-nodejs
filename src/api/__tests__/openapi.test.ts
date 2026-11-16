@@ -93,7 +93,7 @@ describe('GET /openapi.json', () => {
     expect(doc.paths['/hitl/{runId}/{taskId}'].post.requestBody.content['application/json'].schema.properties.decision.enum).toEqual(['approve', 'reject'])
 
     const runsQuery = doc.paths['/dags/{dagId}/runs'].get.parameters.filter((p: { in: string }) => p.in === 'query').map((p: { name: string }) => p.name)
-    expect(runsQuery).toEqual(['limit', 'cursor', 'tag'])
+    expect(runsQuery).toEqual(['limit', 'cursor', 'tag', 'state'])
     expect(doc.paths['/dags/{dagId}/runs'].get.responses['400']).toBeDefined()
 
     expect(doc.paths['/images/upload'].post.requestBody.content['multipart/form-data']).toBeDefined()

@@ -3,6 +3,9 @@ import { ObjectId } from 'mongodb'
 import { buildEventFilter, isEventType, EVENT_TYPES, type EventType } from '../../events/index.js'
 
 export async function eventLogsRoutes(app: FastifyInstance): Promise<void> {
+  // GET /event-logs/types — the event types the log records (for filter pickers)
+  app.get('/event-logs/types', async (_req, reply) => reply.send({ items: EVENT_TYPES }))
+
   /**
    * GET /event-logs — paginated audit log
    *

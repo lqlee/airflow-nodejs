@@ -313,3 +313,32 @@ export async function createRun(db: Db, dag: DagDefinition, opts: CreateRunOptio
 
   return runId
 }
+
+export const RUN_STATES = ['queued', 'running', 'success', 'failed', 'cancelled'] as const satisfies readonly DagRun['state'][]
+
+/** Values accepted by GET /dags?last_run_state= — a run state, or `none` for Dags that never ran. */
+export const LAST_RUN_STATES = [...RUN_STATES, 'none'] as const
+
+/** The newest run of a Dag, as shown on its card and used by the Dag list's last-run filter. */
+export interface LastRun {
+  run_id: string
+  state: DagRun['state']
+  created_at: Date
+  logical_date: Date | null
+}
+
+/**
+ * Newest run per Dag. One indexed lookup per Dag (dag_id, created_at) rather than an aggregation:
+ * the Dag list is polled, and a $sort/$group over dag_runs would read every run on Spanner.
+ */
+export async function getLatestRuns(db: Db, dagIds: string[]): Promise<Map<string, LastRun>> {
+  const runs = await Promise.all(dagIds.map(dagId => db.collection<DagRun>('dag_runs').findOne(
+    { dag_id: dagId },
+    { sort: { created_at: -1, _id: -1 }, projection: { state: 1, created_at: 1, logical_date: 1 } },
+  )))
+  const latest = new Map<string, LastRun>()
+  runs.forEach((r, i) => {
+    if (r) latest.set(dagIds[i], { run_id: r._id.toString(), state: r.state, created_at: r.created_at, logical_date: r.logical_date ?? null })
+  })
+  return latest
+}

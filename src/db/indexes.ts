@@ -8,6 +8,7 @@ export async function ensureIndexes(db: Db): Promise<void> {
     { key: { dag_id: 1, tags: 1, created_at: -1 } },  // tag filter + sort
     { key: { dag_id: 1, ordering_date: -1 } },        // depends_on_past previous-run lookup (every claim)
     { key: { dag_id: 1, logical_date: -1 } },         // catch-up baseline + duplicate check (every tick)
+    { key: { dag_id: 1, created_at: -1 } },           // run list + latest run per Dag (Dag list, polled)
   ])
 
   // task_instances: claim query (state + dag_run_id) + dependency checks + sensor poke gate

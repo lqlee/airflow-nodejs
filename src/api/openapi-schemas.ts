@@ -7,6 +7,7 @@
  */
 import { TI_STATES, TI_SETTABLE } from '../scheduler/states.js'
 import { EVENT_TYPES } from '../events/index.js'
+import { LAST_RUN_STATES, RUN_STATES } from '../scheduler/runs.js'
 
 export type JsonSchema = Record<string, unknown>
 
@@ -54,7 +55,15 @@ export const OPERATION_DOCS: Record<string, OperationDoc> = {
   },
   'GET /execution/v1/task': { summary: 'Execution API: the task’s Dag file name and run-function source' },
   'POST /execution/v1/token/refresh': { summary: 'Execution API: a fresh task token for the same running try', noBody: true },
-  'GET /dags': { summary: 'List Dags', query: { tag: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }], description: 'Only Dags with this tag (repeatable)' } } },
+  'GET /dags': {
+    summary: 'List Dags with their newest run',
+    query: {
+      tag: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }], description: 'Only Dags with this tag (repeatable)' },
+      search: str('Case-insensitive substring of the Dag id, owner or a tag'),
+      paused: { type: 'string', enum: ['true', 'false'], description: 'Only paused / active Dags' },
+      last_run_state: { type: 'string', enum: [...LAST_RUN_STATES], description: 'Newest run in this state; none = never run' },
+    },
+  },
   'POST /dags/:dagId/trigger': {
     summary: 'Trigger a manual run (conf is validated against the Dag params; defaults are merged in)',
     body: obj({ conf: { type: 'object', additionalProperties: true }, tags: { type: 'array', items: { type: 'string' } }, note: str() }),
@@ -67,7 +76,7 @@ export const OPERATION_DOCS: Record<string, OperationDoc> = {
   },
   'GET /dags/:dagId/stats': { query: { limit: int('Number of recent runs to aggregate') } },
   'GET /dags/:dagId/source': { query: { version: str('Dag version hash; latest when omitted') } },
-  'GET /dags/:dagId/runs': { summary: 'List runs, newest first', query: { ...page, tag: str('Only runs with this tag') } },
+  'GET /dags/:dagId/runs': { summary: 'List runs, newest first', query: { ...page, tag: str('Only runs with this tag'), state: { type: 'string', enum: [...RUN_STATES], description: 'Only runs in this state' } } },
 
   // ── Runs, task instances, XCom ──
   'POST /dag-runs/:runId/cancel': { summary: 'Cancel a run and its unfinished tasks', noBody: true },
@@ -142,6 +151,8 @@ export const OPERATION_DOCS: Record<string, OperationDoc> = {
   'GET /deadlines': { query: { dag_id: str(), dag_run_id: str(), missed: { type: 'string', enum: ['true', 'false'], description: 'Only missed (true) or pending (false) deadlines' }, limit: int() } },
   'GET /datasets': { query: { uri: str(), limit: int() } },
   'GET /dataset-aliases': { query: { alias: str() } },
+  'GET /lineage': { summary: 'Dataset lineage graph', query: { dag_id: str('Only what is upstream or downstream of this Dag'), days: int('Days of runtime dataset events to include (default 30)') } },
+  'GET /event-logs/types': { summary: 'Event types recorded in the event log' },
   'GET /dag-warnings': { query: { warning_type: str() } },
   'GET /event-logs': { query: { dag_id: str(), dag_run_id: str(), task_id: str(), event_type: { type: 'string', enum: [...EVENT_TYPES] }, ...page } },
 }

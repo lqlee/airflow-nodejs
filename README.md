@@ -230,12 +230,12 @@ With a cron `schedule` as well, the Dag runs on either.
 
 ```
 GET  /health                                   server status + worker pool stats
-GET  /dags                                     list all loaded dags
+GET  /dags                                     loaded dags + newest run (?search= ?tag= ?paused= ?last_run_state=)
 GET  /dags/:dagId                              dag detail + task graph
 GET  /dags/:dagId/tasks                        task metadata (retries, pool, sensor flags)
 POST /dags/:dagId/trigger                      manually trigger a run
 POST /dags/:dagId/pause | /resume              pause/resume scheduled execution
-GET  /dags/:dagId/runs                         recent runs (?tag= ?cursor= ?limit=)
+GET  /dags/:dagId/runs                         recent runs (?state= ?tag= ?cursor= ?limit=)
 GET  /dags/:dagId/stats                        run statistics + duration histogram
 GET  /dags/:dagId/versions                     version history (dag source hash)
 GET  /dags/:dagId/source?version=              source code snapshot
@@ -300,9 +300,11 @@ GET  /pools/:name | PATCH | DELETE             get / update / delete pool
 GET  /deadlines                                deadline alerts (?dag_id= ?dag_run_id= ?missed=)
 GET  /datasets                                 dataset events (?uri= ?limit=)
 GET  /dataset-aliases                          datasets attached to each alias (?alias=)
+GET  /lineage                                  Dag ↔ dataset ↔ alias graph, layered (?dag_id= ?days=)
 GET  /sla-alerts                               SLA breach alerts (?unacked=true)
 POST /sla-alerts/:alertId/ack                  acknowledge alert
 GET  /event-logs                               audit trail (?dag_id= ?event_type= ?cursor=)
+GET  /event-logs/types                         event types (for filter pickers)
 GET  /dag-warnings                             soft validation issues (?warning_type=)
 GET  /dag-warnings/:dagId                      warnings for a specific dag
 GET  /import-errors                            dag load failures
@@ -1166,19 +1168,19 @@ Comparison against the Apache Airflow 3.x web UI. Items are grouped by priority.
 
 | Feature | Airflow 3.x | Status |
 |---|---|---|
-| **DAG search / filter bar** | Search + tag + owner filters on DAG list | ❌ not implemented |
+| **DAG search / filter bar** | Search + tag + owner filters on DAG list | ✅ search (id / owner / tag), active / paused, last-run state, tag; kept in the URL |
 | **Grid view** | Per-task color grid across historical runs (run × task heatmap) | ✅ implemented — ⊞ Grid tab in run detail |
 | **Task instance actions** | Re-run, clear, mark success/failed per task | ✅ task panel: clear (downstream / upstream / failed only), mark success / failed / skipped |
 | **Run clear / re-run** | Clear whole run or subset of tasks | ✅ re-run, clear failed, mark run success / failed |
-| **Last run badge on DAG card** | Colored last-run state badge directly on each DAG card | ❌ shown only inside runs list |
-| **DAG tags display** | Tags shown on DAG card, filterable | ❌ stored in DB, not shown in UI |
+| **Last run badge on DAG card** | Colored last-run state badge directly on each DAG card | ✅ state + age on each card |
+| **DAG tags display** | Tags shown on DAG card, filterable | ✅ tag chips on the card; click to filter |
 
 ### 🟡 Medium value
 
 | Feature | Airflow 3.x | Status |
 |---|---|---|
-| **Event log page** | Searchable audit log of all Airflow events | ❌ API exists (`/event-logs`), no UI page |
-| **Dataset/Asset lineage view** | Visual dependency graph across datasets | ❌ API exists (`/datasets`), no UI |
+| **Event log page** | Searchable audit log of all Airflow events | ✅ 📜 in the header: filter by Dag / event type / task, open the run |
+| **Dataset/Asset lineage view** | Visual dependency graph across datasets | ✅ 🧬 in the header or on a Dag card: declared and runtime edges, aliases, last event per dataset |
 | **DAG code viewer** | Show raw DAG source file in UI | ❌ not exposed |
 | **Calendar view** | Run frequency heatmap calendar per DAG | ✅ implemented — 📅 collapsible below runs table |
 | **Gantt chart** | Task duration Gantt chart per run | ✅ implemented — ▬ Gantt tab in run detail |

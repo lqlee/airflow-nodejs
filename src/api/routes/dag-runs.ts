@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { ObjectId } from 'mongodb'
 import { getTaskLogs } from '../../logs/index.js'
 import { cancelRun } from '../../scheduler/index.js'
+import { RUN_STATES } from '../../scheduler/runs.js'
 import { TI_STATES } from '../../scheduler/states.js'
 import { xcomPush } from '../../xcom/index.js'
 
@@ -292,11 +293,15 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
   )
 
   // GET /dags/:dagId/runs — list recent runs for a dag
-  // Query params: limit, cursor, tag (exact single-tag filter)
+  // Query params: limit, cursor, tag (exact single-tag filter), state (run state)
   app.get<{
     Params: { dagId: string }
-    Querystring: { limit?: string; cursor?: string; tag?: string }
+    Querystring: { limit?: string; cursor?: string; tag?: string; state?: string }
   }>('/dags/:dagId/runs', async (req, reply) => {
+    const state = req.query.state
+    if (state !== undefined && !(RUN_STATES as readonly string[]).includes(state)) {
+      return reply.status(400).send({ error: `"state" must be one of: ${RUN_STATES.join(', ')}` })
+    }
     const db = app.mongo
     const rawLimit = parseInt(req.query.limit ?? '20', 10)
     const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 20
@@ -309,6 +314,7 @@ export async function dagRunsRoutes(app: FastifyInstance): Promise<void> {
     if (tag) {
       filter['tags'] = tag  // MongoDB matches docs where tags array contains this value
     }
+    if (state) filter['state'] = state
 
     if (cursor) {
       if (!ObjectId.isValid(cursor))

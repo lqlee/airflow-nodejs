@@ -141,3 +141,6 @@ border-radius:4px; pointer-events:none; z-index:10; border:1px solid #4a5568; }
 .login-sso { width:100%; }
 .login-or { color:#718096; font-size:12px; text-align:center; margin:16px 0 10px; }
 .user-badge { font-size:12px; color:#a0aec0; background:#2d3748; padding:3px 10px; border-radius:12px; white-space:nowrap; }
+.last-run { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #718096; margin-bottom: 8px; }
+.tag-chip { font-size: 10px; background: #2d3748; color: #a0aec0; padding: 1px 7px; border-radius: 10px; border: 1px solid #4a5568; cursor: pointer; }
+.tag-chip:hover, .tag-chip.active { border-color: #3182ce; color: #90cdf4; }

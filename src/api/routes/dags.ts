@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { ObjectId } from 'mongodb'
 import { listDags, getDag } from '../../dag/registry.js'
-import { createRun } from '../../scheduler/runs.js'
+import { createRun, getLatestRuns, LAST_RUN_STATES } from '../../scheduler/runs.js'
 import { advanceRun } from '../../scheduler/index.js'
 import { pauseDag, resumeDag, isDagPaused, getPausedDagIds } from '../../dag/pause.js'
 import { getDagStats } from '../../stats/index.js'
@@ -25,23 +25,44 @@ function datasetFields(d: DagDefinition) {
 }
 
 export async function dagsRoutes(app: FastifyInstance): Promise<void> {
-  // GET /dags — list all registered dags with pause state
-  // Optional ?tag=a&tag=b — Dags carrying ALL the given tags (Dag-level tags, not run tags)
-  app.get<{ Querystring: { tag?: string | string[] } }>('/dags', async (req, reply) => {
+  // GET /dags — list all registered dags with pause state and their newest run
+  // Filters (all optional, ANDed):
+  //   ?tag=a&tag=b          Dags carrying ALL the given tags (Dag-level tags, not run tags)
+  //   ?search=sales         case-insensitive substring of the Dag id, owner or a tag
+  //   ?paused=true|false    paused / active Dags only
+  //   ?last_run_state=failed  newest run in this state; `none` = never run
+  app.get<{ Querystring: { tag?: string | string[]; search?: string; paused?: string; last_run_state?: string } }>('/dags', async (req, reply) => {
+    const { search, paused: pausedParam, last_run_state: lastRunState } = req.query
+    if (pausedParam !== undefined && pausedParam !== 'true' && pausedParam !== 'false') {
+      return reply.status(400).send({ error: '"paused" must be true or false' })
+    }
+    if (lastRunState !== undefined && !(LAST_RUN_STATES as readonly string[]).includes(lastRunState)) {
+      return reply.status(400).send({ error: `"last_run_state" must be one of: ${LAST_RUN_STATES.join(', ')}` })
+    }
     const db = app.mongo
     const paused = await getPausedDagIds(db)
     const wanted = req.query.tag === undefined ? [] : [req.query.tag].flat()
-    const dags = listDags().filter(d => wanted.every(t => (d.tags ?? []).includes(t))).map(d => ({
-      id: d.id,
-      schedule: d.schedule,
-      schedule_mode: d.schedule ? (d.scheduleMode ?? 'trigger') : null,
-      tags: d.tags ?? [],
-      owner: d.owner ?? null,
-      ...datasetFields(d),
-      outlets: d.outlets ?? [],
-      tasks: Object.keys(d.tasks),
-      is_paused: paused.has(d.id),
-    }))
+    const needle = search?.trim().toLowerCase() ?? ''
+    const matches = (d: DagDefinition) =>
+      wanted.every(t => (d.tags ?? []).includes(t)) &&
+      (pausedParam === undefined || paused.has(d.id) === (pausedParam === 'true')) &&
+      (!needle || [d.id, d.owner ?? '', ...(d.tags ?? [])].some(v => v.toLowerCase().includes(needle)))
+    const selected = listDags().filter(matches)
+    const lastRuns = await getLatestRuns(db, selected.map(d => d.id))
+    const dags = selected
+      .filter(d => lastRunState === undefined || (lastRuns.get(d.id)?.state ?? 'none') === lastRunState)
+      .map(d => ({
+        id: d.id,
+        schedule: d.schedule,
+        schedule_mode: d.schedule ? (d.scheduleMode ?? 'trigger') : null,
+        tags: d.tags ?? [],
+        owner: d.owner ?? null,
+        ...datasetFields(d),
+        outlets: d.outlets ?? [],
+        tasks: Object.keys(d.tasks),
+        is_paused: paused.has(d.id),
+        last_run: lastRuns.get(d.id) ?? null,
+      }))
     return reply.send(dags)
   })
 

@@ -379,7 +379,7 @@ function SlaPanel({ alerts, onAck, onClose }) {
 }
 
 // ── Dag Cards ─────────────────────────────────────────────────────────
-function DagCard({ dag, onTrigger, onSelect, onTogglePause, selected }) {
+function DagCard({ dag, onTrigger, onSelect, onTogglePause, onTagClick, onLineage, selected }) {
   const [triggering, setTriggering] = useState(false);
   const [toggling, setToggling] = useState(false);
   const [showTriggerForm, setShowTriggerForm] = useState(false);
@@ -425,6 +425,11 @@ function DagCard({ dag, onTrigger, onSelect, onTogglePause, selected }) {
         {dag.id}
         {dag.is_paused && <span className="paused-badge">paused</span>}
       </h3>
+      <div className="last-run" title={dag.last_run ? `Last run ${dag.last_run.run_id} — ${new Date(dag.last_run.created_at).toLocaleString()}` : undefined}>
+        {dag.last_run
+          ? <>{statusBadge(dag.last_run.state)} <span>{timeAgo(dag.last_run.created_at)}</span></>
+          : <span style={{color:'#4a5568'}}>never run</span>}
+      </div>
       <div className="dag-meta">
         {dag.datasets?.length > 0
           ? <span title={`Consumes: ${dag.dataset_condition_text || dag.datasets.join(' & ')}`}>
@@ -437,6 +442,11 @@ function DagCard({ dag, onTrigger, onSelect, onTogglePause, selected }) {
           </span>
         )}
       </div>
+      {dag.tags?.length > 0 && (
+        <div style={{display:'flex',gap:4,flexWrap:'wrap',marginBottom:8}}>
+          {dag.tags.map(t => <span key={t} className="tag-chip" title={`Show Dags tagged ${t}`} onClick={() => onTagClick(t)}>#{t}</span>)}
+        </div>
+      )}
       <div className="tasks-list">
         {dag.tasks.map(t => <span key={t}>{t}</span>)}
       </div>
@@ -456,6 +466,10 @@ function DagCard({ dag, onTrigger, onSelect, onTogglePause, selected }) {
           onClick={() => onSelect(dag.id)}>
           {selected ? 'Hide runs' : 'View runs'}
         </button>
+        {(dag.datasets?.length > 0 || dag.outlets?.length > 0) && (
+          <button className="btn btn-sm" style={{background:'#1a2f1a',color:'#68d391'}} title="Dataset lineage of this Dag"
+            onClick={() => onLineage(dag.id)}>🧬 Lineage</button>
+        )}
       </div>
       {showTriggerForm && (
         <div style={{marginTop:8,padding:10,background:'#1a2130',borderRadius:6,border:'1px solid #2d3748'}}>
@@ -1440,16 +1454,17 @@ function RunDetail({ runId, onClose }) {
 // ── Runs Table ────────────────────────────────────────────────────────
 function RunsTable({ dagId, onSelectRun }) {
   const [runs, setRuns] = useState([]);
+  const [stateFilter, setStateFilter] = useState('');
   const [nextCursor, setNextCursor] = useState(null);
   const [loadingMore, setLoadingMore] = useState(false);
 
   const fetchPage = useCallback((cursor = null, replace = true) => {
-    const url = `${BASE}/dags/${dagId}/runs?limit=20${cursor ? `&cursor=${cursor}` : ''}`;
+    const url = `${BASE}/dags/${dagId}/runs?limit=20${stateFilter ? `&state=${stateFilter}` : ''}${cursor ? `&cursor=${cursor}` : ''}`;
     return apiFetch(url).then(r => r.json()).then(data => {
       setRuns(prev => replace ? (data.items ?? []) : [...prev, ...(data.items ?? [])]);
       setNextCursor(data.next_cursor ?? null);
     }).catch(() => {});
-  }, [dagId]);
+  }, [dagId, stateFilter]);
 
   // Poll first page every 3s (replaces current view to show new runs)
   useInterval(() => fetchPage(null, true), 3000);
@@ -1461,9 +1476,16 @@ function RunsTable({ dagId, onSelectRun }) {
     setLoadingMore(false);
   };
 
-  if (!runs.length) return <div className="empty">No runs yet</div>;
+  const filter = (
+    <select value={stateFilter} onChange={e => setStateFilter(e.target.value)} aria-label="Run state" style={{...FILTER_INPUT,marginBottom:8}}>
+      <option value="">All states</option>
+      {LAST_RUN_OPTIONS.filter(s => s !== 'none').map(s => <option key={s} value={s}>{s}</option>)}
+    </select>
+  );
+  if (!runs.length) return <>{filter}<div className="empty">{stateFilter ? `No ${stateFilter} runs` : 'No runs yet'}</div></>;
   return (
     <>
+      {filter}
       <table className="runs-table">
         <thead><tr>
           <th>Run ID</th><th>State</th><th>Tags</th><th>Version</th><th>Logical Date</th><th>Created</th><th></th>
@@ -1840,6 +1862,276 @@ function ConnectionsPanel({ onClose }) {
   );
 }
 
+// ── Relative time ─────────────────────────────────────────────────────
+function timeAgo(date) {
+  const s = Math.round((Date.now() - new Date(date).getTime()) / 1000);
+  if (s < 60) return `${Math.max(s, 0)}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+/** `value`, updated only after it stopped changing for `ms` (typing in a filter box). */
+function useDebounced(value, ms) {
+  const [v, setV] = useState(value);
+  useEffect(() => { const id = setTimeout(() => setV(value), ms); return () => clearTimeout(id); }, [value, ms]);
+  return v;
+}
+
+// ── Dag filters (kept in the URL so a filtered view can be shared or reloaded) ──
+const FILTER_KEYS = ['search', 'paused', 'last_run_state', 'tag'];
+const LAST_RUN_OPTIONS = ['success', 'failed', 'running', 'queued', 'cancelled', 'none'];
+
+function readFilters() {
+  const q = new URLSearchParams(window.location.search);
+  return Object.fromEntries(FILTER_KEYS.map(k => [k, q.get(k) ?? '']));
+}
+
+function writeFilters(filters) {
+  const q = new URLSearchParams(window.location.search);
+  FILTER_KEYS.forEach(k => { if (filters[k]) q.set(k, filters[k]); else q.delete(k); });
+  const qs = q.toString();
+  window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
+}
+
+function dagsQuery(filters) {
+  const q = new URLSearchParams();
+  FILTER_KEYS.forEach(k => { if (filters[k]) q.set(k, k === 'search' ? filters[k].trim() : filters[k]); });
+  const qs = q.toString();
+  return qs ? `?${qs}` : '';
+}
+
+const FILTER_INPUT = {background:'#0f1117',border:'1px solid #2d3748',borderRadius:4,padding:'5px 8px',color:'#e2e8f0',fontSize:12};
+
+function DagFilters({ filters, onChange }) {
+  const set = (k, v) => onChange({ ...filters, [k]: v });
+  const active = FILTER_KEYS.some(k => filters[k]);
+  return (
+    <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:12}}>
+      <input type="search" value={filters.search} onChange={e => set('search', e.target.value)}
+        placeholder="Search Dag id, owner or tag…" aria-label="Search Dags" style={{...FILTER_INPUT,minWidth:240}} />
+      <select value={filters.paused} onChange={e => set('paused', e.target.value)} aria-label="Pause state" style={FILTER_INPUT}>
+        <option value="">All Dags</option>
+        <option value="false">Active</option>
+        <option value="true">Paused</option>
+      </select>
+      <select value={filters.last_run_state} onChange={e => set('last_run_state', e.target.value)} aria-label="Last run state" style={FILTER_INPUT}>
+        <option value="">Any last run</option>
+        {LAST_RUN_OPTIONS.map(s => <option key={s} value={s}>{s === 'none' ? 'never run' : `last run ${s}`}</option>)}
+      </select>
+      {filters.tag && (
+        <span className="tag-chip active" title="Remove tag filter" onClick={() => set('tag', '')}>#{filters.tag} ✕</span>
+      )}
+      {active && (
+        <button className="refresh-btn" onClick={() => onChange(Object.fromEntries(FILTER_KEYS.map(k => [k, ''])))}>Clear filters</button>
+      )}
+    </div>
+  );
+}
+
+// ── Dataset lineage ───────────────────────────────────────────────────
+const LINEAGE_STYLE = {
+  dag:     { fill: '#1a2744', stroke: '#3182ce', text: '#e2e8f0', icon: '◆', rx: 6 },
+  dataset: { fill: '#1a2f1a', stroke: '#68d391', text: '#c6f6d5', icon: '▤', rx: 17 },
+  alias:   { fill: '#2f1a2f', stroke: '#d6bcfa', text: '#e9d8fd', icon: '⇢', rx: 17, dash: '4 3' },
+};
+const RUN_STATE_COLOR = { success: '#68d391', failed: '#fc8181', running: '#63b3ed', queued: '#a0aec0', cancelled: '#718096' };
+
+function LineageGraph({ lineage, lastRuns, selected, onSelect }) {
+  const W = 180, H = 34, GAP_X = 80, GAP_Y = 14, PAD = 16;
+  const pos = {};
+  const perLayer = {};
+  lineage.nodes.forEach(n => {
+    const row = (perLayer[n.layer] = (perLayer[n.layer] ?? 0) + 1) - 1;
+    pos[n.id] = { x: PAD + n.layer * (W + GAP_X), y: PAD + row * (H + GAP_Y) };
+  });
+  const layers = Math.max(0, ...lineage.nodes.map(n => n.layer)) + 1;
+  const rows = Math.max(1, ...Object.values(perLayer));
+  const width = PAD * 2 + layers * W + (layers - 1) * GAP_X;
+  const height = PAD * 2 + rows * H + (rows - 1) * GAP_Y;
+  const short = (s) => s.length > 24 ? `${s.slice(0, 23)}…` : s;
+
+  return (
+    <div style={{overflowX:'auto',background:'#0f1117',border:'1px solid #2d3748',borderRadius:6}}>
+      <svg width={width} height={height} role="img" aria-label="Dataset lineage">
+        <defs>
+          <marker id="lineage-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="#4a5568" />
+          </marker>
+        </defs>
+        {lineage.edges.map(e => {
+          const a = pos[e.from], b = pos[e.to];
+          if (!a || !b) return null;
+          const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2, mid = (x1 + x2) / 2;
+          const hot = selected && (e.from === selected || e.to === selected);
+          return (
+            <path key={`${e.from}>${e.to}`} d={`M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`}
+              fill="none" stroke={hot ? '#90cdf4' : '#4a5568'} strokeWidth={hot ? 2 : 1.2}
+              strokeDasharray={e.runtime ? '5 4' : undefined} markerEnd="url(#lineage-arrow)">
+              <title>{`${e.kind}${e.runtime ? ' (seen at runtime)' : ''}`}</title>
+            </path>
+          );
+        })}
+        {lineage.nodes.map(n => {
+          const st = LINEAGE_STYLE[n.kind], p = pos[n.id];
+          const run = n.kind === 'dag' ? lastRuns[n.name] : null;
+          return (
+            <g key={n.id} transform={`translate(${p.x},${p.y})`} style={{cursor:'pointer'}} onClick={() => onSelect(n)}>
+              <title>{n.name}</title>
+              <rect width={W} height={H} rx={st.rx} fill={st.fill} stroke={selected === n.id ? '#f6e05e' : st.stroke}
+                strokeWidth={selected === n.id ? 2 : 1} strokeDasharray={st.dash} />
+              <text x={12} y={H / 2 + 4} fill={st.text} fontSize="11" fontFamily="monospace">{st.icon} {short(n.name)}</text>
+              {run && <circle cx={W - 12} cy={H / 2} r={4} fill={RUN_STATE_COLOR[run.state] ?? '#a0aec0'}><title>{`last run ${run.state}`}</title></circle>}
+              {n.kind === 'dataset' && !n.last_event && <text x={W - 16} y={H / 2 + 4} fill="#718096" fontSize="10"><title>never produced</title>○</text>}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function LineagePanel({ dags, focusDagId, onFocus, onSelectDag, onClose }) {
+  const [lineage, setLineage] = useState(null);
+  const [error, setError] = useState('');
+  const [selected, setSelected] = useState(null);
+
+  const load = useCallback(() => {
+    const url = `${BASE}/lineage${focusDagId ? `?dag_id=${encodeURIComponent(focusDagId)}` : ''}`;
+    return apiFetch(url).then(async r => {
+      const body = await r.json();
+      if (!r.ok) { setError(body.error ?? 'Failed to load lineage'); return; }
+      setError(''); setLineage(body);
+    }).catch(() => setError('Failed to load lineage'));
+  }, [focusDagId]);
+  useInterval(load, 15000);
+
+  const lastRuns = Object.fromEntries(dags.filter(d => d.last_run).map(d => [d.id, d.last_run]));
+  const sel = lineage?.nodes.find(n => n.id === selected?.id) ?? null;
+  const neighbours = (dir) => !sel ? [] : lineage.edges
+    .filter(e => (dir === 'in' ? e.to : e.from) === sel.id)
+    .map(e => lineage.nodes.find(n => n.id === (dir === 'in' ? e.from : e.to)))
+    .filter(Boolean);
+
+  return (
+    <div className="keys-panel">
+      <h4>
+        🧬 Dataset lineage {focusDagId && <span className="tag-chip active" onClick={() => onFocus(null)} title="Show all Dags">{focusDagId} ✕</span>}
+        <span style={{flex:1}} />
+        <span style={{fontSize:10,color:'#718096',fontWeight:400}}>◆ Dag · ▤ dataset · ⇢ alias · dashed = seen at runtime</span>
+        <button className="log-btn" onClick={load}>↻</button>
+        <button className="log-btn" onClick={onClose}>✕</button>
+      </h4>
+      {error && <div className="error-msg">{error}</div>}
+      {!lineage && !error && <div className="empty">Loading…</div>}
+      {lineage && lineage.edges.length === 0 && <div className="empty">No Dag produces or consumes datasets{focusDagId ? ` connected to ${focusDagId}` : ''}.</div>}
+      {lineage && lineage.edges.length > 0 && (
+        <LineageGraph lineage={lineage} lastRuns={lastRuns} selected={sel?.id} onSelect={n => setSelected(prev => prev?.id === n.id ? null : n)} />
+      )}
+      {sel && (
+        <div style={{marginTop:10,fontSize:12,color:'#a0aec0',display:'grid',gap:4}}>
+          <div><strong style={{color:'#e2e8f0',fontFamily:'monospace'}}>{sel.name}</strong> <span style={{color:'#718096'}}>({sel.kind})</span></div>
+          {sel.kind === 'dataset' && (
+            <div>Last event: {sel.last_event
+              ? <>{new Date(sel.last_event.emitted_at).toLocaleString()} by <code>{sel.last_event.produced_by}</code> ({timeAgo(sel.last_event.emitted_at)})</>
+              : 'never produced'}</div>
+          )}
+          {neighbours('in').length > 0 && <div>← {neighbours('in').map(n => n.name).join(', ')}</div>}
+          {neighbours('out').length > 0 && <div>→ {neighbours('out').map(n => n.name).join(', ')}</div>}
+          {sel.kind === 'dag' && (
+            <div style={{display:'flex',gap:6}}>
+              <button className="log-btn" onClick={() => onSelectDag(sel.name)}>View runs</button>
+              {focusDagId !== sel.name && <button className="log-btn" onClick={() => onFocus(sel.name)}>Focus lineage</button>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Event log ─────────────────────────────────────────────────────────
+function EventLogPanel({ dags, onOpenRun, onClose }) {
+  const [types, setTypes] = useState([]);
+  const [filters, setFilters] = useState({ dag_id: '', event_type: '', task_id: '' });
+  const [items, setItems] = useState([]);
+  const [nextCursor, setNextCursor] = useState(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    apiFetch(`${BASE}/event-logs/types`).then(r => r.json()).then(b => setTypes(b.items ?? [])).catch(() => {});
+  }, []);
+
+  const query = useDebounced(filters, 300);
+  const fetchPage = useCallback(async (cursor) => {
+    const q = new URLSearchParams({ limit: '50' });
+    Object.entries(query).forEach(([k, v]) => { if (v.trim()) q.set(k, v.trim()); });
+    if (cursor) q.set('cursor', cursor);
+    setLoading(true);
+    try {
+      const r = await apiFetch(`${BASE}/event-logs?${q}`);
+      const body = await r.json();
+      if (!r.ok) { setError(body.error ?? 'Failed to load events'); return; }
+      setError('');
+      setItems(prev => cursor ? [...prev, ...body.items] : body.items);
+      setNextCursor(body.next_cursor);
+    } catch { setError('Failed to load events'); } finally { setLoading(false); }
+  }, [query]);
+
+  useEffect(() => { fetchPage(null); }, [fetchPage]);
+  const set = (k, v) => setFilters(f => ({ ...f, [k]: v }));
+
+  return (
+    <div className="keys-panel">
+      <h4>📜 Event log <span style={{flex:1}} />
+        <button className="log-btn" onClick={() => fetchPage(null)} disabled={loading}>↻</button>
+        <button className="log-btn" onClick={onClose}>✕</button>
+      </h4>
+      <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:10}}>
+        <select value={filters.dag_id} onChange={e => set('dag_id', e.target.value)} aria-label="Dag" style={FILTER_INPUT}>
+          <option value="">All Dags</option>
+          {dags.map(d => <option key={d.id} value={d.id}>{d.id}</option>)}
+        </select>
+        <select value={filters.event_type} onChange={e => set('event_type', e.target.value)} aria-label="Event type" style={FILTER_INPUT}>
+          <option value="">All events</option>
+          {types.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <input value={filters.task_id} onChange={e => set('task_id', e.target.value)} placeholder="task id" aria-label="Task id" style={FILTER_INPUT} />
+      </div>
+      {error && <div className="error-msg">{error}</div>}
+      {!error && items.length === 0 && <div className="empty">{loading ? 'Loading…' : 'No events'}</div>}
+      {items.length > 0 && (
+        <table className="runs-table">
+          <thead><tr><th>When</th><th>Event</th><th>Dag</th><th>Run</th><th>Task</th><th>Details</th></tr></thead>
+          <tbody>
+            {items.map(e => {
+              const details = Object.keys(e.metadata ?? {}).length ? JSON.stringify(e.metadata) : '';
+              return (
+                <tr key={e.id}>
+                  <td style={{color:'#718096',whiteSpace:'nowrap'}} title={new Date(e.created_at).toLocaleString()}>{timeAgo(e.created_at)}</td>
+                  <td><code style={{fontSize:11}}>{e.event_type}</code></td>
+                  <td style={{fontFamily:'monospace',fontSize:11}}>{e.dag_id ?? '—'}</td>
+                  <td>{e.dag_run_id && e.dag_id
+                    ? <button className="log-btn" onClick={() => onOpenRun(e.dag_id, e.dag_run_id)}>{e.dag_run_id.slice(-8)} →</button>
+                    : '—'}</td>
+                  <td style={{fontFamily:'monospace',fontSize:11}}>{e.task_id ? `${e.task_id}${e.map_index != null && e.map_index >= 0 ? `[${e.map_index}]` : ''}` : '—'}</td>
+                  <td style={{fontSize:11,color:'#a0aec0',maxWidth:320,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={details}>{details}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+      {nextCursor && (
+        <div style={{textAlign:'center',marginTop:8}}>
+          <button className="refresh-btn" onClick={() => fetchPage(nextCursor)} disabled={loading}>{loading ? '…' : 'Load more ↓'}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── App ───────────────────────────────────────────────────────────────
 function App() {
   const [dags, setDags] = useState([]);
@@ -1850,6 +2142,10 @@ function App() {
   const [showVars, setShowVars] = useState(false);
   const [showConns, setShowConns] = useState(false);
   const [showImages, setShowImages] = useState(false);
+  const [showEvents, setShowEvents] = useState(false);
+  const [lineageFocus, setLineageFocus] = useState(undefined);   // undefined = hidden, null = all Dags, id = one Dag
+  const [filters, setFilters] = useState(readFilters);
+  const query = useDebounced(filters, 300);
   // null = not checked yet, true = authenticated, false = needs login
   const [authed, setAuthed] = useState(null);
   const [session, setSession] = useState(null);
@@ -1872,7 +2168,8 @@ function App() {
   }, [loadSession]);
 
   const fetchDags = useCallback(() =>
-    apiFetch(`${BASE}/dags`).then(r=>r.json()).then(d=>setDags(Array.isArray(d)?d:(d.items??[]))).catch(()=>{}), []);
+    apiFetch(`${BASE}/dags${dagsQuery(query)}`).then(r=>r.json()).then(d=>setDags(Array.isArray(d)?d:(d.items??[]))).catch(()=>{}), [query]);
+  useEffect(() => { writeFilters(query); }, [query]);
 
   useInterval(fetchDags, 5000);
 
@@ -1887,10 +2184,13 @@ function App() {
 
   // Fetch DAGs immediately when auth state becomes true (after login or on startup)
   useEffect(() => { if (authed === true) fetchDags(); }, [authed]);
+  const filtered = FILTER_KEYS.some(k => query[k]);
 
   const handleTrigger = () => { if (selectedDag) fetchDags(); };
   const handleTogglePause = () => fetchDags();
   const selectDag = (id) => { setSelectedDag(prev => prev === id ? null : id); setSelectedRun(null); };
+  const openDag = (id) => { setSelectedDag(id); setSelectedRun(null); };
+  const openRun = (dagId, runId) => { setSelectedDag(dagId); setSelectedRun(runId); };
 
   const ackAlert = async (id) => {
     await apiFetch(`${BASE}/sla-alerts/${id}/ack`, { method: 'POST' });
@@ -1905,7 +2205,11 @@ function App() {
       <header>
         <h1>✈ Airflow Node</h1>
         <Health />
-        <button className="refresh-btn" style={{marginLeft:'auto'}} onClick={() => setShowVars(v => !v)}
+        <button className="refresh-btn" style={{marginLeft:'auto'}} onClick={() => setLineageFocus(f => f === undefined ? null : undefined)}
+          title="Dataset lineage">🧬</button>
+        <button className="refresh-btn" onClick={() => setShowEvents(v => !v)}
+          title="Event log">📜</button>
+        <button className="refresh-btn" onClick={() => setShowVars(v => !v)}
           title="Variables">📦</button>
         <button className="refresh-btn" onClick={() => setShowConns(v => !v)}
           title="Connections">🔌</button>
@@ -1930,16 +2234,24 @@ function App() {
         {showAlerts && (
           <SlaPanel alerts={alerts} onAck={ackAlert} onClose={() => setShowAlerts(false)} />
         )}
-        <div className="section-title">Dags ({dags.length})</div>
+        {lineageFocus !== undefined && (
+          <LineagePanel dags={dags} focusDagId={lineageFocus} onFocus={setLineageFocus}
+            onSelectDag={openDag} onClose={() => setLineageFocus(undefined)} />
+        )}
+        {showEvents && <EventLogPanel dags={dags} onOpenRun={openRun} onClose={() => setShowEvents(false)} />}
+        <div className="section-title">Dags ({dags.length}{filtered ? ' matching' : ''})</div>
+        <DagFilters filters={filters} onChange={setFilters} />
         <div className="dag-grid">
           {dags.map(d => (
             <DagCard key={d.id} dag={d}
               selected={selectedDag === d.id}
               onTrigger={handleTrigger}
               onTogglePause={handleTogglePause}
+              onTagClick={tag => setFilters(f => ({ ...f, tag }))}
+              onLineage={setLineageFocus}
               onSelect={selectDag} />
           ))}
-          {!dags.length && <div className="empty">No Dags loaded</div>}
+          {!dags.length && <div className="empty">{filtered ? 'No Dags match these filters' : 'No Dags loaded'}</div>}
         </div>
 
         {selectedDag && (

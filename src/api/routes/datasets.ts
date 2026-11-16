@@ -1,5 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { listDatasetEvents, listDatasetAliases } from '../../datasets/index.js'
+import { getLineage } from '../../datasets/lineage.js'
+import { listDags, getDag } from '../../dag/registry.js'
 
 export async function datasetsRoutes(app: FastifyInstance): Promise<void> {
   // GET /datasets — list recent dataset events, optionally filtered by URI
@@ -28,5 +30,16 @@ export async function datasetsRoutes(app: FastifyInstance): Promise<void> {
   // GET /dataset-aliases — datasets attached to each alias at runtime, optionally for one alias
   app.get<{ Querystring: { alias?: string } }>('/dataset-aliases', async (req, reply) => {
     return reply.send(await listDatasetAliases(app.mongo, req.query.alias))
+  })
+
+  // GET /lineage — Dags, datasets and aliases with produce/consume edges, laid out in layers.
+  // ?dag_id= keeps only what is upstream or downstream of that Dag; ?days= how far back runtime
+  // productions (dataset events) are considered (1–365, default 30).
+  app.get<{ Querystring: { dag_id?: string; days?: string } }>('/lineage', async (req, reply) => {
+    const { dag_id: dagId } = req.query
+    if (dagId !== undefined && !getDag(dagId)) return reply.status(404).send({ error: `Dag '${dagId}' not found` })
+    const rawDays = parseInt(req.query.days ?? '30', 10)
+    const sinceDays = Number.isFinite(rawDays) && rawDays > 0 ? Math.min(rawDays, 365) : 30
+    return reply.send(await getLineage(app.mongo, listDags(), { sinceDays, focusDagId: dagId }))
   })
 }

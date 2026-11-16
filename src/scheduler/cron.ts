@@ -4,6 +4,7 @@ import type { DagDefinition } from '../dag/types.js'
 import { getDag } from '../dag/registry.js'
 import { createRun, DuplicateRunError } from './runs.js'
 import { advanceRun } from './index.js'
+import { trackWork } from './pool.js'
 import { isDagPaused } from '../dag/pause.js'
 import { enumerateDates } from './backfill.js'
 import { isLeader } from './lease.js'
@@ -337,7 +338,7 @@ export async function tickTimetables(db: Db, dags: DagDefinition[]): Promise<voi
     const firedAt = new Date()
     try {
       const runId = await createRun(db, dag, { triggerType: 'timetable' })
-      void advanceRun(db, runId)
+      void trackWork(advanceRun(db, runId)).catch(err => console.error(`[timetable] advancing run ${runId} failed: ${(err as Error).message}`))
 
       entry.lastRunAt = firedAt
       entry.runCount += 1

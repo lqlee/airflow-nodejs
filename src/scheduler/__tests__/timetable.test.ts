@@ -23,6 +23,7 @@ import {
   activeTimetableCount,
   getTimetableEntry,
 } from '../cron.js'
+import { drainPool } from '../pool.js'
 
 const MONGO_URL = process.env.MONGO_URL ?? 'mongodb://localhost:27017'
 
@@ -53,9 +54,9 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  // Brief settle to let any void advanceRun() background operations complete
-  // before closing the client, preventing MongoClientClosedError unhandled rejection.
-  await new Promise(r => setTimeout(r, 200))
+  // Timetable runs are advanced in the background: wait for their workers and outcome / log writes
+  // before closing the client — a fixed sleep lost that race on a busy machine (MongoClientClosedError).
+  expect(await drainPool({ timeoutMs: 15_000, pollMs: 25 })).toEqual({ drained: true, remaining: 0 })
   await db.dropDatabase()
   await client.close()
 })

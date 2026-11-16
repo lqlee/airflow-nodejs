@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
-import { drainPool, resetPool, activeWorkers, queueDepth } from '../pool.js'
+import { drainPool, resetPool, activeWorkers, queueDepth, trackWork, pendingWork } from '../pool.js'
 import { setShuttingDown, isShuttingDown, startScheduler, stopScheduler, advanceRun } from '../index.js'
 import { MongoClient, type Db } from 'mongodb'
 import { register, clearRegistry } from '../../dag/registry.js'
@@ -212,5 +212,21 @@ describe('drainPool with real pool counters', () => {
     expect(queueDepth()).toBe(0)
     const result = await drainPool({ timeoutMs: 500, pollMs: 20 })
     expect(result.drained).toBe(true)
+  })
+  it('waits for tracked work (outcome / log writes) that outlives the worker slot', async () => {
+    let finish!: () => void
+    const write = trackWork(new Promise<void>(r => { finish = r }))
+    expect(await drainPool({ timeoutMs: 60, pollMs: 10 })).toEqual({ drained: false, remaining: 1 })
+
+    setTimeout(finish, 30)
+    expect(await drainPool({ timeoutMs: 5_000, pollMs: 10 })).toEqual({ drained: true, remaining: 0 })
+    await write
+  })
+
+  it('stops counting tracked work that fails, and passes the rejection to the caller', async () => {
+    const write = trackWork(Promise.reject(new Error('client was closed')))
+    await expect(write).rejects.toThrow('client was closed')
+    expect(pendingWork()).toBe(0)
+    expect((await drainPool({ timeoutMs: 500, pollMs: 10 })).drained).toBe(true)
   })
 })

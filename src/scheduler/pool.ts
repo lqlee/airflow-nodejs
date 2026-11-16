@@ -26,6 +26,21 @@ export function release(): void {
   }
 }
 
+/**
+ * Work started by task execution that must finish before the database closes: a forked task until its
+ * outcome is written, and fire-and-forget writes such as task log lines. drainPool() waits for it.
+ */
+let pending = 0
+
+export function trackWork<T>(work: Promise<T>): Promise<T> {
+  pending++
+  return work.finally(() => { pending-- })
+}
+
+export function pendingWork(): number {
+  return pending
+}
+
 /** Current active worker count (for monitoring). */
 export function activeWorkers(): number {
   return active
@@ -52,9 +67,9 @@ export function resetPool(): void {
 // ── Drain ─────────────────────────────────────────────────────────────────
 
 export interface DrainResult {
-  /** True if both active and queued reached 0 before timeout. */
+  /** True if active, queued and pending work all reached 0 before timeout. */
   drained: boolean
-  /** Remaining active + queued workers when the function returned. */
+  /** Remaining active + queued workers + pending work when the function returned. */
   remaining: number
 }
 
@@ -67,16 +82,19 @@ export interface DrainOptions {
   getActive?: () => number
   /** Injected queue depth counter for testing. Default: queueDepth. */
   getQueued?: () => number
+  /** Injected pending-work counter for testing. Default: pendingWork. */
+  getPending?: () => number
 }
 
 /**
- * Wait until both active workers and the waiting queue reach zero,
- * or until timeoutMs elapses.
+ * Wait until active workers, the waiting queue and pending work (outcome and task-log writes, see
+ * trackWork) reach zero, or until timeoutMs elapses.
  *
  * This MUST be called before closeDb() on graceful shutdown:
  * - active > 0 → a child process is still running and writing to the DB
  * - queued > 0 → a waiter will acquire() → fork() → write to DB once a slot
- *   frees, even if we stop forking new tasks. Both counters must be zero.
+ *   frees, even if we stop forking new tasks.
+ * - pending > 0 → a finished task's outcome or log lines are still being written.
  *
  * Only relevant in local-fork mode (USE_BULLMQ=false). In BullMQ mode the
  * pool is unused; stopWorker() (Worker.close()) handles its own drain.
@@ -87,17 +105,16 @@ export async function drainPool(opts: DrainOptions = {}): Promise<DrainResult> {
     pollMs = 200,
     getActive = activeWorkers,
     getQueued = queueDepth,
+    getPending = pendingWork,
   } = opts
 
   const deadline = Date.now() + timeoutMs
 
   while (Date.now() < deadline) {
-    const a = getActive()
-    const q = getQueued()
-    if (a === 0 && q === 0) return { drained: true, remaining: 0 }
+    if (getActive() === 0 && getQueued() === 0 && getPending() === 0) return { drained: true, remaining: 0 }
     await new Promise<void>(resolve => setTimeout(resolve, pollMs))
   }
 
-  const remaining = getActive() + getQueued()
+  const remaining = getActive() + getQueued() + getPending()
   return { drained: false, remaining }
 }

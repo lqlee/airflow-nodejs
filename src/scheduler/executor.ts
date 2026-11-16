@@ -4,7 +4,7 @@ import type { Db } from 'mongodb'
 import type { TaskInstance } from './runs.js'
 import { getDag } from '../dag/registry.js'
 import { tiFilter, markSuccess, markFailed, scheduleRetry, computeRetryDelay } from './ti-writes.js'
-import { acquire, release, freeWorkerSlots } from './pool.js'
+import { acquire, release, freeWorkerSlots, trackWork } from './pool.js'
 import { appendLog, parseLevelFromLine } from '../logs/index.js'
 import { enqueueTask } from '../queue/producer.js'
 import { sensorOutcome } from './sensor.js'
@@ -18,6 +18,21 @@ import { serveExecutionApi } from '../execution/ipc.js'
 import { taskScope } from '../execution/scope.js'
 import { renderTemplate, renderArgs, renderEnv, type TemplateContext } from './template.js'
 import { triggerDagRun, checkTriggeredRun, checkExternalTask, validateExternalTask, type WaitResult } from './cross-dag.js'
+
+const logWriteFailed = (err: unknown) => console.error(`[executor] task log write failed: ${(err as Error).message}`)
+
+/**
+ * A child-process listener that writes the task outcome. If a write fails (database down, client closed)
+ * log it and settle the task instead of leaving an unhandled rejection — which would crash the process.
+ */
+function settleOnError<A extends unknown[]>(ti: TaskInstance, done: () => void, fn: (...args: A) => Promise<void>) {
+  return (...args: A): void => {
+    fn(...args).catch((err: unknown) => {
+      console.error(`[executor] ${ti.dag_id}.${ti.task_id}: recording the outcome failed: ${(err as Error).message}`)
+      done()
+    })
+  }
+}
 
 // When REDIS_URL is set, use BullMQ (distributed). Otherwise use local fork.
 const USE_BULLMQ = Boolean(process.env.REDIS_URL)
@@ -118,7 +133,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
   const label = ti.is_sensor ? 'poking' : 'running'
   console.log(`[executor] ${label} ${ti.dag_id}.${ti.task_id} (run: ${ti.dag_run_id})`)
 
-  return new Promise((done) => {
+  return trackWork(new Promise((done) => {
     // No database credentials in the worker: it reaches XCom, connections etc. through us (execution API)
     const child = forkTaskWorker()
     serveExecutionApi(child, db, taskScope(ti))
@@ -148,13 +163,13 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
     const rl_out = createInterface({ input: child.stdout! })
     rl_out.on('line', (line) => {
       process.stdout.write(`${line}\n`)
-      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line, parseLevelFromLine(line) ?? 'info')
+      void trackWork(appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line, parseLevelFromLine(line) ?? 'info').catch(logWriteFailed))
     })
 
     const rl_err = createInterface({ input: child.stderr! })
     rl_err.on('line', (line) => {
       process.stderr.write(`${line}\n`)
-      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line, parseLevelFromLine(line) ?? 'error')
+      void trackWork(appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line, parseLevelFromLine(line) ?? 'error').catch(logWriteFailed))
     })
 
     // Base ctx — includes mapIndex/mapValue for mapped task instances
@@ -173,7 +188,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
       child.send({ type: 'run', fn: taskDef.run!.toString(), ctx: workerCtx })
     }
 
-    child.on('message', async (msg: WorkerDoneMsg) => {
+    child.on('message', settleOnError(ti, done, async (msg: WorkerDoneMsg) => {
       if (msg.type !== 'done') return
       if (timedOut) return
       clearKillTimer()
@@ -239,16 +254,16 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
         }
       }
       done()
-    })
+    }))
 
-    child.on('error', async (err) => {
+    child.on('error', settleOnError(ti, done, async (err) => {
       if (timedOut) return
       clearKillTimer()
       release()
       void recordTry(db, ti, 'failed', new Date(), err.message)
       await markFailed(db, ti, err.message)
       done()
-    })
+    }))
 
     child.on('exit', (code) => {
       if (timedOut) return
@@ -256,7 +271,7 @@ export async function executeTask(db: Db, ti: TaskInstance): Promise<void> {
         console.error(`[executor] worker exited with code ${code} for ${ti.task_id}`)
       }
     })
-  })
+  }))
 }
 
 // ── Shared subprocess runner ───────────────────────────────────────────────────
@@ -293,7 +308,7 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
 
   console.log(`[executor] ${opts.label} ${ti.dag_id}.${ti.task_id}`)
 
-  return new Promise((done) => {
+  return trackWork(new Promise((done) => {
     const child = spawn(opts.binary, opts.args, {
       cwd: opts.cwd ?? process.cwd(),
       env: {
@@ -330,16 +345,16 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
 
     createInterface({ input: child.stdout }).on('line', (line) => {
       process.stdout.write(`${line}\n`)
-      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line, parseLevelFromLine(line) ?? 'info')
+      void trackWork(appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line, parseLevelFromLine(line) ?? 'info').catch(logWriteFailed))
     })
 
     createInterface({ input: child.stderr }).on('line', (line) => {
       process.stderr.write(`${line}\n`)
       stderrLines.push(line)
-      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line, parseLevelFromLine(line) ?? 'error')
+      void trackWork(appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line, parseLevelFromLine(line) ?? 'error').catch(logWriteFailed))
     })
 
-    child.on('error', async (err) => {
+    child.on('error', settleOnError(ti, done, async (err) => {
       if (timedOut) return
       errored = true
       clearKillTimer()
@@ -350,9 +365,9 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
       void recordTry(db, ti, 'failed', new Date(), msg)
       await markFailed(db, ti, msg)
       done()
-    })
+    }))
 
-    child.on('close', async (code) => {
+    child.on('close', settleOnError(ti, done, async (code) => {
       if (timedOut || errored) return   // already handled by error or timeout handler
       clearKillTimer()
       release()
@@ -376,8 +391,8 @@ async function spawnTask(db: Db, ti: TaskInstance, opts: SpawnOpts): Promise<voi
         }
       }
       done()
-    })
-  })
+    }))
+  }))
 }
 
 // ── Container task ────────────────────────────────────────────────────────────
@@ -796,7 +811,7 @@ async function executeRunFn(
   const label = ti.is_sensor ? 'poking' : ti.is_branch ? 'branching' : 'running'
   console.log(`[executor] ${label} ${ti.dag_id}.${ti.task_id} (run: ${ti.dag_run_id})`)
 
-  return new Promise((done) => {
+  return trackWork(new Promise((done) => {
     // No database credentials in the worker: it reaches XCom, connections etc. through us (execution API)
     const child = forkTaskWorker()
     serveExecutionApi(child, db, taskScope(ti))
@@ -823,13 +838,13 @@ async function executeRunFn(
     const rl_out = createInterface({ input: child.stdout! })
     rl_out.on('line', (line) => {
       process.stdout.write(`${line}\n`)
-      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line, parseLevelFromLine(line) ?? 'info')
+      void trackWork(appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stdout', line, parseLevelFromLine(line) ?? 'info').catch(logWriteFailed))
     })
 
     const rl_err = createInterface({ input: child.stderr! })
     rl_err.on('line', (line) => {
       process.stderr.write(`${line}\n`)
-      void appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line, parseLevelFromLine(line) ?? 'error')
+      void trackWork(appendLog(db, ti.dag_run_id, ti.dag_id, ti.task_id, 'stderr', line, parseLevelFromLine(line) ?? 'error').catch(logWriteFailed))
     })
 
     const workerCtx = {
@@ -842,7 +857,7 @@ async function executeRunFn(
 
     child.send({ type: 'run', fn: fn.toString(), ctx: workerCtx })
 
-    child.on('message', async (msg: WorkerDoneMsg) => {
+    child.on('message', settleOnError(ti, done, async (msg: WorkerDoneMsg) => {
       if (msg.type !== 'done') return
       if (timedOut) return
       clearKillTimer()
@@ -867,16 +882,16 @@ async function executeRunFn(
         }
       }
       done()
-    })
+    }))
 
-    child.on('error', async (err) => {
+    child.on('error', settleOnError(ti, done, async (err) => {
       if (timedOut) return
       clearKillTimer()
       release()
       void recordTry(db, ti, 'failed', new Date(), err.message)
       await markFailed(db, ti, err.message)
       done()
-    })
+    }))
 
     child.on('exit', (code) => {
       if (timedOut) return
@@ -884,7 +899,7 @@ async function executeRunFn(
         console.error(`[executor] worker exited with code ${code} for ${ti.task_id}`)
       }
     })
-  })
+  }))
 }
 
 /**
